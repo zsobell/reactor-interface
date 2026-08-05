@@ -1,0 +1,13 @@
+{
+  "lpm_bottom": false,
+  "lpm_top": false,
+  "rpm_bottom": false,
+  "rpm_top": false,
+  "ar_pneumatic": false,
+  "prec1": false,
+  "prec2": false,
+  "loadlock_foreline": false,
+  "main_foreline": false,
+  "main_gate": false,
+  "plasma_ground": false
+}

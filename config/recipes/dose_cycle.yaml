@@ -1,0 +1,19 @@
+name: "Dose / pump cycling"
+notes: >
+  Template for repeated gas dosing under UHV. The numbers here are PLACEHOLDERS -
+  set them from your process, they are not derived from anything.
+
+  `wait_for_pressure` is usually better than a fixed pump time: it waits for the
+  chamber to actually recover rather than assuming how long that takes.
+
+cycles: 10
+
+steps:
+  # prec2 is the currently loaded precursor (TEMAZr). Times are PLACEHOLDERS.
+  # Confirm this is the valve your process actually pulses before relying on it.
+  - {op: dose, valve: prec2, seconds: 0.10}           # PLACEHOLDER timing
+  - {op: wait_for_pressure, below_torr: 1.0e-7, timeout_s: 300}   # PLACEHOLDER
+  - {op: wait, seconds: 5.0}
+
+teardown:
+  - {op: message, text: "cycling complete"}

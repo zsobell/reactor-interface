@@ -1,0 +1,1970 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reactor Interface</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2a323d;
+    --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --hot:#ff7b39;
+    --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+  h1,h2{margin:0;font-weight:600}
+  button{font:inherit;cursor:pointer;border-radius:6px;border:1px solid var(--line);
+         background:var(--panel2);color:var(--fg);padding:7px 12px}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input,select{font:inherit;background:#0d1117;color:var(--fg);
+               border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  input:disabled,select:disabled{opacity:.45}
+  input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+
+  header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;
+         padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--line);
+         flex-wrap:wrap}
+  .badge{font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+         padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .badge.live{background:#0b2f1a;border-color:#1f7a45;color:#56d364}
+  .badge.bad{background:#3d1113;border-color:#8b2c2f;color:#ffb3b0}
+  .spacer{flex:1}
+  .estop{background:#3d1113;border-color:#8b2c2f;color:#ffb3b0;font-weight:600}
+  .estop:hover{border-color:var(--bad)}
+  .hidden{display:none!important}
+
+  /* ---- tabs ------------------------------------------------------------ */
+  .tabs{display:flex;gap:2px;background:#0d1117;border:1px solid var(--line);
+        border-radius:8px;padding:3px}
+  .tabs button{border:1px solid transparent;background:transparent;color:var(--dim);
+               padding:5px 15px;border-radius:6px;font-weight:500;
+               display:flex;align-items:center;gap:6px}
+  .tabs button.active{background:var(--panel2);color:var(--fg);border-color:var(--line)}
+  .tabs button:hover:not(.active):not(:disabled){color:var(--fg);border-color:transparent}
+  .tabdot{width:7px;height:7px;border-radius:50%;background:transparent}
+  .tabdot.on{background:var(--warn);box-shadow:0 0 6px var(--warn)}
+  /* Latest loud event, pinned in the header: the event log lives on the
+     Diagnostics tab, so without this a fill-pressure flag would be invisible
+     from the Run tab. Display only — it never changes reactor behaviour. */
+  .alertchip{max-width:min(46vw,540px);overflow:hidden;text-overflow:ellipsis;
+             white-space:nowrap;font-size:12px;padding:5px 11px;border-radius:6px;
+             cursor:pointer;background:#332701;border:1px solid var(--warn);color:#f0c674}
+  .alertchip.bad{background:#3d1113;border-color:var(--bad);color:#ffb3b0}
+
+  main{padding:14px 16px 16px}
+  .pane{display:grid;gap:14px;align-content:start}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        overflow:hidden;display:flex;flex-direction:column;min-width:0}
+  .card>h2{padding:9px 14px;font-size:12px;letter-spacing:.09em;text-transform:uppercase;
+           color:var(--dim);border-bottom:1px solid var(--line);background:var(--panel2);
+           display:flex;align-items:center;gap:9px;flex:0 0 auto}
+  .card>.body{padding:13px 14px;flex:1;min-width:0}
+  .grow{flex:1}
+
+  .banner{margin:0 16px 4px;padding:11px 14px;border-radius:8px;font-weight:600;
+          background:#3d1113;border:1px solid var(--bad);color:#ffb3b0}
+  .banner.info{background:#0d2440;border-color:#1f6feb;color:#a6d2ff;font-weight:500}
+  .banner ul{margin:6px 0 0;padding-left:20px;font-weight:400}
+
+  .unit{font-size:13px;color:var(--dim);font-weight:400;margin-left:5px}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px}
+  .kv>span:first-child{color:var(--dim);flex:0 0 auto}
+  .kv>span:last-child{font-family:var(--mono);min-width:0;overflow:hidden;
+                      text-overflow:ellipsis;white-space:nowrap}
+  .stale{color:var(--bad)!important}
+
+  /* ---- hero numeric readouts (Run tab) --------------------------------- */
+  .readouts{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:12px}
+  .ro{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+      padding:9px 13px 8px;display:flex;flex-direction:column;gap:1px;min-width:0}
+  .ro .rol{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  .ro .rov{font-family:var(--mono);font-size:26px;font-weight:600;line-height:1.2;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ro .ros{font-size:11px;color:var(--dim);font-family:var(--mono);min-height:16px;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ro.flag{border-color:var(--warn);background:#241d06}
+  .ro.flag .ros{color:var(--warn);font-weight:600}
+  .ro.beam{border-color:var(--hot);background:#1d1108}
+  .ro.beam .ros{color:var(--hot)}
+
+  /* ---- Run tab: run panel left, plots right ---------------------------- */
+  .runrow{display:grid;grid-template-columns:minmax(430px,1fr) minmax(430px,1.02fr);
+          gap:14px;align-items:stretch}
+  /* The run monitor takes whatever height the (taller) run panel leaves, so the
+     two columns always end level; MFC flow keeps its natural height. */
+  .plotcol{display:grid;grid-template-rows:minmax(0,1fr) auto;gap:14px;min-width:0}
+  #monitorCard{min-height:0}
+  /* The canvas is absolutely positioned inside this wrapper on purpose. A
+     flexing canvas feeds its own bitmap `height` attribute - which drawChart()
+     sets from the measured size - back into the row's max-content height, and
+     the panel grows a little every frame. Out of flow, it can't. */
+  .canvasfill{position:relative;flex:1;min-height:240px}
+  .canvasfill>canvas{position:absolute;inset:0;width:100%;height:100%}
+  @media(max-width:1180px){
+    .runrow{grid-template-columns:1fr}
+    .plotcol{grid-template-rows:auto auto}
+    .canvasfill{flex:none;height:clamp(240px,35vh,560px)}
+  }
+
+  /* ---- Hardware tab ---------------------------------------------------- */
+  /* Rows use the default stretch alignment so every card in a row ends at the
+     same height - ragged card bottoms were the main thing wrong with the old
+     single-column-flow layout. */
+  .hwtop{display:grid;grid-template-columns:minmax(380px,1.12fr) minmax(340px,1fr);
+         gap:14px}
+  .hwbottom{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));
+            gap:14px}
+  @media(max-width:1000px){ .hwtop{grid-template-columns:1fr} }
+
+  /* ---- Diagnostics tab ------------------------------------------------- */
+  .diagtop{display:grid;grid-template-columns:minmax(380px,1.15fr) minmax(330px,1fr);
+           gap:14px}
+  .diagcol{display:grid;gap:14px;align-content:start;min-width:0}
+  @media(max-width:1000px){ .diagtop{grid-template-columns:1fr} }
+
+  /* ---- tiles (instruments / gauges / aux / MFCs) ------------------------ */
+  .tilegrid{display:grid;gap:10px}
+  #mfcs{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+  #instruments,#gauges,#aux{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+  .tile{border:1px solid var(--line);border-radius:8px;padding:10px 11px;
+        background:#0d1117;min-width:0}
+  .tile.trip{border-color:var(--bad);background:#2a0f10}
+  .tile .top{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}
+  .tile .name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;
+              white-space:nowrap}
+  .tile .read{font-family:var(--mono);font-size:19px;white-space:nowrap}
+  .bar{height:6px;background:#21262d;border-radius:3px;overflow:hidden;margin:7px 0}
+  .bar>i{display:block;height:100%;background:var(--accent);transition:width .25s}
+  .row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  .row input{width:90px}
+  .src{font-size:10px;padding:2px 6px;border-radius:4px;background:#21262d;
+       color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .rename{padding:1px 6px;font-size:12px;line-height:1.3;opacity:.45;margin-left:6px}
+  .rename:hover{opacity:1;border-color:var(--accent)}
+  .valve .rename{margin-left:auto}
+  .note{font-size:12px;color:var(--dim);margin-top:7px;overflow-wrap:anywhere}
+  .note:empty{display:none}
+
+  /* ---- valves ---------------------------------------------------------- */
+  #valves{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:8px}
+  .valve{display:flex;justify-content:space-between;align-items:center;gap:9px;
+         padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+         background:#0d1117;min-width:0}
+  .valve.open{border-color:var(--hot);background:#241206}
+  .valve.unidentified{opacity:.55;border-style:dashed}
+  .valve .lbl{display:flex;flex-direction:column;min-width:0}
+  .valve .lbl>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .valve .sub{font-size:10.5px;color:var(--dim);font-family:var(--mono);
+              overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .valve button[data-act]{flex:0 0 auto;padding:5px 12px}
+  .bankhdr{grid-column:1/-1;margin:11px 0 1px}
+  .bankhdr:first-child{margin-top:0}
+  .bankname{font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+            color:var(--accent);border-bottom:1px solid var(--line);padding-bottom:4px}
+  .banknote{font-size:11px;color:var(--dim);margin-top:4px}
+  .banknote:empty{display:none}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;
+     letter-spacing:.06em}
+
+  #events{max-height:min(46vh,440px);overflow-y:auto;font-family:var(--mono);font-size:12px}
+  #events div{padding:2px 0;border-bottom:1px solid #1b2027}
+  #events .t{color:var(--dim);margin-right:7px}
+  .k-error,.k-trip{color:var(--bad)} .k-safety,.k-flag{color:var(--warn)}
+  .k-valve{color:var(--hot)} .k-recipe,.k-fill,.k-mfc{color:var(--accent)}
+  .k-flag{font-weight:600}
+
+  /* ---- ALD run panel --------------------------------------------------- */
+  button.primary{background:#193a2a;border-color:#2ea043;color:#7ee787;font-weight:600}
+  button.primary:hover:not(:disabled){border-color:#3fb950}
+  button.mini{padding:3px 8px;font-size:12px}
+  .params{display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:9px}
+  .params label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--dim)}
+  .params label.adv{opacity:.85}
+  .params input{width:100%}
+
+  /* collapsible sub-sections (advanced timing, gas scheduling) */
+  details.sub{border:1px solid var(--line);border-radius:8px;background:#0d1117;
+              margin-top:11px}
+  details.sub>summary{padding:7px 11px;cursor:pointer;user-select:none;font-size:11px;
+                      letter-spacing:.07em;text-transform:uppercase;color:var(--dim);
+                      display:flex;align-items:baseline;gap:9px;list-style:none}
+  /* display:flex drops the native disclosure marker, so draw our own. */
+  details.sub>summary::-webkit-details-marker{display:none}
+  details.sub>summary::before{content:"▸";font-size:10px;letter-spacing:0;
+                              transition:transform .15s}
+  details.sub[open]>summary::before{transform:rotate(90deg)}
+  details.sub>summary:hover{color:var(--fg)}
+  details.sub[open]>summary{border-bottom:1px solid var(--line)}
+  details.sub>summary .stitle{flex:0 0 auto}
+  /* A control living in the summary: stop its clicks from toggling the panel. */
+  details.sub>summary .inlinetoggle{flex:0 0 auto;display:flex;align-items:center;
+                                    gap:4px;cursor:pointer;color:var(--fg)}
+  details.sub>summary .inlinetoggle input{margin:0;cursor:pointer}
+  details.sub>summary .sum{font-size:11.5px;color:var(--dim);flex:1;min-width:0;
+                           text-transform:none;letter-spacing:0;font-family:var(--mono)}
+  details.sub>.dbody{padding:11px}
+
+  /* auto-flow columns, so hiding the EE-ALD-only phases leaves 2 even tracks */
+  .phasestrip{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:8px;margin:12px 0}
+  .phase{border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#0d1117;
+         display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden}
+  .phase .pn{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .phase .pt{font-family:var(--mono);font-size:19px}
+  .phase.active{border-color:var(--accent);background:#0d2440;box-shadow:0 0 0 1px var(--accent) inset}
+  .phase.active.beam{border-color:var(--hot);background:#241206;box-shadow:0 0 0 1px var(--hot) inset}
+  .phase .fill{position:absolute;left:0;bottom:0;height:3px;background:var(--accent);width:0;transition:width .25s linear}
+  .phase.beam .fill{background:var(--hot)}
+  .runstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:1px 16px}
+  .charthint{font-size:11px;color:var(--dim);font-weight:400;text-transform:none;letter-spacing:0}
+
+  /* Plots are sized off viewport height so the Run tab lands on one screen at
+     1080p and simply gets roomier on a taller monitor. */
+  canvas{width:100%;display:block}
+  #chart{cursor:crosshair}
+  #mfcChart{height:clamp(126px,18vh,300px)}
+  #tempChart{height:clamp(160px,22vh,300px)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;padding:8px 14px 11px}
+  .legend i{display:inline-block;width:11px;height:3px;vertical-align:middle;margin-right:5px}
+  .prog{height:6px;background:#21262d;border-radius:4px;overflow:hidden;margin:8px 0}
+  .prog>i{display:block;height:100%;background:var(--accent);transition:width .25s}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:50;
+         padding:11px 16px;border-radius:8px;max-width:min(680px,90vw);
+         box-shadow:0 8px 28px #0009;
+         background:#3d1113;border:1px solid var(--bad);color:#ffb3b0}
+  .toast.ok{background:#0b2f1a;border-color:#1f7a45;color:#7ee787}
+  .hint{font-size:12px;color:var(--dim);margin-top:8px}
+
+  /* ---- valve identification -------------------------------------------- */
+  /* Fixed across the top during a sweep, above the header, so the STOP button
+     is always visible no matter which tab is showing or where the page is
+     scrolled. */
+  .sweepbar{position:fixed;top:0;left:0;right:0;z-index:30;display:flex;
+            align-items:center;gap:16px;padding:12px 18px;background:#3d1113;
+            border-bottom:2px solid var(--bad);box-shadow:0 6px 24px #000b}
+  .sweepbar .info{flex:1;display:flex;flex-direction:column;gap:2px}
+  .sweepbar .line{font-family:var(--mono);font-size:22px;font-weight:700;color:#fff}
+  .sweepbar .sub{font-size:12px;color:#ffb3b0}
+  .bigstop{font-size:20px;font-weight:800;letter-spacing:.05em;padding:14px 34px;
+           background:var(--bad);color:#fff;border:2px solid #fff;border-radius:10px}
+  .bigstop:hover{background:#ff6a63}
+  .idsetup{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));
+           gap:10px;align-items:end}
+  .idsetup label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--dim)}
+  .markbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .markbtns button{border-color:var(--accent)}
+  .marks{margin-top:12px;font-family:var(--mono);font-size:13px}
+  .marks div{padding:3px 0;border-bottom:1px solid #1b2027}
+  .pulsedot{display:inline-block;width:12px;height:12px;border-radius:50%;
+            background:#30363d;margin-left:8px;vertical-align:middle}
+  .pulsedot.on{background:var(--hot);box-shadow:0 0 10px var(--hot)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1 style="font-size:15px">Reactor Interface</h1>
+  <span class="badge" id="siteName">—</span>
+  <span class="badge" id="linkBadge">connecting…</span>
+  <nav class="tabs">
+    <button data-tab="run">Run</button>
+    <button data-tab="hardware">Hardware</button>
+    <button data-tab="diag">Diagnostics<span class="tabdot" id="diagDot"></span></button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="alertchip hidden" id="alertChip" title="latest warning — click for the event log"></div>
+</header>
+
+<div id="banners"></div>
+
+<div id="sweepBar" class="sweepbar hidden">
+  <div class="info">
+    <div class="line"><span id="sweepLine">—</span><span class="pulsedot" id="sweepDot"></span></div>
+    <div class="sub" id="sweepSub">—</div>
+  </div>
+  <button class="bigstop" id="sweepStop">■ STOP</button>
+</div>
+
+<main>
+
+<!-- ============================== RUN ==================================== -->
+<section class="pane hidden" data-pane="run">
+
+  <div class="readouts">
+    <div class="ro">
+      <span class="rol">Chamber pressure</span>
+      <span class="rov"><span id="pressure">—</span><span class="unit">Torr</span></span>
+      <span class="ros" id="pressureV">—</span>
+    </div>
+    <div class="ro">
+      <span class="rol">Stage temperature</span>
+      <span class="rov"><span id="stageTemp">—</span><span class="unit">°C</span></span>
+      <span class="ros">measurement only</span>
+    </div>
+    <div class="ro" id="fillRO">
+      <span class="rol">Precursor fill pressure</span>
+      <span class="rov"><span id="fillPress">—</span><span class="unit">Torr</span></span>
+      <span class="ros" id="fillSub">—</span>
+    </div>
+    <div class="ro">
+      <span class="rol">Bubbler temperature</span>
+      <span class="rov"><span id="bubblerTemp">—</span><span class="unit">°C</span></span>
+      <span class="ros" id="bubblerSub">—</span>
+    </div>
+    <div class="ro" id="curRO">
+      <span class="rol">Sample current</span>
+      <span class="rov"><span id="sampleCur">—</span><span class="unit" id="curUnit">µA</span></span>
+      <span class="ros" id="curSub"></span>
+    </div>
+  </div>
+
+  <div class="runrow">
+
+    <section class="card" id="aldCard">
+      <h2><span id="runTitle">EE-ALD run</span>
+        <span class="grow"></span>
+        <select id="modeSel" class="mini" title="run mode">
+          <option value="ald" selected>EE-ALD</option>
+          <option value="cvd">EE-CVD</option>
+        </select>
+      </h2>
+      <div class="body">
+        <div id="aldParams">
+          <div class="params">
+            <label>Cycles<input type="number" id="p_cycles" min="1" step="1" value="100"></label>
+            <label>Dose pressure (Torr)<input type="number" id="p_dose_pressure_torr" step="0.001" value="0.020"></label>
+            <label>Dose time (s)<input type="number" id="p_dose_s" step="0.01" value="0.05"></label>
+            <label>Pump A (s)<input type="number" id="p_pump_a_s" step="0.1" value="10"></label>
+            <label data-mode="ald">Beam exposure (s)<input type="number" id="p_beam_s" step="0.1" value="5"></label>
+            <label data-mode="ald">Pump B (s)<input type="number" id="p_pump_b_s" step="0.1" value="10"></label>
+            <label>Min current (µA)<input type="number" id="p_min_current_ua" step="1" value="500"></label>
+          </div>
+        </div>
+
+        <details class="sub" id="gasSchedSection" open>
+          <summary><span class="stitle">Gas scheduling</span><span class="sum" id="gasSchedHint"></span></summary>
+          <div class="dbody">
+            <table>
+              <thead><tr>
+                <th>Gas</th><th>On</th><th>Order</th>
+                <th>% of <span id="gasWindowWord">exposure</span></th>
+                <th>Flow (sccm)</th>
+              </tr></thead>
+              <tbody>
+                <tr>
+                  <td>H2</td>
+                  <td><input type="checkbox" id="p_h2_gas_enable"></td>
+                  <td><select id="p_h2_gas_order">
+                    <option value="first">First</option>
+                    <option value="second">Second</option>
+                  </select></td>
+                  <td><input type="number" id="p_h2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
+                  <td><input type="number" id="p_h2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
+                </tr>
+                <tr>
+                  <td>N2</td>
+                  <td><input type="checkbox" id="p_n2_gas_enable"></td>
+                  <td><select id="p_n2_gas_order">
+                    <option value="first">First</option>
+                    <option value="second" selected>Second</option>
+                  </select></td>
+                  <td><input type="number" id="p_n2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
+                  <td><input type="number" id="p_n2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="params" style="margin-top:10px">
+              <label>Overlap (s)<input type="number" id="p_gas_overlap_s" min="0" step="0.05" value="0.5"></label>
+            </div>
+            <div class="hint">Overlap is how long the incoming gas starts before
+              the outgoing one stops. The same value applies at every handoff —
+              First to Second, and Second back to First.</div>
+            <div class="hint" data-mode="ald">H2/N2 turn on automatically around
+              the beam exposure instead of running the whole cycle. Percentages
+              cover the beam's lit exposure time, freezing along with the
+              exposure clock during a reignite or a pause. "First" also leads
+              the beam's start by the overlap, off wall clock during dose/pump A.
+              Both gases go off when the exposure ends.</div>
+            <div class="hint" data-mode="cvd">EE-CVD has no beam step, so the
+              percentages cover a whole cycle (dose + pump A) instead. Pump A and
+              the gas clock both freeze while the plasma is out, so the windows
+              stay locked to the cycle however often it reignites. The dose is
+              never frozen — a paused precursor pulse would hold the dose valve
+              open. "First" re-arms by the overlap before the cycle ends, which
+              is the same handoff wrapping into the next cycle.</div>
+          </div>
+        </details>
+
+        <details class="sub" id="advSection">
+          <summary><span class="stitle">Advanced timing</span><span class="sum" id="reigniteHint"></span></summary>
+          <div class="dbody">
+            <div class="params">
+              <label class="adv">Fill pulse on (s)<input type="number" id="p_fill_pulse_on_s" step="0.01" value="0.10"></label>
+              <label class="adv">Fill pulse off (s)<input type="number" id="p_fill_pulse_off_s" step="0.01" value="0.30"></label>
+              <label class="adv">Flag tolerance (%)<input type="number" id="p_tolerance_pct" step="1" value="20"></label>
+              <label class="adv">Reignite pulse (s)<input type="number" id="p_reignite_pulse_s" step="0.01" min="0" value="0.10"></label>
+              <label class="adv">Reignite settle (s)<input type="number" id="p_reignite_settle_s" step="0.01" min="0" value="0.15"></label>
+            </div>
+            <div class="hint">Flag tolerance only warns — fill pressure drifting
+              past it raises an event, it never stops or changes the run.</div>
+          </div>
+        </details>
+
+        <details class="sub" id="preSection">
+          <summary><span class="stitle">Pre-start</span><span class="sum" id="preStatus">idle</span></summary>
+          <div class="dbody">
+            <div class="params">
+              <label class="adv">Ar flow (sccm)<input type="number" id="p_pre_ar_sccm" step="0.1" min="0" value="4"></label>
+              <label class="adv">Valve settle (s)<input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1"></label>
+              <label class="adv">Hold current (s)<input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5"></label>
+            </div>
+            <div class="hint">Opens the Ar pneumatic, waits, flows Ar, starts the
+              precursor fill pulse, then runs the reignite protocol until sample
+              current appears and holds it. <strong>The strike retries
+              indefinitely</strong> — it stops only when you press Stop pre-start.
+              However it ends, the beam is grounded on the way out; Ar and the
+              fill pulse are left running.</div>
+          </div>
+        </details>
+
+        <div class="row" style="margin-top:12px">
+          <button id="aldStart" class="primary">Start run</button>
+          <button id="pauseBtn">Pause</button>
+          <button id="resumeBtn">Resume</button>
+          <button id="abortBtn" class="estop">Abort</button>
+        </div>
+
+        <div class="row">
+          <button id="preStartBtn">Pre-start</button>
+          <button id="preStopBtn" class="estop">Stop pre-start</button>
+          <button id="fillStart">Initiate fill pulse</button>
+          <button id="fillStop">Stop fill</button>
+        </div>
+
+        <!-- phase strip: EE-CVD drops the beam and pump-B phases, so it is
+             driven off the visible children rather than a fixed index map. -->
+        <div class="phasestrip" id="phaseStrip">
+          <div class="phase" data-op="dose"><span class="pn">Dose</span><span class="pt">—</span></div>
+          <div class="phase" data-op="wait-a"><span class="pn">Pump A</span><span class="pt">—</span></div>
+          <div class="phase" data-op="electron_beam" data-mode="ald"><span class="pn">E-beam</span><span class="pt">—</span></div>
+          <div class="phase" data-op="wait-b" data-mode="ald"><span class="pn">Pump B</span><span class="pt">—</span></div>
+        </div>
+
+        <div class="note" id="recipeInfo">No run in progress.</div>
+        <div class="prog"><i id="recipeBar" style="width:0"></i></div>
+        <div class="runstats">
+          <div class="kv"><span>Cycle</span><span id="rCycle">—</span></div>
+          <div class="kv"><span>Step</span><span id="rStep">—</span></div>
+          <div class="kv"><span>Step remaining</span><span id="rRemain">—</span></div>
+          <div class="kv"><span>Beam exposure left</span><span id="rBeam">—</span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="plotcol">
+      <section class="card" id="monitorCard">
+        <h2>Run monitor
+          <span class="charthint" id="chartHint">drag to zoom · arrows pan/zoom · hover for values</span>
+          <span class="grow"></span>
+          <button id="followBtn" class="mini">Follow live</button>
+          <select id="windowSel" class="mini">
+            <option value="120">2 min</option>
+            <option value="300" selected>5 min</option>
+            <option value="600">10 min</option>
+            <option value="1800">30 min</option>
+          </select>
+        </h2>
+        <details class="sub" id="smoothSection" style="margin:10px 12px 0">
+          <summary>
+            <span class="stitle">Smoothing</span>
+            <label class="inlinetoggle"><input type="checkbox" id="p_smooth_on"> on</label>
+            <span class="sum" id="smoothHint"></span>
+          </summary>
+          <div class="dbody">
+            <div class="params">
+              <label>Window (points)<input type="number" id="p_smooth_n" min="1" max="51" step="2" value="5"></label>
+            </div>
+            <div class="hint">Centered moving average over the chamber-pressure
+              trace, display only — the numeric readout above and the logged
+              data are always the raw reading. At 5 Hz, 5 points is 1 s of
+              averaging.</div>
+          </div>
+        </details>
+        <div class="canvasfill"><canvas id="chart"></canvas></div>
+        <div class="legend" id="legend"></div>
+      </section>
+
+      <section class="card" id="mfcflowCard">
+        <h2>MFC flow<span class="charthint">actual flow, not setpoint</span></h2>
+        <canvas id="mfcChart"></canvas>
+        <div class="legend" id="mfcLegend"></div>
+      </section>
+    </div>
+
+  </div>
+
+  <!-- Below the fold on purpose: temperatures move slowly and are not what you
+       watch during a cycle. Shares the run monitor's time window. -->
+  <section class="card" id="tempCard">
+    <h2>Temperatures<span class="charthint">stage and precursor bubbler · same window as the run monitor</span></h2>
+    <canvas id="tempChart"></canvas>
+    <div class="legend" id="tempLegend"></div>
+  </section>
+</section>
+
+<!-- ============================ HARDWARE ================================= -->
+<section class="pane hidden" data-pane="hardware">
+
+  <div class="hwtop">
+    <section class="card" data-card="valves">
+      <h2>Valves</h2>
+      <div class="body"><div id="valves"></div></div>
+    </section>
+
+    <section class="card" data-card="mfcs">
+      <h2>Mass flow controllers</h2>
+      <div class="body"><div id="mfcs" class="tilegrid"></div></div>
+    </section>
+  </div>
+
+  <div class="hwbottom">
+    <section class="card" id="gaugeCard">
+      <h2>Other pressure gauges</h2>
+      <div class="body"><div id="gauges" class="tilegrid"></div></div>
+    </section>
+
+    <section class="card" id="auxCard">
+      <h2>Other inputs</h2>
+      <div class="body"><div id="aux" class="tilegrid"></div></div>
+    </section>
+
+    <section class="card">
+      <h2>Instruments</h2>
+      <div class="body"><div id="instruments" class="tilegrid"></div></div>
+    </section>
+
+    <section class="card">
+      <h2>Primary sensor detail</h2>
+      <div class="body">
+        <div class="kv"><span>Pressure channel</span><span id="pressureChan">—</span></div>
+        <div class="kv"><span>Pressure curve</span><span id="pressureCurve">—</span></div>
+        <div class="kv"><span>Stage TC channel</span><span id="stageChan">—</span></div>
+        <div class="kv"><span>Stage TC type</span><span id="stageType">—</span></div>
+        <div class="note" id="pressureWarn"></div>
+        <div class="hint">Stage temperature is measurement only — this tool has
+          no heater control.</div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- =========================== DIAGNOSTICS =============================== -->
+<section class="pane hidden" data-pane="diag">
+
+  <div class="diagtop">
+    <section class="card" id="valveIdCard">
+      <h2>Valve identification</h2>
+      <div class="body">
+        <div class="hint" id="idIntro" style="margin-top:0">
+          Pulses each output line in turn so you can see which valve moves. Put the
+          valves you want to test in REMOTE position; leave the rest OFF. Pick a
+          control-box module and Start. When a valve moves, click its name to bind
+          it to the line being pulsed. Hit STOP any time.
+        </div>
+        <div class="idsetup" id="idSetup" style="margin-top:11px">
+          <label>Module
+            <select id="idGroup"></select>
+          </label>
+          <label>Repeats
+            <input type="number" id="idReps" value="3" min="1" max="10">
+          </label>
+          <label>On (s)
+            <input type="number" id="idOn" value="1" min="0.1" max="5" step="0.1">
+          </label>
+          <label>Off (s)
+            <input type="number" id="idOff" value="1" min="0.1" max="5" step="0.1">
+          </label>
+          <label>Gap (s)
+            <input type="number" id="idGap" value="3" min="0" max="30" step="0.5">
+          </label>
+          <label>Start at line #
+            <input type="number" id="idStart" value="0" min="0">
+          </label>
+          <button id="idStartBtn">Start sweep</button>
+        </div>
+        <div id="idLive">
+          <div class="kv" style="margin-top:11px"><span>Now pulsing</span><span id="idNow">— not running —</span></div>
+          <div class="kv"><span>Progress</span><span id="idProgress">—</span></div>
+          <div class="hint">When a valve moves during the sweep, click its name
+            below to bind it to the line being pulsed. These are disabled until a
+            sweep is running.</div>
+          <div class="markbtns" id="idMarkBtns"></div>
+          <button id="idStopCard" class="bigstop" style="margin-top:14px" disabled>
+            ■ STOP</button>
+          <div class="hint">A second, identical STOP appears as a red bar fixed
+            across the very top of the page while a sweep runs — you can hit either.</div>
+        </div>
+        <div class="marks" id="idMarks"></div>
+      </div>
+    </section>
+
+    <div class="diagcol">
+      <section class="card" data-card="logging">
+        <h2>Data logging</h2>
+        <div class="body">
+          <div class="row" style="margin-top:0">
+            <input id="logLabel" placeholder="General" style="flex:1;min-width:120px">
+            <button id="logStart">Start</button>
+            <button id="logStop">Stop</button>
+          </div>
+          <div class="kv"><span>File</span><span id="logFile">—</span></div>
+          <div class="kv"><span>Rows</span><span id="logRows">—</span></div>
+          <div class="hint" id="logCols"></div>
+        </div>
+      </section>
+
+      <section class="card" data-card="connections">
+        <h2>Connections</h2>
+        <div class="body" style="overflow-x:auto">
+          <table>
+            <thead><tr>
+              <th>Device</th><th>Interface</th><th>Address</th><th>State</th><th>Detail</th>
+            </tr></thead>
+            <tbody id="conns"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <section class="card" data-card="events">
+    <h2>Event log</h2>
+    <div class="body"><div id="events"></div></div>
+  </section>
+</section>
+
+</main>
+
+<script>
+"use strict";
+
+/* ---------------------------------------------------------------------------
+   Telemetry arrives at the loop rate, so tiles are built ONCE and then updated
+   field-by-field. Replacing innerHTML every frame would destroy an <input>
+   mid-typing, which silently discarded setpoints.
+   --------------------------------------------------------------------------- */
+
+const $ = id => document.getElementById(id);
+let CFG = {};
+const trend = [];
+
+const num = (v,d=3) =>
+  (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d);
+const clock = t => new Date(t*1000).toLocaleTimeString();
+
+/** Pressure spans decades, so fixed notation is useless. */
+function sci(v, digits=2){
+  if(v === null || v === undefined || Number.isNaN(v)) return "—";
+  const a = Math.abs(v);
+  if(a !== 0 && (a < 1e-3 || a >= 1e5)) return Number(v).toExponential(digits);
+  return Number(v).toPrecision(4);
+}
+/* Sample current runs from a few mA down to well under a µA, so "4.656e-5 A"
+   is the wrong way to show it. Pick mA or µA from the magnitude - the readout
+   from the live value, the plot axis from the largest value in view so the
+   whole trace shares one unit. */
+function currentUnit(v){
+  const a = Math.abs(Number(v));
+  return (Number.isFinite(a) && a >= 1e-3)
+    ? {mul:1e3, unit:"mA", dp:3}
+    : {mul:1e6, unit:"µA", dp:2};
+}
+function fmtCurrent(v){
+  if(v === null || v === undefined || Number.isNaN(v)) return {text:"—", unit:"µA"};
+  const u = currentUnit(v);
+  return {text:(Number(v)*u.mul).toFixed(u.dp), unit:u.unit};
+}
+function esc(x){
+  return String(x ?? "").replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function put(root, field, text){
+  const el = root.querySelector(`[data-f="${field}"]`);
+  if(el && el.textContent !== String(text)) el.textContent = text;
+  return el;
+}
+function cls(el, name, on){ el.classList.toggle(name, !!on); }
+function setHtml(el, html){ if(el.innerHTML !== html) el.innerHTML = html; }
+
+/** Create missing tiles, drop stale ones, keep existing DOM (and input state). */
+function reconcile(container, items, key, buildHtml){
+  if(!items.length){
+    setHtml(container, `<div class="hint">none configured</div>`);
+    container.dataset.empty = "1";
+    return;
+  }
+  if(container.dataset.empty){ container.innerHTML = ""; delete container.dataset.empty; }
+  const seen = new Set();
+  for(const item of items){
+    const id = key(item);
+    seen.add(id);
+    if(!container.querySelector(`[data-id="${CSS.escape(id)}"]`)){
+      const wrap = document.createElement("div");
+      wrap.innerHTML = buildHtml(item);
+      container.appendChild(wrap.firstElementChild);
+    }
+  }
+  for(const el of [...container.children]){
+    if(el.dataset.id && !seen.has(el.dataset.id)) el.remove();
+  }
+}
+
+// ---------------------------------------------------------------- transport
+function connect(){
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen  = () => setLink("live", "live");
+  ws.onclose = () => { setLink("disconnected", "bad"); setTimeout(connect, 1500); };
+  ws.onerror = () => setLink("error", "bad");
+  ws.onmessage = ev => render(JSON.parse(ev.data));
+}
+function setLink(text, kind){
+  const b = $("linkBadge"); b.textContent = text; b.className = "badge " + (kind||"");
+}
+
+async function post(url, body){
+  const r = await fetch(url, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: body === undefined ? "{}" : JSON.stringify(body)
+  });
+  if(!r.ok){
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch(_){}
+    toast(msg); throw new Error(msg);
+  }
+  return r.json();
+}
+
+let toastTimer = null;
+function toast(msg, ok){
+  document.querySelectorAll(".toast").forEach(t => t.remove());
+  const el = document.createElement("div");
+  el.className = "toast" + (ok ? " ok" : "");
+  el.textContent = msg;
+  document.body.appendChild(el);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), ok ? 2500 : 7000);
+}
+
+/** Read a numeric input, complaining rather than silently doing nothing. */
+function readNum(sel, what){
+  const el = document.querySelector(sel);
+  if(!el) return null;
+  const raw = el.value.trim();
+  if(raw === ""){ toast(`Enter a value for ${what} first.`); el.focus(); return null; }
+  const v = parseFloat(raw);
+  if(!Number.isFinite(v)){ toast(`"${raw}" is not a number.`); el.focus(); return null; }
+  return v;
+}
+
+// ---------------------------------------------------------------- render
+let MARKS = [];
+function render(s){
+  $("siteName").textContent = s.site;
+  banners(s); pressure(s); stage(s); hero(s); gauges(s); instruments(s); aux(s);
+  mfcs(s); valves(s); valveId(s); recipe(s); logging(s); conns(s); events(s);
+
+  MARKS = s.marks || [];
+  const rv = s.run_valves || {dose:"prec1", plasma:"plasma_ground"};
+  RUN_PLASMA = rv.plasma || "plasma_ground";
+  const vopen = {};
+  for(const v of s.valves) vopen[v.id] = v.open;
+  const sample = {
+    t: s.t,
+    pressure: s.snapshot.pressure,                        // chamber (cold cathode)
+    current: s.snapshot["inst.ammeter"],                  // sample current
+    prec_pressure: s.snapshot["gauge.prec1_dose"],        // precursor dose pressure
+    stage_temp: s.snapshot["stage.temp"],
+    bubbler_temp: s.snapshot["aux.bubbler"],
+    dosing: vopen[rv.dose] ? 1 : 0,
+    // beam ON = plasma-ground relay OFF (valve closed)
+    beam_on: vopen[rv.plasma] === false ? 1 : 0,
+  };
+  for(const m of s.mfcs) sample["mfc_"+m.id] = s.snapshot[`mfc.${m.id}.flow`];  // actual flow, not setpoint
+  MFC_IDS = s.mfcs.map(m => m.id);
+  MFC_LABELS = Object.fromEntries(s.mfcs.map(m => [m.id, m.label || m.id]));
+  trend.push(sample);
+  if(trend.length > 18000) trend.shift();   // ~1 h at the 5 Hz publish rate
+  recordRun(s, sample);
+  drawChart();
+  drawMfcChart();
+  drawTempChart();
+}
+
+function banners(s){
+  const out = [];
+  if(!s.daq.configured){
+    out.push(`<div class="banner">No DAQ inputs are running — pressure and stage
+      temperature are unavailable. ${esc(s.daq.error || "")}</div>`);
+  }
+  setHtml($("banners"), out.join(""));
+}
+
+function pressure(s){
+  const p = s.snapshot.pressure, r = s.readings["pressure"];
+  const el = $("pressure");
+  el.textContent = sci(p);
+  cls(el, "stale", !!(r && !r.ok));
+  const v = s.snapshot["pressure.volts"];
+  $("pressureV").textContent = v === undefined ? "—" : num(v,4) + " V";
+  const cf = CFG.pressure || {}, sc = cf.scaling || {};
+  $("pressureChan").textContent = cf.channel || "—";
+  $("pressureCurve").textContent = sc.preset || `${sc.type||"?"} g=${sc.gain} o=${sc.offset}`;
+  $("pressureWarn").textContent = sc.type === "log10"
+    ? "Log gauge: a 0.1 V offset is roughly a 30% pressure error. Confirm the "
+      + "curve against the gauge controller before trusting these numbers."
+    : "";
+}
+
+function stage(s){
+  const st = s.stage_temp;
+  const rd = s.readings["stage.temp"];
+  const el = $("stageTemp");
+  el.textContent = st.enabled ? num(st.value, 1) : "off";
+  cls(el, "stale", !!(rd && !rd.ok));
+  const cf = CFG.stage_temp || {};
+  $("stageChan").textContent = cf.channel || "—";
+  $("stageType").textContent = cf.tc_type || "—";
+}
+
+/* Hero readouts that aren't already covered by pressure()/stage(): the
+   precursor fill pressure with its regulation status, the bubbler thermocouple
+   sitting next to it, and the sample current with the beam's lit state. */
+const DEFAULT_FILL_GAUGE = "gauge.prec1_dose";
+function hero(s){
+  const g = s.regulator || {};
+  // While the regulator runs, follow whatever gauge it was pointed at, so the
+  // readout always shows the pressure actually being held.
+  const key = (g.running && g.gauge) ? g.gauge : DEFAULT_FILL_GAUGE;
+  const fp = s.snapshot[key];
+  const fEl = $("fillPress");
+  fEl.textContent = num(fp, 3);
+  const frd = s.readings[key];
+  cls(fEl, "stale", !!(frd && !frd.ok));
+  const outOfBounds = !!(g.running && g.in_bounds === false);
+  cls($("fillRO"), "flag", outOfBounds);
+  const gid = key.startsWith("gauge.") ? key.slice(6) : key;
+  const gauge = (s.gauges || []).find(x => x.id === gid);
+  $("fillSub").textContent = g.running
+    ? `target ${num(g.target_torr,3)}` + (g.duty ? " · filling" : "")
+      + (outOfBounds ? " · OUT OF BOUNDS" : "")
+    : (gauge ? gauge.label : gid);
+
+  const b = (s.aux || []).find(a => a.id === "bubbler");
+  const bEl = $("bubblerTemp");
+  bEl.textContent = b ? num(b.value, 1) : "—";
+  $("bubblerSub").textContent = b ? b.label : "no bubbler TC configured";
+  const brd = b ? s.readings["aux." + b.id] : null;
+  cls(bEl, "stale", !!(brd && !brd.ok));
+
+  const cur = s.snapshot["inst.ammeter"];
+  const cEl = $("sampleCur"), f = fmtCurrent(cur);
+  cEl.textContent = f.text;
+  $("curUnit").textContent = f.unit;
+  const crd = s.readings["inst.ammeter"];
+  cls(cEl, "stale", !!(crd && !crd.ok));
+  // Beam state comes from a run's beam watcher, or from the pre-start sequence
+  // while that is the thing driving the plasma.
+  const pre = s.prestart || {};
+  const beam = (s.recipe && s.recipe.beam) || (pre.running ? pre : null);
+  cls($("curRO"), "beam", !!beam);
+  $("curSub").textContent = beam ? (beam.lit ? "● beam lit" : "○ no plasma") : "";
+}
+
+function instruments(s){
+  const box = $("instruments");
+  reconcile(box, s.instruments, i => i.id, i => `
+    <div class="tile" data-id="${esc(i.id)}">
+      <div class="top">
+        <span class="name">${esc(i.label || i.id)}</span>
+        <div style="flex:1"></div>
+        <span class="read"><span data-f="val">—</span
+          ><span class="unit">${esc(i.unit||"")}</span></span>
+      </div>
+      <div class="kv"><span>Identity</span>
+        <span data-f="idn" style="font-size:11px">—</span></div>
+      <div class="kv"><span>Query</span><span data-f="q">—</span></div>
+      <div class="note" data-f="setup"></div>
+      <div class="note" data-f="err"></div>
+    </div>`);
+
+  for(const i of s.instruments){
+    const el = box.querySelector(`[data-id="${CSS.escape(i.id)}"]`);
+    if(!el) continue;
+    const rd = s.readings["inst."+i.id];
+    const bad = !!(rd && !rd.ok);
+    cls(el, "trip", !i.connected);
+    const v = put(el, "val", sci(s.snapshot["inst."+i.id], 4));
+    if(v) cls(v, "stale", bad);
+    put(el, "idn", i.identity || "—");
+    put(el, "q", i.query || "—");
+    put(el, "setup", (i.setup_sent && i.setup_sent.length)
+      ? "setup sent: " + i.setup_sent.join(" · ") : "");
+    put(el, "err", bad ? rd.detail : (i.error || ""));
+  }
+}
+
+function gauges(s){
+  const list = s.gauges || [];
+  cls($("gaugeCard"), "hidden", !list.length);
+  if(!list.length) return;
+  const box = $("gauges");
+  reconcile(box, list, g => g.id, g => `
+    <div class="tile" data-id="${esc(g.id)}">
+      <div class="top">
+        <span class="name" data-f="name">${esc(g.label)}</span>
+        <button class="rename" data-rename="gauge" data-id="${esc(g.id)}"
+                title="Rename gauge">✎</button>
+        <div style="flex:1"></div>
+        <span class="read"><span data-f="val">—</span
+          ><span class="unit">${esc(g.unit||"")}</span></span>
+      </div>
+      <div class="kv"><span>Gauge output</span><span data-f="volts">—</span></div>
+      <div class="kv"><span>Channel</span><span data-f="chan">—</span></div>
+    </div>`);
+  for(const g of list){
+    const el = box.querySelector(`[data-id="${CSS.escape(g.id)}"]`);
+    if(!el) continue;
+    put(el, "name", g.label);
+    // Baratrons are linear 10 Torr heads — show fixed 2 decimals, never sci.
+    put(el, "val", num(g.value, 2));
+    put(el, "volts", g.volts === null || g.volts === undefined
+      ? "—" : num(g.volts,4) + " V");
+    put(el, "chan", g.channel || "—");
+  }
+}
+
+function aux(s){
+  cls($("auxCard"), "hidden", !s.aux.length);
+  if(!s.aux.length) return;
+  const box = $("aux");
+  reconcile(box, s.aux, a => a.id, a => `
+    <div class="tile" data-id="${esc(a.id)}">
+      <div class="top">
+        <span class="name">${esc(a.label)}</span>
+        <div style="flex:1"></div>
+        <span class="read"><span data-f="val">—</span
+          ><span class="unit">${esc(a.unit||"")}</span></span>
+      </div>
+      <div class="kv"><span>Raw</span><span data-f="volts">—</span></div>
+    </div>`);
+  for(const a of s.aux){
+    const el = box.querySelector(`[data-id="${CSS.escape(a.id)}"]`);
+    if(!el) continue;
+    put(el, "val", sci(a.value, 4));
+    put(el, "volts", a.volts === undefined || a.volts === null
+      ? "—" : num(a.volts,4) + " V");
+  }
+}
+
+function mfcs(s){
+  const box = $("mfcs");
+  reconcile(box, s.mfcs, m => m.id, m => `
+    <div class="tile" data-id="${esc(m.id)}">
+      <div class="top">
+        <span class="name" data-f="name">${esc(m.label || m.id)}</span>
+        <button class="rename" data-rename="mfc" data-id="${esc(m.id)}"
+                title="Rename MFC">✎</button>
+        <span class="src" data-f="gas"></span>
+        <div style="flex:1"></div>
+        <span class="read"><span data-f="flow">—</span
+          ><span class="unit">sccm</span></span>
+      </div>
+      <div class="bar"><i data-f="bar" style="width:0"></i></div>
+      <div class="row" style="margin-top:0">
+        <input type="number" step="0.01" min="0" placeholder="sccm"
+               id="mfc_${esc(m.id)}" data-f="input" style="flex:1;min-width:80px">
+        <button data-act="mfc" data-id="${esc(m.id)}">Set flow</button>
+      </div>
+      <div class="kv" style="margin-top:6px"><span>Setpoint (device)</span><span data-f="sp">—</span></div>
+      <div class="kv"><span>Full scale</span><span data-f="fs">—</span></div>
+      <div class="kv"><span>Body temp</span><span data-f="temp">—</span></div>
+      <div class="kv"><span>Device mode</span><span data-f="mode">—</span></div>
+      <div class="note" data-f="health"></div>
+      <div class="note" data-f="err"></div>
+      <div class="note" data-f="iso"></div>
+    </div>`);
+
+  const valveById = {}; for(const v of s.valves) valveById[v.id] = v;
+
+  for(const m of s.mfcs){
+    const el = box.querySelector(`[data-id="${CSS.escape(m.id)}"]`);
+    if(!el) continue;
+    cls(el, "trip", !m.connected);
+    const flow = s.snapshot[`mfc.${m.id}.flow`];
+    const pct  = s.snapshot[`mfc.${m.id}.flow_pct`];
+    put(el, "name", m.label || m.id);
+    put(el, "gas", m.gas || "");
+    put(el, "flow", (flow===null||flow===undefined) ? "—" : Number(flow).toFixed(3));
+    put(el, "sp", num(s.snapshot[`mfc.${m.id}.setpoint`],3) + " sccm");
+    // Full scale is read from the instrument, not configured - it moves with gas.
+    put(el, "fs", m.full_scale_sccm === null || m.full_scale_sccm === undefined
+      ? "—" : `${num(m.full_scale_sccm,1)} sccm`
+        + (typeof pct === "number" ? `  (${pct.toFixed(1)}%)` : ""));
+    put(el, "temp", num(s.snapshot[`mfc.${m.id}.temp`],1) + " °C");
+    put(el, "mode", m.device_mode || "—");
+    const bad = m.health
+      ? Object.entries(m.health).filter(([, v]) => v && v !== "No")
+      : [];
+    put(el, "health", bad.length
+      ? "device reports: " + bad.map(([k, v]) => `${k}=${v}`).join(", ") : "");
+    put(el, "err", m.error || "");
+    const bar = el.querySelector('[data-f="bar"]');
+    if(bar) bar.style.width =
+      Math.max(0, Math.min(100, typeof pct === "number" ? pct : 0)) + "%";
+
+    // Requested by operator: gate the setpoint on the MFC's isolation valve.
+    const iso = m.isolation_valve ? valveById[m.isolation_valve] : null;
+    const isoClosed = !!(iso && !iso.open);
+    put(el, "iso", isoClosed
+      ? `${iso.label} is closed — open it to set flow above 0`
+      : "");
+    el.querySelector('[data-act="mfc"]').disabled = !m.connected || isoClosed;
+    el.querySelector('[data-f="input"]').disabled = !m.connected || isoClosed;
+  }
+}
+
+function valves(s){
+  const box = $("valves");
+  // One header row per control box, then that box's valves. Grouping is by the
+  // `bank` field; anything without a bank falls into an "ungrouped" section.
+  // The headers span the full grid width so each bank reads as its own block.
+  const banks = (s.valve_banks || []).slice();
+  if(s.valves.some(v => !v.bank)) banks.push({id:"", label:"Ungrouped", note:""});
+
+  const rows = [];
+  for(const b of banks){
+    const members = s.valves.filter(v => (v.bank || "") === b.id);
+    if(!members.length) continue;
+    rows.push({kind:"bank", id:"bank:"+b.id, bank:b});
+    for(const v of members) rows.push({kind:"valve", id:"valve:"+v.id, valve:v});
+  }
+
+  reconcile(box, rows, r => r.id, r => r.kind === "bank" ? `
+    <div class="bankhdr" data-id="${esc(r.id)}">
+      <div class="bankname">${esc(r.bank.label)}</div>
+      <div class="banknote">${esc(r.bank.note || "")}</div>
+    </div>` : `
+    <div class="valve" data-id="${esc(r.id)}">
+      <div class="lbl">
+        <strong data-f="label">${esc(r.valve.label)}</strong>
+        <span class="sub" data-f="sub"></span>
+      </div>
+      <button class="rename" data-rename="valve" data-id="${esc(r.valve.id)}"
+              title="Rename valve">✎</button>
+      <button data-act="valve" data-id="${esc(r.valve.id)}" data-f="btn">—</button>
+    </div>`);
+
+  for(const r of rows){
+    if(r.kind !== "valve") continue;
+    const v = r.valve;
+    const el = box.querySelector(`[data-id="${CSS.escape(r.id)}"]`);
+    if(!el) continue;
+    cls(el, "open", v.open);
+    put(el, "label", v.label);
+    put(el, "sub", `${v.line || "no line"} · ${v.open ? "OPEN" : "closed"}`);
+    const btn = el.querySelector('[data-f="btn"]');
+    btn.textContent = v.open ? "Close" : "Open";
+    btn.dataset.state = v.open ? "0" : "1";
+    btn.disabled = !v.line;   // only a valve with no DAQ line can't be driven
+  }
+}
+
+let idGroupsLoaded = false;
+function valveId(s){
+  const vid = s.valve_id || {};
+  const running = !!vid.running;
+
+  if(!idGroupsLoaded && vid.groups && Object.keys(vid.groups).length){
+    $("idGroup").innerHTML = Object.keys(vid.groups).map(name =>
+      `<option value="${esc(name)}">${esc(name)}</option>`).join("");
+    idGroupsLoaded = true;
+  }
+
+  // Sticky STOP bar - only while a sweep is running.
+  cls($("sweepBar"), "hidden", !running);
+  if(running){
+    $("sweepLine").textContent = vid.current_line || "starting…";
+    cls($("sweepDot"), "on", !!vid.line_state);
+    $("sweepSub").textContent =
+      `line ${(vid.index ?? 0) + 1} of ${vid.total}  ·  rep ${vid.rep||0}/${vid.reps||0}`
+      + `  ·  ${vid.line_state ? "ON" : "off"}  ·  ${vid.phase||""}`;
+  }
+
+  // Setup and live controls are BOTH always visible - the STOP and the mark
+  // buttons must be findable before a sweep is ever started. Start is disabled
+  // while running; the mark buttons and card STOP are disabled while idle.
+  $("idStartBtn").disabled = running;
+  $("idStopCard").disabled = !running;
+  setHtml($("idMarkBtns"),
+    (vid.unidentified_valves||[]).map(v =>
+      `<button data-mark="${esc(v.id)}" ${running?"":"disabled"}>${esc(v.label)} moved</button>`).join("")
+    + `<button data-mark="__other" ${running?"":"disabled"}>Other…</button>`);
+  $("idNow").textContent = running
+    ? (vid.current_line||"—") + (vid.line_state ? "   ● ON" : "   ○ off")
+    : "— not running —";
+  $("idProgress").textContent = running
+    ? `line ${(vid.index??0)+1}/${vid.total} · rep ${vid.rep||0}/${vid.reps||0} · ${vid.phase||""}`
+    : "—";
+
+  const marks = vid.marks || [];
+  setHtml($("idMarks"), marks.length
+    ? "<strong>Bound so far:</strong>" + marks.map(m =>
+        `<div>${esc(m.line)} &rarr; ${esc(m.valve||m.note||"?")}</div>`).join("")
+    : (vid.phase === "done"
+        ? "<span class='hint'>sweep complete — no valves marked</span>" : ""));
+}
+
+function recipe(s){
+  const r = s.recipe;
+  const running = ["running","paused","aborting"].includes(r.state);
+  const pre = s.prestart || {};
+  // Pre-start and a run both drive the plasma-ground relay, so only one of them
+  // can be armed at a time (the server refuses the overlap with a 409 too).
+  $("aldStart").disabled  = running || !!pre.running;
+  $("pauseBtn").disabled  = r.state !== "running";
+  $("resumeBtn").disabled = r.state !== "paused";
+  $("abortBtn").disabled  = !running;
+  $("preStartBtn").disabled = running || !!pre.running;
+  $("preStopBtn").disabled  = !pre.running;
+
+  const pEl = $("preStatus");
+  pEl.textContent = pre.running
+    ? (pre.phase || "running") + (pre.strikes ? ` · ${pre.strikes} strikes` : "")
+    : (pre.done ? "complete — beam grounded, Ar and fill running" : "idle");
+  pEl.style.color = pre.running ? "var(--hot)" : "var(--dim)";
+
+  // Standalone fill (pre-run precursor charge): available only when no run is
+  // active. Stop is live whenever the regulator is running.
+  const regRunning = !!(s.regulator && s.regulator.running);
+  $("fillStart").disabled = running || regRunning;
+  $("fillStop").disabled  = !regRunning;
+
+  $("recipeInfo").textContent = (running || r.state === "done" || r.state === "error")
+    ? `${r.recipe} — ${r.state}${r.phase ? " · " + r.phase : ""}`
+      + (r.error ? ` · ${r.error}` : (r.message ? ` · ${r.message}` : ""))
+    : "No run in progress.";
+  $("recipeBar").style.width =
+    ((r.cycles_total ? r.cycle / r.cycles_total : 0)*100).toFixed(1) + "%";
+  $("rCycle").textContent  = r.cycles_total ? `${r.cycle} / ${r.cycles_total}` : "—";
+  $("rStep").textContent   = r.step_desc || "—";
+  $("rRemain").textContent = (r.step_remaining_s ?? null) === null
+    ? "—" : num(r.step_remaining_s, 2) + " s";
+
+  // --- phase strip: which cycle step is active ---
+  // step_index is 1-based over the mode's own step list, so walking the
+  // *visible* phases in order works for EE-ALD (4) and EE-CVD (2) alike.
+  const cycling = running && r.phase === "cycling";
+  const activeIdx = cycling ? r.step_index : 0;
+  const phases = [...document.querySelectorAll("#phaseStrip .phase")]
+                   .filter(el => !el.classList.contains("hidden"));
+  phases.forEach((el, i) => {
+    const active = (i + 1) === activeIdx;
+    const isBeam = el.dataset.op === "electron_beam";
+    cls(el, "active", active);
+    cls(el, "beam", isBeam);
+    const tEl = el.querySelector(".pt");
+    let fill = el.querySelector(".fill");
+    if(!fill){ fill = document.createElement("div"); fill.className="fill"; el.appendChild(fill); }
+    if(active){
+      const dur = r.step_duration_s, rem = r.step_remaining_s;
+      // beam shows exposure remaining (accounts for reignite pauses)
+      const showRem = (isBeam && r.beam) ? r.beam.remaining : rem;
+      tEl.textContent = (showRem == null) ? "…" : num(showRem,1)+"s";
+      fill.style.width = (dur && showRem!=null ? (1-showRem/dur)*100 : 0) + "%";
+    } else {
+      tEl.textContent = "—";
+      fill.style.width = "0";
+    }
+  });
+
+  // EE-ALD counts down an exposure budget; EE-CVD has none, so it reports the
+  // lit time banked so far instead. Live current and fill pressure are hero
+  // readouts at the top of the tab, not repeated here.
+  const b = r.beam;
+  $("rBeam").textContent =
+    !b ? "—"
+    : (b.remaining != null) ? num(b.remaining,1)+" s left"
+    : (b.lit_s != null) ? num(b.lit_s,1)+" s lit"
+    : (b.lit ? "beam lit" : "no plasma");
+}
+
+// ------------------------------------------------ run recording + auto-download
+let runData = null;     // {startT, rows:[...]} while a run is active
+let lastRunState = "idle";
+function recordRun(s, sample){
+  const r = s.recipe;
+  const running = ["running","paused","aborting"].includes(r.state);
+  if(running && r.started_at && (!runData || runData.startT !== r.started_at)){
+    runData = {startT: r.started_at, name: r.recipe, rows: []};   // new run began
+  }
+  if(runData && running){
+    runData.rows.push({
+      t: sample.t, stage_temp: sample.stage_temp, current: sample.current,
+      dosing: sample.dosing, prec_pressure: sample.prec_pressure,
+      pressure: sample.pressure,
+    });
+  }
+  // on transition out of a running state into done/idle/error, export
+  if(runData && !running && ["done","idle","error"].includes(r.state)
+     && lastRunState !== r.state && lastRunState !== "" ){
+    if(runData.rows.length) downloadRun(runData);
+    runData = null;
+  }
+  lastRunState = r.state;
+}
+function downloadRun(rd){
+  const cols = ["elapsed_s","stage_temp_c","sample_current_a","precursor_dosing",
+                "precursor_pressure_torr","chamber_pressure_torr"];
+  const fmt = v => (v==null||Number.isNaN(v)) ? "" : v;
+  const lines = [cols.join(",")];
+  for(const r of rd.rows){
+    lines.push([ (r.t - rd.startT).toFixed(3), fmt(r.stage_temp), fmt(r.current),
+                 fmt(r.dosing), fmt(r.prec_pressure), fmt(r.pressure) ].join(","));
+  }
+  const stamp = new Date(rd.startT*1000).toISOString().slice(0,19).replace(/[:T]/g,"-");
+  const blob = new Blob([lines.join("\n")], {type:"text/csv"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `run_${stamp}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+  toast(`Run data downloaded (${rd.rows.length} rows)`, true);
+}
+
+function logging(s){
+  const L = s.logging;
+  $("logStart").disabled = L.active;
+  $("logStop").disabled  = !L.active;
+  $("logFile").textContent = L.path ? L.path.split(/[\\/]/).pop() : "—";
+  $("logRows").textContent = L.active ? L.rows : "—";
+  if(CFG.logging && !$("logCols").textContent)
+    $("logCols").textContent =
+      "columns: " + Object.keys(CFG.logging.columns).join(", ");
+}
+
+function conns(s){
+  const rows = [];
+  rows.push(tr("cDAQ / DAQmx", "analog in + digital out",
+    `${s.daq.inputs} input(s)`,
+    s.daq.configured ? "OK" : "FAIL", s.daq.error || ""));
+  for(const m of s.mfcs)
+    rows.push(tr(m.label || m.id, "MKS · Modbus TCP", m.host,
+      m.connected ? "OK" : "FAIL", m.error || m.device_info || ""));
+  for(const i of s.instruments)
+    rows.push(tr(i.label || i.id, "SCPI · VISA", i.resource,
+      i.connected ? "OK" : "FAIL", i.error || i.identity || ""));
+  setHtml($("conns"), rows.join(""));
+}
+function tr(a,b,c,state,detail){
+  const color = state === "OK" ? "var(--ok)" : "var(--bad)";
+  return `<tr><td>${esc(a)}</td><td>${esc(b)}</td>
+    <td style="font-family:var(--mono)">${esc(c||"—")}</td>
+    <td style="color:${color};font-weight:600">${esc(state)}</td>
+    <td style="color:var(--dim)">${esc(detail||"")}</td></tr>`;
+}
+
+// The event log lives on the Diagnostics tab, so the newest warning is also
+// pinned in the header for two minutes - otherwise a fill-pressure flag raised
+// mid-run would never be seen from the Run tab. Display only.
+const LOUD_KINDS = new Set(["error","trip","safety","flag"]);
+const ALERT_HOLD_S = 120;
+function events(s){
+  const list = s.events || [];
+  setHtml($("events"), list.slice().reverse().map(e =>
+    `<div><span class="t">${clock(e.t)}</span>
+     <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
+
+  const now = Date.now()/1000;
+  let loud = null;
+  for(const e of list)                       // oldest-first, so this keeps the newest
+    if(LOUD_KINDS.has(e.kind) && now - e.t <= ALERT_HOLD_S) loud = e;
+  const chip = $("alertChip");
+  cls(chip, "hidden", !loud);
+  cls($("diagDot"), "on", !!loud);
+  if(loud){
+    chip.textContent = `⚠ ${loud.message}`;
+    cls(chip, "bad", loud.kind === "error" || loud.kind === "trip");
+  }
+}
+
+// ---------------------------------------------------------------- chart
+// Two stacked panels on a shared time axis: pressure (log) on top, sample
+// current on the bottom with plasma-relay flips overlaid. Drag to pan, wheel to
+// zoom; "Follow live" re-attaches to the newest data.
+let RUN_PLASMA = "plasma_ground";
+let MFC_IDS = [];        // populated from live state each frame
+let MFC_LABELS = {};     // id -> current display label (tracks renames)
+const view = { follow:true, windowS:300, endT:null };
+const hover = { active:false, px:null };          // cursor readout on the chart
+const zoomSel = { active:false, x0:null, x1:null }; // drag-to-zoom band
+let GEOM = null;                                   // last-drawn chart geometry
+let CUR_UNIT = {mul:1e6, unit:"µA", dp:2};         // current panel's display unit
+
+const PADL = 60, PADR = 22;
+function visibleRange(){
+  const latest = trend.length ? trend[trend.length-1].t : Date.now()/1000;
+  const end = view.follow ? latest : (view.endT ?? latest);
+  return { t0: end - view.windowS, t1: end };
+}
+
+function drawChart(){
+  const cv = $("chart"), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if(w < 2 || h < 2) return;      // pane hidden: a hidden canvas has no size
+  cv.width = w*dpr; cv.height = h*dpr;
+  const g = cv.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,w,h);
+
+  const pad = {t:12, b:20, gap:26};
+  const {t0,t1} = visibleRange(), span = Math.max(1, t1-t0);
+  const W = w - PADL - PADR;
+  const panelH = (h - pad.t - pad.b - pad.gap) / 2;
+  const topY = pad.t, botY = pad.t + panelH + pad.gap;
+  const X = t => PADL + W*(t-t0)/span;
+  const pts = trend.filter(r => r.t >= t0-2 && r.t <= t1+2);
+
+  // One unit for the whole current panel, chosen from the largest value in
+  // view so the axis doesn't flip between mA and µA as the trace moves.
+  let peak = 0;
+  for(const r of pts){
+    const v = r.current;
+    if(typeof v === "number" && Number.isFinite(v)) peak = Math.max(peak, Math.abs(v));
+  }
+  CUR_UNIT = currentUnit(peak);
+
+  // Smoothing draws the averaged trace but keeps the axis on the raw spread, so
+  // the noise that was removed still occupies its share of the panel instead of
+  // the remainder being stretched to fill it.
+  const sm = smoothing();
+  const pPanel = drawPanel(g,
+    sm.on ? `PRESSURE (Torr) — smoothed ${sm.n}pt, raw scale` : "PRESSURE (Torr)",
+    PADL, topY, W, panelH, sm.on ? smoothSeries(pts, "pressure", sm.n) : pts,
+    X, true, [{key:"pressure", color:"#58a6ff"}], 1, pts);
+  const cPanel = drawPanel(g, `SAMPLE CURRENT (${CUR_UNIT.unit})`, PADL, botY, W,
+    panelH, pts, X, false, [{key:"current", color:"#3fb950"}], CUR_UNIT.mul);
+
+  GEOM = { X, invX: px => t0 + (px - PADL)/W*span, PADL, W, t0, t1,
+           top: topY, bottom: botY + panelH, pts, panels: [pPanel, cPanel] };
+
+  // plasma relay flips on the current panel. A reignite is two valve commands
+  // (pulse ON to interrupt, then OFF to restrike) - only the restrike, the one
+  // that actually turns the beam back on, is worth flagging; the interrupt
+  // pulse is drawn as nothing so one retry attempt isn't shown twice.
+  for(const m of MARKS){
+    if(m.id !== RUN_PLASMA || m.t < t0 || m.t > t1) continue;
+    const isReignite = /reignit/i.test(m.reason||"");
+    if(isReignite && m.state !== false) continue;   // skip the interrupt pulse
+    const x = X(m.t), recovery = isReignite;
+    g.save();
+    g.strokeStyle = recovery ? "#f85149" : "#8b949e";
+    g.globalAlpha = recovery ? 0.95 : 0.5;
+    g.setLineDash(recovery ? [] : [3,3]); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x,botY); g.lineTo(x,botY+panelH); g.stroke();
+    g.restore();
+  }
+
+  g.fillStyle="#8b949e"; g.font="11px system-ui"; g.textAlign="center";
+  g.fillText(clock(t0), PADL+26, h-4);
+  g.fillText(clock(t1), PADL+W-26, h-4);
+
+  drawOverlays(g, w, h);
+
+  setHtml($("legend"),
+    `<span><i style="background:#58a6ff"></i>Chamber pressure</span>`
+   +`<span><i style="background:#3fb950"></i>Sample current</span>`
+   +`<span><i style="background:#8b949e"></i>plasma scheduled flip</span>`
+   +`<span><i style="background:#f85149"></i>plasma reignite</span>`
+   +(view.follow ? "" : `<span style="color:var(--warn)">paused — press Follow live</span>`));
+}
+
+/* Display-only noise reduction on the chamber-pressure trace. Centered so the
+   trace doesn't lag the live value, which a trailing average would; gaps (null
+   readings) are left as gaps rather than averaged across. Cheap enough to run
+   every frame on a few hundred visible points. */
+function smoothing(){
+  const n = Math.max(1, Math.round(parseFloat($("p_smooth_n").value) || 1));
+  return {on: $("p_smooth_on").checked && n > 1, n};
+}
+function smoothSeries(pts, key, n){
+  const half = Math.floor(n / 2);
+  return pts.map((row, i) => {
+    const v = row[key];
+    if(typeof v !== "number" || !Number.isFinite(v)) return row;   // keep the gap
+    let sum = 0, count = 0;
+    for(let j = Math.max(0, i-half); j <= Math.min(pts.length-1, i+half); j++){
+      const w = pts[j][key];
+      if(typeof w === "number" && Number.isFinite(w)){ sum += w; count++; }
+    }
+    return count ? {...row, [key]: sum/count} : row;
+  });
+}
+
+/** `mul` rescales a linear panel into a display unit (A -> mA/µA); the axis
+    labels are drawn in projected space, so they follow automatically.
+    `rangePts` scales the axis off a different set than the one drawn - used so
+    smoothing cannot rescale the axis to its own narrower spread, which would
+    magnify what's left into looking like a bigger trend than the data shows. */
+function drawPanel(g, title, x0, y0, W, H, pts, X, log, series, mul=1, rangePts=null){
+  g.strokeStyle="#2a323d"; g.lineWidth=1; g.strokeRect(x0,y0,W,H);
+  g.fillStyle="#8b949e"; g.font="10px system-ui"; g.textAlign="left";
+  g.fillText(title, x0+5, y0+11);
+  const proj = v => log ? Math.log10(Math.max(v,1e-14)) : v*mul;
+  let lo=Infinity, hi=-Infinity;
+  for(const r of (rangePts || pts)) for(const s of series){
+    const v=r[s.key];
+    if(typeof v==="number" && Number.isFinite(v)){ const q=proj(v); if(q<lo)lo=q; if(q>hi)hi=q; }
+  }
+  if(lo===Infinity){ lo=log?-8:-1; hi=log?0:1; }
+  if(hi-lo<1e-9){ hi=lo+1; lo-=1; }
+  const mg=(hi-lo)*0.1; lo-=mg; hi+=mg;
+  const Y = v => y0 + H*(1-(proj(v)-lo)/(hi-lo));
+  g.textAlign="right";
+  for(let i=0;i<=4;i++){
+    const yy=y0+H*i/4, q=hi-(hi-lo)*i/4;
+    g.strokeStyle="#1b2230"; g.beginPath(); g.moveTo(x0,yy); g.lineTo(x0+W,yy); g.stroke();
+    g.fillStyle="#8b949e";
+    g.fillText(log ? Math.pow(10,q).toExponential(1)
+      : (Math.abs(q)<1e-3 && q!==0 ? q.toExponential(1) : q.toPrecision(3)), x0-6, yy+3);
+  }
+  for(const s of series){
+    g.strokeStyle=s.color; g.lineWidth=1.6; g.beginPath(); let drawing=false;
+    for(const r of pts){
+      const v=r[s.key];
+      if(typeof v!=="number"||!Number.isFinite(v)){ drawing=false; continue; }
+      const px=X(r.t), py=Y(v);
+      drawing ? g.lineTo(px,py) : g.moveTo(px,py); drawing=true;
+    }
+    g.stroke();
+  }
+  return { y0, H, Y, series };   // for the hover readout
+}
+
+// --- MFC flow strip: always-live rolling window, no zoom/pan (kept simple -
+// it's a monitoring strip, not something to interrogate like the run chart) ---
+const MFC_WINDOW_S = 120;
+const MFC_COLORS = {ar: "#58a6ff", h2: "#3fb950", n2: "#d29922"};
+const MFC_FALLBACK_COLORS = ["#a371f7", "#f85149", "#56d4dc"];
+function drawMfcChart(){
+  const cv = $("mfcChart");
+  if(!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if(w < 2 || h < 2) return;      // pane hidden
+  cv.width = w*dpr; cv.height = h*dpr;
+  const g = cv.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,w,h);
+
+  const t1 = trend.length ? trend[trend.length-1].t : Date.now()/1000;
+  const t0 = t1 - MFC_WINDOW_S;
+  const W = w - PADL - PADR;
+  const X = t => PADL + W*(t-t0)/MFC_WINDOW_S;
+  const pts = trend.filter(r => r.t >= t0-2 && r.t <= t1+2);
+
+  const ids = MFC_IDS.length ? MFC_IDS : Object.keys(MFC_COLORS);
+  const series = ids.map((id,i) => ({
+    key: "mfc_"+id,
+    color: MFC_COLORS[id] || MFC_FALLBACK_COLORS[i % MFC_FALLBACK_COLORS.length],
+  }));
+  drawPanel(g, "FLOW (sccm)", PADL, 4, W, h-24, pts, X, false, series);
+
+  g.fillStyle="#8b949e"; g.font="11px system-ui"; g.textAlign="center";
+  g.fillText(clock(t0), PADL+26, h-4);
+  g.fillText(clock(t1), PADL+W-26, h-4);
+
+  setHtml($("mfcLegend"), series.map(s =>
+    `<span><i style="background:${s.color}"></i>${esc(MFC_LABELS[s.key.slice(4)]||s.key)}</span>`
+  ).join(""));
+}
+
+// --- temperatures: stage and precursor bubbler ---
+// Separate panels rather than one shared axis - the two sit at different
+// temperatures and a shared scale would flatten both. Uses the run monitor's
+// window so a feature lines up with the same moment on the chart above.
+const TEMP_SERIES = [
+  {key:"stage_temp",   color:"#f0883e", title:"STAGE (°C)"},
+  {key:"bubbler_temp", color:"#a371f7", title:"PRECURSOR BUBBLER (°C)"},
+];
+function drawTempChart(){
+  const cv = $("tempChart");
+  if(!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if(w < 2 || h < 2) return;      // pane hidden
+  cv.width = w*dpr; cv.height = h*dpr;
+  const g = cv.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,w,h);
+
+  const pad = {t:6, b:20, gap:22};
+  const {t0,t1} = visibleRange(), span = Math.max(1, t1-t0);
+  const W = w - PADL - PADR;
+  const panelH = (h - pad.t - pad.b - pad.gap) / 2;
+  const X = t => PADL + W*(t-t0)/span;
+  const pts = trend.filter(r => r.t >= t0-2 && r.t <= t1+2);
+
+  TEMP_SERIES.forEach((s, i) => {
+    const y0 = pad.t + i*(panelH + pad.gap);
+    drawPanel(g, s.title, PADL, y0, W, panelH, pts, X, false,
+              [{key:s.key, color:s.color}]);
+  });
+
+  g.fillStyle="#8b949e"; g.font="11px system-ui"; g.textAlign="center";
+  g.fillText(clock(t0), PADL+26, h-4);
+  g.fillText(clock(t1), PADL+W-26, h-4);
+
+  const last = trend.length ? trend[trend.length-1] : {};
+  setHtml($("tempLegend"), TEMP_SERIES.map(s =>
+    `<span><i style="background:${s.color}"></i>${esc(s.title.replace(" (°C)",""))}`
+    + ` ${num(last[s.key], 1)} °C</span>`).join(""));
+}
+
+// --- hover readout + drag-to-zoom band ---
+function nearestSample(t){
+  const pts = GEOM && GEOM.pts;
+  if(!pts || !pts.length) return null;
+  let best = pts[0], bd = Math.abs(pts[0].t - t);
+  for(const p of pts){ const d = Math.abs(p.t - t); if(d < bd){ bd = d; best = p; } }
+  return best;
+}
+function drawOverlays(g, w, h){
+  if(!GEOM) return;
+
+  // drag-to-zoom band takes precedence over the hover readout
+  if(zoomSel.active && zoomSel.x0 != null && zoomSel.x1 != null
+     && Math.abs(zoomSel.x1 - zoomSel.x0) > 2){
+    const a = Math.max(GEOM.PADL, Math.min(zoomSel.x0, zoomSel.x1));
+    const b = Math.min(GEOM.PADL + GEOM.W, Math.max(zoomSel.x0, zoomSel.x1));
+    g.save();
+    g.fillStyle = "rgba(88,166,255,0.16)";
+    g.fillRect(a, GEOM.top, b - a, GEOM.bottom - GEOM.top);
+    g.strokeStyle = "#58a6ff"; g.lineWidth = 1;
+    g.strokeRect(a, GEOM.top, b - a, GEOM.bottom - GEOM.top);
+    g.restore();
+    return;
+  }
+
+  if(!hover.active || hover.px == null
+     || hover.px < GEOM.PADL || hover.px > GEOM.PADL + GEOM.W) return;
+  const s = nearestSample(GEOM.invX(hover.px));
+  if(!s) return;
+  const x = GEOM.X(s.t);
+
+  g.save();
+  g.strokeStyle = "#8b949e"; g.globalAlpha = 0.6; g.setLineDash([4,3]); g.lineWidth = 1;
+  g.beginPath(); g.moveTo(x, GEOM.top); g.lineTo(x, GEOM.bottom); g.stroke();
+  g.restore();
+
+  for(const p of GEOM.panels) for(const ser of p.series){
+    const v = s[ser.key];
+    if(typeof v === "number" && Number.isFinite(v)){
+      g.save(); g.fillStyle = ser.color;
+      g.beginPath(); g.arc(x, p.Y(v), 3.5, 0, Math.PI*2); g.fill(); g.restore();
+    }
+  }
+
+  const ic = fmtCurrent(s.current);
+  const lines = [clock(s.t),
+    "P " + sci(s.pressure, 3) + " Torr",
+    "I " + ic.text + " " + ic.unit];
+  g.font = "11px system-ui"; g.textBaseline = "top";
+  const padB = 6, lh = 14;
+  const bw = Math.max(...lines.map(l => g.measureText(l).width)) + padB*2;
+  const bh = lines.length*lh + padB*2;
+  let bx = x + 10; if(bx + bw > w - 4) bx = x - 10 - bw;
+  const by = GEOM.top + 4;
+  g.save();
+  g.fillStyle = "rgba(13,17,23,0.92)"; g.strokeStyle = "#2a323d";
+  g.fillRect(bx, by, bw, bh); g.strokeRect(bx, by, bw, bh);
+  g.fillStyle = "#e6edf3"; g.textAlign = "left";
+  lines.forEach((l,i) => g.fillText(l, bx + padB, by + padB + i*lh));
+  g.restore();
+}
+
+// Drag across the plot to zoom to that time range; arrow keys pan/zoom while the
+// cursor is over the chart; hover shows the value under the cursor. No wheel
+// handler — scrolling the page must never be hijacked by the chart.
+// The temperature panels share visibleRange(), so anything that pans or zooms
+// the run monitor has to redraw them too or the two stop lining up.
+function drawViews(){ drawChart(); drawTempChart(); }
+
+(function chartInteraction(){
+  const cv = $("chart");
+  const cssX = e => e.clientX - cv.getBoundingClientRect().left;
+
+  cv.addEventListener("mouseenter", () => { hover.active = true; });
+  cv.addEventListener("mouseleave", () => {
+    hover.active = false; hover.px = null; if(!zoomSel.active) drawChart();
+  });
+  cv.addEventListener("mousemove", e => {
+    hover.px = cssX(e);
+    if(zoomSel.active) zoomSel.x1 = hover.px;
+    drawChart();
+  });
+  cv.addEventListener("mousedown", e => {
+    e.preventDefault();
+    zoomSel.active = true; zoomSel.x0 = cssX(e); zoomSel.x1 = zoomSel.x0;
+  });
+  window.addEventListener("mouseup", () => {
+    if(!zoomSel.active) return;
+    zoomSel.active = false;
+    const a = Math.min(zoomSel.x0, zoomSel.x1), b = Math.max(zoomSel.x0, zoomSel.x1);
+    zoomSel.x0 = zoomSel.x1 = null;
+    if(GEOM && b - a > 5){                       // a real drag -> zoom to it
+      const nt0 = GEOM.invX(a), nt1 = GEOM.invX(b);
+      view.windowS = Math.max(1, nt1 - nt0);
+      view.endT = nt1; view.follow = false;
+    }
+    drawViews();
+  });
+  window.addEventListener("keydown", e => {
+    if(!hover.active) return;
+    const {t0,t1} = visibleRange(), span = t1 - t0;
+    let handled = true;
+    if(e.key === "ArrowLeft"){ view.follow = false; view.endT = (view.endT ?? t1) - span*0.2; }
+    else if(e.key === "ArrowRight"){ view.follow = false; view.endT = (view.endT ?? t1) + span*0.2; }
+    else if(e.key === "ArrowUp"){ view.follow = false; view.endT = view.endT ?? t1; view.windowS = Math.max(1, span*0.8); }
+    else if(e.key === "ArrowDown"){ view.follow = false; view.endT = view.endT ?? t1; view.windowS = Math.min(3600, span*1.25); }
+    else handled = false;
+    if(handled){ e.preventDefault(); drawViews(); }
+  });
+
+  $("followBtn").onclick = () => { view.follow = true; drawViews(); };
+  $("windowSel").onchange = e => { view.windowS = +e.target.value; view.follow = true; drawViews(); };
+})();
+window.addEventListener("resize", () => { drawChart(); drawMfcChart(); drawTempChart(); });
+
+// ---------------------------------------------------------------- tabs
+// Panes are display:none when inactive, which zeroes the canvases' size - so
+// entering a pane always forces a redraw. The sweep STOP bar is fixed to the
+// viewport and lives outside the panes, so it stays reachable from any tab.
+(function tabs(){
+  const btns = [...document.querySelectorAll(".tabs button")];
+  const panes = [...document.querySelectorAll("[data-pane]")];
+  function show(name){
+    if(!panes.some(p => p.dataset.pane === name)) name = "run";
+    for(const b of btns) cls(b, "active", b.dataset.tab === name);
+    for(const p of panes) cls(p, "hidden", p.dataset.pane !== name);
+    localStorage.setItem("activeTab", name);
+    drawChart(); drawMfcChart(); drawTempChart();
+  }
+  for(const b of btns) b.onclick = () => show(b.dataset.tab);
+  $("alertChip").onclick = () => show("diag");
+  show(localStorage.getItem("activeTab") || "run");
+})();
+
+// ---------------------------------------------------------------- actions
+// Valve identification. STOP is the safety-critical control - keep it trivial.
+// Two STOP controls, same action: the fixed top bar and the one in the card.
+$("sweepStop").onclick = () => post("/api/valve_id/stop");
+$("idStopCard").onclick = () => post("/api/valve_id/stop");
+$("idStartBtn").onclick = async () => {
+  await post("/api/valve_id/start", {
+    group: $("idGroup").value,
+    reps: parseInt($("idReps").value, 10) || 3,
+    on_s: parseFloat($("idOn").value) || 1,
+    off_s: parseFloat($("idOff").value) || 1,
+    gap_s: parseFloat($("idGap").value) || 3,
+    start_index: parseInt($("idStart").value, 10) || 0,
+  });
+};
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("button[data-mark]");
+  if(!b) return;
+  let valve = b.dataset.mark, note = "";
+  if(valve === "__other"){
+    note = (prompt("Which valve moved on this line?") || "").trim();
+    valve = "";
+    if(!note) return;
+  }
+  try { await post("/api/valve_id/mark", {valve, note}); } catch(_){}
+});
+
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("button[data-act]");
+  if(!b) return;
+  const id = b.dataset.id;
+  try{
+    if(b.dataset.act === "valve"){
+      await post(`/api/valve/${id}`, {state: b.dataset.state === "1"});
+    } else if(b.dataset.act === "mfc"){
+      const v = readNum(`#mfc_${CSS.escape(id)}`, `${id} flow`);
+      if(v === null) return;
+      const res = await post(`/api/mfc/${id}/setpoint`, {sccm: v});
+      toast(`${id} setpoint set to ${res.setpoint_sccm} sccm`, true);
+    }
+  }catch(_){ /* toast already shown */ }
+});
+
+document.addEventListener("keydown", ev => {
+  if(ev.key !== "Enter") return;
+  const input = ev.target.closest('input[data-f="input"]');
+  if(!input) return;
+  const btn = input.parentElement.querySelector("button[data-act]");
+  if(btn && !btn.disabled) btn.click();
+});
+
+// Rename a valve / MFC / gauge (e.g. when swapping precursors). Display-only;
+// persisted server-side. Blank reverts to the reactor.yaml name.
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("button[data-rename]");
+  if(!b) return;
+  const kind = b.dataset.rename, id = b.dataset.id;
+  const tile = b.closest(".valve, .tile");
+  const cur = (tile && tile.querySelector('[data-f="label"],[data-f="name"]')
+                ?.textContent || "").trim();
+  const next = prompt(`Rename this ${kind} (blank = default name):`, cur);
+  if(next === null) return;                       // cancelled
+  try{
+    const r = await post("/api/label", {kind, id, label: next});
+    toast(`Renamed to "${r.label || "(default)"}"`, true);
+  }catch(_){ /* toast already shown */ }
+});
+
+// ALD run params: persist to localStorage, launch via /api/run/ald
+// Every p_* field persisted between sessions - run parameters plus the display
+// preferences that sit alongside them. What actually gets sent to the server is
+// runParams(), not this list.
+const ALD_KEYS = ["cycles","dose_pressure_torr","dose_s","pump_a_s","beam_s",
+  "pump_b_s","min_current_ua","fill_pulse_on_s","fill_pulse_off_s","tolerance_pct",
+  "reignite_pulse_s","reignite_settle_s",
+  "pre_ar_sccm","pre_valve_delay_s","pre_hold_s",
+  "gas_overlap_s","smooth_on","smooth_n",
+  "h2_gas_enable","h2_gas_order","h2_gas_pct","h2_gas_flow_sccm",
+  "n2_gas_enable","n2_gas_order","n2_gas_pct","n2_gas_flow_sccm"];
+
+/* EE-ALD vs EE-CVD. EE-CVD holds the beam on for the whole run, so it has no
+   beam-exposure or pump-B parameter and only two cycle phases. Elements tagged
+   data-mode="<mode>" are shown only in that mode. */
+function runMode(){ return $("modeSel").value === "cvd" ? "cvd" : "ald"; }
+function applyMode(){
+  const m = runMode();
+  for(const el of document.querySelectorAll("[data-mode]"))
+    cls(el, "hidden", el.dataset.mode !== m);
+  $("runTitle").textContent = m === "cvd" ? "EE-CVD run" : "EE-ALD run";
+  $("gasWindowWord").textContent = m === "cvd" ? "cycle" : "exposure";
+  localStorage.setItem("runMode", m);
+  updateGasSchedHint();
+}
+
+function updateSmoothHint(){
+  const sm = smoothing();
+  const el = $("smoothHint");
+  el.textContent = sm.on
+    ? `${sm.n}-point centred average on chamber pressure (~${(sm.n/5).toFixed(1)} s)`
+    : "off — chamber pressure drawn raw";
+  el.style.color = sm.on ? "var(--accent)" : "var(--dim)";
+}
+function paramGet(k){
+  const el = $("p_"+k);
+  return el ? (el.type === "checkbox" ? el.checked : el.value) : undefined;
+}
+function paramSet(k, v){
+  const el = $("p_"+k);
+  if(!el) return;
+  if(el.type === "checkbox") el.checked = !!v; else el.value = v;
+}
+function loadParams(){
+  try{
+    const p = JSON.parse(localStorage.getItem("aldParams")||"{}");
+    for(const k of ALD_KEYS) if(p[k]!=null) paramSet(k, p[k]);
+  }catch(_){}
+  updateReigniteHint();
+  updateGasSchedHint();
+  updateSmoothHint();
+}
+function saveParams(){
+  const p={}; for(const k of ALD_KEYS) p[k]=paramGet(k);
+  localStorage.setItem("aldParams", JSON.stringify(p));
+}
+// Shows the achieved retry rate so it's obvious whether the two fields above
+// meet "at least twice a second" without doing the arithmetic by hand. A full
+// attempt is the 0.2s current-check poll plus these two, not just the two.
+// It sits in the collapsed section's summary so it stays readable when the
+// advanced fields are folded away.
+const REIGNITE_POLL_S = 0.2;
+function updateReigniteHint(){
+  const pulse = parseFloat($("p_reignite_pulse_s").value)||0;
+  const settle = parseFloat($("p_reignite_settle_s").value)||0;
+  const total = REIGNITE_POLL_S + pulse + settle;
+  const hz = total > 0 ? 1/total : Infinity;
+  const el = $("reigniteHint");
+  el.textContent = `reignite ${total.toFixed(2)}s/attempt = ${hz.toFixed(1)}/s`
+    + (hz < 2 ? "  (slower than 2/s)" : "");
+  el.style.color = hz < 2 ? "var(--warn)" : "var(--dim)";
+}
+// Live plain-English timeline for the gas schedule, mirroring exactly what
+// RecipeRunner._electron_beam computes at run time (see recipe.py) - and
+// flags the same order collision the server will otherwise reject with a 409.
+function readGasField(id){
+  return {
+    id, enable: $("p_"+id+"_gas_enable").checked,
+    order: $("p_"+id+"_gas_order").value,
+    pct: parseFloat($("p_"+id+"_gas_pct").value) || 0,
+    flow: parseFloat($("p_"+id+"_gas_flow_sccm").value) || 0,
+  };
+}
+function updateGasSchedHint(){
+  // EE-ALD measures against the beam exposure and reports offsets from beam
+  // start; EE-CVD measures against the whole cycle (dose + pump A) and reports
+  // offsets from cycle start. Mirrors _electron_beam and _beam_watch in
+  // recipe.py respectively.
+  const cvd = runMode() === "cvd";
+  const span = cvd
+    ? (parseFloat($("p_dose_s").value) || 0) + (parseFloat($("p_pump_a_s").value) || 0)
+    : (parseFloat($("p_beam_s").value) || 0);
+  const anchor = cvd ? "cycle" : "beam";
+  const ov = parseFloat($("p_gas_overlap_s").value) || 0;
+  const gases = ["h2","n2"].map(readGasField).filter(g => g.enable);
+  const first = gases.find(g => g.order === "first");
+  const second = gases.find(g => g.order === "second");
+  const collision = gases.filter(g=>g.order==="first").length > 1
+                  || gases.filter(g=>g.order==="second").length > 1;
+  const handoff = first ? first.pct/100*span : 0;
+  const secondOff = Math.min(span, handoff + (second ? second.pct/100*span : 0));
+  const lines = [];
+  if(first){
+    // EE-CVD has no run-up before a cycle, so "first" re-arms by the overlap
+    // before the cycle ends instead — the same handoff, wrapped.
+    const on = cvd
+      ? `on ${anchor}+0s (re-arms +${Math.max(0, secondOff-ov).toFixed(2)}s)`
+      : `on ${anchor}−${ov.toFixed(2)}s`;
+    lines.push(`${first.id.toUpperCase()} ${on}`
+      + ` · off ${anchor}+${handoff.toFixed(2)}s (${first.pct}% @ ${first.flow}sccm)`);
+  }
+  if(second){
+    const onAt = Math.max(0, handoff - ov);
+    lines.push(`${second.id.toUpperCase()} on ${anchor}+${onAt.toFixed(2)}s`
+      + ` · off ${anchor}+${secondOff.toFixed(2)}s (${second.pct}% @ ${second.flow}sccm)`);
+  }
+  const el = $("gasSchedHint");
+  el.textContent = collision
+    ? "Both gases set to the same order — pick First for one, Second for the other."
+    : (gases.length ? lines.join("   ") : "no gas scheduled — H2/N2 stay off all run");
+  el.style.color = collision ? "var(--warn)" : "var(--dim)";
+}
+$("aldParams").addEventListener("input", () => { saveParams(); updateReigniteHint(); updateGasSchedHint(); });
+$("gasSchedSection").addEventListener("input", () => { saveParams(); updateGasSchedHint(); });
+$("gasSchedSection").addEventListener("change", () => { saveParams(); updateGasSchedHint(); });
+$("advSection").addEventListener("input", () => { saveParams(); updateReigniteHint(); });
+$("preSection").addEventListener("input", saveParams);
+$("modeSel").onchange = applyMode;
+// The toggle lives in the <summary> so it stays reachable while collapsed, so
+// its clicks must not also open/close the panel.
+$("p_smooth_on").addEventListener("click", e => e.stopPropagation());
+$("smoothSection").addEventListener("input", () => {
+  saveParams(); updateSmoothHint(); drawChart();
+});
+
+/** Everything the run builders accept, for whichever mode is selected. */
+function runParams(){
+  const P = k => parseFloat($("p_"+k).value);
+  const cvd = runMode() === "cvd";
+  const params = {
+    cycles: parseInt($("p_cycles").value,10)||1,
+    dose_pressure_torr: P("dose_pressure_torr"),
+    dose_s: P("dose_s"), pump_a_s: P("pump_a_s"),
+    min_current_a: (P("min_current_ua")||500)*1e-6,
+    fill_pulse_on_s: P("fill_pulse_on_s"), fill_pulse_off_s: P("fill_pulse_off_s"),
+    tolerance_frac: (P("tolerance_pct")||20)/100,
+    reignite_pulse_s: P("reignite_pulse_s"), reignite_settle_s: P("reignite_settle_s"),
+  };
+  if(!cvd){ params.beam_s = P("beam_s"); params.pump_b_s = P("pump_b_s"); }
+  params.gas_overlap_s = P("gas_overlap_s") || 0;
+  for(const gas of ["h2","n2"]){
+    const g = readGasField(gas);
+    params[gas+"_gas_enable"] = g.enable;
+    params[gas+"_gas_order"] = g.order;
+    params[gas+"_gas_pct"] = g.pct;
+    params[gas+"_gas_flow_sccm"] = g.flow;
+  }
+  return params;
+}
+
+$("aldStart").onclick = async () => {
+  saveParams();
+  const cvd = runMode() === "cvd";
+  const params = runParams();
+  const what = cvd
+    ? `This doses precursor every cycle with the electron beam held on for the `
+      + `whole run.`
+    : `This doses precursor and fires the electron beam each cycle.`;
+  if(!confirm(`Start ${cvd ? "EE-CVD" : "EE-ALD"} run — ${params.cycles} cycles?`
+    + `\n\n${what}`)) return;
+  try{ await post(cvd ? "/api/run/cvd" : "/api/run/ald", params); }catch(_){}
+};
+
+// Pre-start: the dialog is the point of the button as much as the sequence is -
+// the three valves have to be in REMOTE and the supplies on, or the sequence
+// commands hardware that cannot respond.
+$("preStartBtn").onclick = async () => {
+  saveParams();
+  if(!confirm("Set Ar Pneumatic, Plasma Ground, and Precursor Fill to Remote.\n"
+    + "Turn on output for power supplies.\n\n"
+    + "Pre-start will open the Ar pneumatic, flow Ar, start the precursor fill "
+    + "pulse, then strike the plasma and hold it. It retries the strike until "
+    + "you press Stop pre-start.")) return;
+  const P = k => parseFloat($("p_"+k).value);
+  const p = runParams();
+  try{
+    await post("/api/prestart/start", {
+      ar_sccm: P("pre_ar_sccm"),
+      valve_delay_s: P("pre_valve_delay_s"),
+      hold_s: P("pre_hold_s"),
+      dose_pressure_torr: p.dose_pressure_torr,
+      fill_pulse_on_s: p.fill_pulse_on_s, fill_pulse_off_s: p.fill_pulse_off_s,
+      tolerance_frac: p.tolerance_frac,
+      min_current_a: p.min_current_a,
+      reignite_pulse_s: p.reignite_pulse_s, reignite_settle_s: p.reignite_settle_s,
+    });
+    $("preSection").open = true;
+  }catch(_){}
+};
+$("preStopBtn").onclick = () => post("/api/prestart/stop");
+
+$("pauseBtn").onclick  = () => post("/api/recipe/pause");
+$("resumeBtn").onclick = () => post("/api/recipe/resume");
+$("abortBtn").onclick  = () => post("/api/recipe/abort");
+
+// Standalone fill: reuse the ALD dose-pressure + fill-pulse params and the
+// default fill valve / precursor Baratron so it matches the run's own regulation.
+$("fillStart").onclick = async () => {
+  const P = k => parseFloat($("p_"+k).value);
+  try{
+    await post("/api/fill/start", {
+      valve: "rpm_top", gauge: DEFAULT_FILL_GAUGE,
+      target_torr: P("dose_pressure_torr"),
+      pulse_on_s: P("fill_pulse_on_s"), pulse_off_s: P("fill_pulse_off_s"),
+      tolerance_frac: (P("tolerance_pct")||20)/100,
+    });
+    toast(`Filling to ${P("dose_pressure_torr")} Torr`, true);
+  }catch(_){}
+};
+$("fillStop").onclick = () => post("/api/fill/stop");
+$("logStart").onclick  = () => post("/api/log/start", {label: $("logLabel").value || null});
+$("logStop").onclick   = () => post("/api/log/stop");
+
+// ---------------------------------------------------------------- bootstrap
+(async () => {
+  try{ CFG = await (await fetch("/api/config")).json(); }catch(_){ CFG = {}; }
+  $("modeSel").value = localStorage.getItem("runMode") || "ald";
+  loadParams();
+  applyMode();
+  connect();
+})();
+</script>
+</body>
+</html>

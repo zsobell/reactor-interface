@@ -1,0 +1,398 @@
+# ============================================================================
+#  Reactor hardware map  --  UHV chamber
+# ============================================================================
+#  The ONLY place hardware addresses live. Changing an IP, a DAQ channel or a
+#  scaling factor is an edit here, never a code change.
+#
+#  Values marked PLACEHOLDER have not been confirmed against the real tool.
+#  Run this first, on the reactor PC:
+#      python -m tools.discover_hardware
+#  It is read-only - it enumerates and identifies, and commands nothing.
+# ============================================================================
+
+version: 1
+
+site:
+  name: "UHV Reactor"
+  loop_hz: 2.0
+  data_dir: "./data"
+
+# ---------------------------------------------------------------------------
+#  There are NO software interlocks, limits, or automatic actions in this
+#  program. Commands do exactly what they say - a setpoint is written as given,
+#  a valve opens when told, and nothing closes valves or changes setpoints on
+#  its own. The operator is the sole arbiter of reactor behaviour.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+#  NI CompactDAQ  --  VERIFIED against the real hardware on this PC
+# ---------------------------------------------------------------------------
+#  Enumerated by tools/discover_hardware.py. Module types are facts; which
+#  CHANNEL carries which signal is not yet confirmed.
+#
+#    cDAQ1  (cDAQ-9174)
+#      Mod1  NI 9265   4x analog OUT, 0-20 mA current      <- purpose unknown
+#      Mod2  NI 9211   4x thermocouple in  (+/-80 mV)
+#      Mod3  NI 9375   16x digital in (port0) + 16x digital out (port1)
+#      Mod4  NI 9211   4x thermocouple in  (+/-80 mV)
+#    cDAQ2  (cDAQ-9174)
+#      Mod1  NI 9201   8x voltage in, +/-10 V   <- only voltage AI in the system
+#      Mod2  NI 9472   8x digital out (24 V sourcing)
+#      Mod3  NI 9472   8x digital out (24 V sourcing)
+#
+#  Two consequences worth knowing:
+#
+#  1. DAQmx grants ONE program exclusive use of a module's analog input. While
+#     the LabVIEW VI is running it holds every AI module, and this program will
+#     report "resource reserved". Close the VI before bring-up. Nothing is
+#     damaged by the clash - DAQmx just refuses.
+#
+#  2. The NI 9211 is slow: ~14 S/s total, shared across its channels. Reading
+#     one channel at 2 Hz is fine; reading all four plus everything else may
+#     throttle the loop. If the loop falls behind, drop site.loop_hz to 1.0
+#     (which is what the LabVIEW version effectively ran at).
+daq:
+  chassis:
+    - "cDAQ1"
+    - "cDAQ2"
+
+# ---------------------------------------------------------------------------
+#  Chamber pressure
+# ---------------------------------------------------------------------------
+#  Currently reads ~5.9e-8 Torr, so this is a UHV gauge with a LOGARITHMIC
+#  output. A linear 0-10 V scale cannot resolve 1e-8 at all.
+#
+#  ---- THE CURVE BELOW IS A GUESS. CONFIRM IT. ----
+#  On a log gauge a 0.1 V error is a ~30% pressure error, and the wrong curve
+#  can be off by decades. Identify it from a known reading:
+#      python -m tools.discover_hardware --read-pressure --expect 5.9e-8
+#  That prints the measured voltage and what each candidate curve implies.
+#  If none match, take a second reading at a very different pressure and the
+#  curve can be solved exactly from two points.
+#
+#  Candidates: pkr251, inficon_bpg402, pfeiffer_pkr361, ion_gauge_1v_decade,
+#              baratron_1torr / _10torr / _100torr
+#  Or drop `preset` and give type/gain/offset directly.
+#  CHANNEL CONFIRMED by survey: of the eight NI 9201 inputs, ai3 is the only one
+#  carrying a real signal - 2.4719 V, stable to 15 mV. Every other channel sits
+#  at the noise floor (see docs/HARDWARE.md).
+#
+#  CURVE CONFIRMED against the gauge controller: P = 10 ** (V - 10) Torr,
+#  1 decade per volt. 2.4718 V -> 2.96e-8 Torr, which matched the controller's
+#  display. The offset landing on a round -10 is what identifies the family.
+#
+#  Caveat worth knowing: this was matched at ONE pressure, which fixes the
+#  OFFSET but not the GAIN - a different gain with a compensating offset would
+#  also fit that single point. Next time the chamber is at a very different
+#  pressure, check the number here still agrees with the controller. If it
+#  drifts apart at the far end, the gain needs adjusting.
+pressure:
+  label: "Cold Cathode chamber pressure"
+  channel: "cDAQ2Mod1/ai3"                   # CONFIRMED by input survey
+  terminal_config: "rse"
+  input_range_v: [-10.0, 10.0]               # NI 9201 is +/-10 V, not 0-10
+  scaling:
+    preset: "ion_gauge_e10"                  # CONFIRMED: P = 10 ** (V - 10) Torr
+  unit: "Torr"
+
+# ---------------------------------------------------------------------------
+#  Sample stage thermocouple  --  MEASUREMENT ONLY
+# ---------------------------------------------------------------------------
+#  Read and logged. There is no heater control on this tool, so there is no
+#  setpoint, no PID and no analog output associated with it.
+#  CONFIRMED by connect-and-compare: cDAQ1Mod4/ai1 read open-circuit (2385 C)
+#  before the stage thermocouple was attached and 21.2 C afterwards, while every
+#  other channel stayed put. That is the stage TC.
+stage_temp:
+  enabled: true
+  label: "Stage Temperature"
+  channel: "cDAQ1Mod4/ai1"                   # CONFIRMED
+  tc_type: "K"                               # PLACEHOLDER - confirm TC type
+  unit: "C"
+
+# ---------------------------------------------------------------------------
+#  Unidentified analog inputs
+# ---------------------------------------------------------------------------
+#  The old log had columns A/B/C/D. The hardware makes the likely explanation
+#  clear: there are two NI 9211 four-channel thermocouple modules, so A/B/C/D
+#  was very probably the four TC inputs of one of them - four thermocouples, not
+#  four heater zones.
+#
+#  Still unverified, because LabVIEW was holding every AI module when this was
+#  checked. To settle it: close the LabVIEW VI, then run
+#      python -m tools.discover_hardware --survey-inputs
+#  It reads each channel and reports open-circuit vs. connected. Any TC that
+#  reads near ambient has something attached; add those here.
+#
+#  Anything listed here flows into the UI, the trend and the extended log
+#  automatically - no code change.
+#  ANSWERED: three thermocouples are now physically connected out of eight TC
+#  inputs - the stage TC (cDAQ1Mod4/ai1, configured above) plus these two, which
+#  were already wired and read steady room temperature. Nobody has said what they
+#  measure yet, so they are logged under neutral names. Rename them here once
+#  identified; the label flows straight through to the UI and the extended log.
+#
+#  The other five TC inputs read 2385 C, the NI 9211 open-circuit full-scale.
+aux_inputs:
+  # Precursor bubbler thermocouple, added on the port next to the stage TC
+  # (stage is cDAQ1Mod4/ai1). Expected ~30-60 C. If this reads the NI 9211
+  # open-circuit full-scale (~2385 C), the TC is on ai2 instead - swap the
+  # channel below. Verified live 2026-08-03.
+  - id: "bubbler"
+    label: "Precursor bubbler"
+    channel: "cDAQ1Mod4/ai0"
+    kind: "thermocouple"
+    tc_type: "K"
+    unit: "C"
+  - id: "tc_a"
+    label: "Thermocouple A (unidentified)"
+    channel: "cDAQ1Mod2/ai0"                 # CONFIRMED connected, 26.3 C at rest
+    kind: "thermocouple"
+    tc_type: "K"
+    unit: "C"
+  - id: "tc_b"
+    label: "Thermocouple B (unidentified)"
+    channel: "cDAQ1Mod2/ai1"                 # CONFIRMED connected, 24.5 C at rest
+    kind: "thermocouple"
+    tc_type: "K"
+    unit: "C"
+
+#  Also seen in the survey: cDAQ2Mod1/ai2 sits at 0.0197 V, marginally above the
+#  ~0.005 V noise floor of the unconnected channels. Too weak to call. If you
+#  expect a second analog signal, add it here and watch whether it tracks
+#  anything; otherwise ignore it.
+
+# ---------------------------------------------------------------------------
+#  Valves (digital output lines)  --  IDENTIFIED by sweep 2026-07-31
+# ---------------------------------------------------------------------------
+#  Each line pulsed in turn; the operator recorded what moved. Full line map:
+#
+#    cDAQ2Mod2 (NI 9472) - LOWER box, pneumatic valves:
+#      line0  Left precursor manifold, bottom
+#      line1  Left precursor manifold, top
+#      line2  Right precursor manifold, bottom
+#      line3  Right precursor manifold, top
+#      line4  unused
+#      line5  Ar MFC pneumatic
+#      line6,7  unused
+#    cDAQ2Mod3 (NI 9472) - did nothing on any line; not wired to anything.
+#    cDAQ1Mod3/port1 (NI 9375) - UPPER box, labelled outputs:
+#      line0  Precursor 1  (currently unused)
+#      line1  Precursor 2  (currently TEMAZr)
+#      line2  Loadlock foreline
+#      line3  Main foreline
+#      line4  Main gate valve
+#      line5,6,7,8  unused
+#      line9  Plasma ground
+#      line10-15  not wired / not tested
+#
+#  `kind` ("dose"/"utility") and `identified` are labels only, for grouping and
+#  description in the UI. They do not gate or alter actuation - every valve opens
+#  and closes exactly when commanded.
+valve_banks:
+  - id: "lower"
+    label: "Lower box (cDAQ2Mod2) - pneumatic valves"
+    note: "Also carries the three Baratrons (analog, on cDAQ2Mod1)."
+  - id: "upper"
+    label: "Upper box (cDAQ1Mod3) - labelled outputs D1-D9"
+    note: "Precursors, forelines, main gate valve, plasma ground."
+
+valves:
+  # === LOWER box - cDAQ2Mod2 (NI 9472) ======================================
+  - id: "lpm_bottom"
+    label: "Left precursor manifold - bottom"
+    kind: "utility"
+    bank: "lower"
+    line: "cDAQ2Mod2/port0/line0"
+    identified: true
+  - id: "lpm_top"
+    label: "Left precursor manifold - top"
+    kind: "utility"
+    bank: "lower"
+    line: "cDAQ2Mod2/port0/line1"
+    identified: true
+  - id: "rpm_bottom"
+    label: "Right precursor manifold - bottom"
+    kind: "utility"
+    bank: "lower"
+    line: "cDAQ2Mod2/port0/line2"
+    identified: true
+  - id: "rpm_top"
+    label: "Right precursor manifold - top"
+    kind: "utility"
+    bank: "lower"
+    line: "cDAQ2Mod2/port0/line3"
+    identified: true
+  # line4 unused
+  - id: "ar_pneumatic"
+    label: "Ar MFC pneumatic isolation"
+    kind: "utility"
+    bank: "lower"
+    line: "cDAQ2Mod2/port0/line5"
+    identified: true
+  # line6, line7 unused
+
+  # === UPPER box - cDAQ1Mod3 port1 (NI 9375) ================================
+  - id: "prec1"
+    label: "Precursor 1 micro pulse valve"     # doses into chamber from the charged volume
+    kind: "dose"
+    bank: "upper"
+    line: "cDAQ1Mod3/port1/line0"
+    identified: true
+  - id: "prec2"
+    label: "Precursor 2 (TEMAZr)"
+    kind: "dose"
+    bank: "upper"
+    line: "cDAQ1Mod3/port1/line1"
+    identified: true
+  - id: "loadlock_foreline"
+    label: "Loadlock foreline"
+    kind: "utility"
+    bank: "upper"
+    line: "cDAQ1Mod3/port1/line2"
+    identified: true
+  - id: "main_foreline"
+    label: "Main foreline"
+    kind: "utility"
+    bank: "upper"
+    line: "cDAQ1Mod3/port1/line3"
+    identified: true
+  - id: "main_gate"
+    label: "Main gate valve"
+    kind: "utility"
+    bank: "upper"
+    line: "cDAQ1Mod3/port1/line4"
+    identified: true
+  # line5-8 unused
+  - id: "plasma_ground"
+    label: "Plasma ground"
+    kind: "utility"
+    bank: "upper"
+    line: "cDAQ1Mod3/port1/line9"
+    identified: true
+
+# ---------------------------------------------------------------------------
+#  Baratrons on the lower box (cDAQ2Mod1, NI 9201, +/-10 V). All 10 Torr heads,
+#  linear 0-10 V = 0-10 Torr, so preset baratron_10torr (1 V = 1 Torr).
+# ---------------------------------------------------------------------------
+#  Three Baratrons, all identified:
+#    ai0  Ar Baratron - CONFIRMED 2026-07-31 by rising to 2.72 Torr under 5 sccm Ar.
+#    ai1  Precursor 1 dose pressure  }  the two remaining Baratrons, labelled by
+#    ai2  Precursor 2 dose pressure  }  operator rule: lower current reading is
+#                                       precursor 1, higher is precursor 2
+#                                       (ai1 ~ -0.003, ai2 ~ +0.017 Torr at rest).
+#  To be verified in the lab; swap these two channels if it turns out reversed.
+#  ai4-ai7 sit at the noise floor (nothing connected).
+gauges:
+  - id: "ar_baratron"
+    label: "Ar Baratron"
+    channel: "cDAQ2Mod1/ai0"                 # CONFIRMED
+    scaling: { preset: "baratron_10torr" }
+    unit: "Torr"
+  - id: "prec1_dose"
+    label: "Precursor 1 dose pressure"
+    channel: "cDAQ2Mod1/ai1"                 # lower reading (to verify in lab)
+    scaling: { preset: "baratron_10torr" }
+    unit: "Torr"
+  - id: "prec2_dose"
+    label: "Precursor 2 dose pressure"
+    channel: "cDAQ2Mod1/ai2"                 # higher reading (to verify in lab)
+    scaling: { preset: "baratron_10torr" }
+    unit: "Torr"
+
+# ---------------------------------------------------------------------------
+#  MKS mass flow controllers  --  Modbus TCP
+# ---------------------------------------------------------------------------
+#  MKS G50 units. All three verified from this PC (192.168.2.220 on their subnet).
+#
+#  READINGS come from each device's own HTTP interface (iobuf.js / deviceid.js),
+#  which states flow, setpoint, full scale, body temperature and health flags
+#  directly. WRITES go to Modbus register 0xA000, in sccm, exactly as commanded.
+#
+#  Full scale is read live from each instrument every poll - it changes with the
+#  selected gas (Ar 29, H2 10, N2 50 sccm), so it is never configured here.
+#
+#  Confirmed on this hardware:
+#    Ar  .221  GM50A013501RBM020  s/n 21999844  FS 29 sccm  gcf 1.39  N.C. valve
+#    H2  .222  GM50A013101RMM020  s/n 23291683  FS 10 sccm  gcf 1.00  N.C. valve
+#    N2  .223  GM50A013501RBM020  s/n 21999843  FS 50 sccm  gcf 1.00  N.C. valve
+#  All calibrated on N2.
+mfcs:
+  - id: "ar"
+    label: "Ar - HCPES"
+    gas: "Ar"                                # fallback; real gas read from device
+    host: "192.168.2.221"                    # CONFIRMED
+    port: 502
+    unit_id: 1
+    # Requested by operator: the Ar MFC pneumatic isolation valve (ar_pneumatic)
+    # gates this line. Setpoint cannot go above 0 sccm while it's closed, and
+    # closing it zeroes the setpoint.
+    isolation_valve: "ar_pneumatic"
+
+  - id: "h2"
+    label: "H2 - reactive background"
+    gas: "H2"
+    host: "192.168.2.222"                    # CONFIRMED
+    port: 502
+    unit_id: 1
+
+  - id: "n2"
+    label: "N2 - reactive background"
+    gas: "N2"
+    host: "192.168.2.223"                    # CONFIRMED
+    port: 502
+    unit_id: 1
+
+# ---------------------------------------------------------------------------
+#  Bench instruments (VISA over USB / LAN / GPIB)
+# ---------------------------------------------------------------------------
+#  Keithley DMM6500 measuring DC current over USB.
+#
+#  Get the exact resource string from the discovery tool; it looks like
+#      USB0::0x05E6::0x6500::<serial>::INSTR
+#  USB-TMC needs NI-VISA, which the LabVIEW install already provides.
+#
+#  The DMM6500 must be in SCPI command-set mode, not TSP:
+#      Menu > System > Settings > Command Set > SCPI
+#
+#  `setup` is the only thing that changes instrument state, sent once at
+#  connect, and it selects the measurement function. Empty the list to leave the
+#  DMM exactly as you set it up by hand and just read what it is showing.
+instruments:
+  - id: "ammeter"
+    label: "Keithley DMM6500"
+    enabled: true
+    driver: "keithley_dmm6500"
+    # CONFIRMED: *IDN? -> KEITHLEY INSTRUMENTS,MODEL DMM6500,04429995,1.0.04b
+    resource: "USB0::0x05E6::0x6500::04429995::INSTR"
+    setup:
+      - ':SENS:FUNC "CURR:DC"'
+      - ":SENS:CURR:RANG:AUTO ON"
+      - ":SENS:CURR:NPLC 1"
+      - ":SENS:CURR:AZER ON"
+    query: ":READ?"
+    unit: "A"
+    overload_above: 1.0e30
+
+# ---------------------------------------------------------------------------
+#  Data logging
+# ---------------------------------------------------------------------------
+#  Tab-delimited, named YYMMDD_HHMMSS_<suffix>, like the LabVIEW logger.
+#  "Time" is special (elapsed seconds); every other value is a snapshot key.
+#  Add a row here and it appears in the file - no code change.
+logging:
+  filename_suffix: "General"
+  columns:
+    Time: "_elapsed"
+    Pressure: "pressure"
+    "Stage T": "stage.temp"
+    "Bubbler T": "aux.bubbler"
+    Current: "inst.ammeter"
+    "Ar Baratron": "gauge.ar_baratron"
+    "TC A": "aux.tc_a"
+    "TC B": "aux.tc_b"
+    "Ar sccm": "mfc.ar.flow"
+    "H2 sccm": "mfc.h2.flow"
+    "N2 sccm": "mfc.n2.flow"
+  # Richer parallel CSV: every channel plus recipe position.
+  extended_log: true

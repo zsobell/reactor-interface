@@ -1,0 +1,62 @@
+name: "ALD + e-beam (precursor 1)"
+notes: >
+  Electron-beam ALD-style run on precursor 1.
+
+  Every value here is meant to be tuned - these are starting numbers, not
+  process settings. Change durations, the dose pressure, and the cycle count
+  freely; they are just YAML.
+
+  Architecture (as described by the operator):
+    * The precursor-1 FULL VOLUME is held at a set pressure the ENTIRE run by
+      pulsing the right-manifold-top valve (rpm_top) whenever the precursor-1
+      dose-pressure Baratron (prec1_dose, ai1) reads below setpoint. This is the
+      `start_fill` step in setup; it runs in the background across all cycles and
+      is stopped automatically when the run ends.
+    * Each cycle doses into the chamber by opening the micro-pulse valve (prec1)
+      for a set time, then pumps, then runs the e-beam, then pumps again.
+    * The e-beam is the plasma-ground switch OFF. Current at the sample is watched
+      on the Keithley the whole time; if |I| drops below min_current the exposure
+      clock pauses, the switch is pulsed to reignite, and exposure resumes only
+      once current is back.
+    * If the full-volume pressure drifts more than +/-20% off setpoint, a gentle
+      "flag" is raised in the event log - it does NOT stop the run.
+
+  >>> CHECK BEFORE RUNNING <<<
+    * fill valve rpm_top is the "top" valve of the precursor-1 (right) manifold;
+      switch to rpm_bottom if that turns out reversed.
+    * target_torr (dose pressure), all durations, cycles, and min_current
+      (500 uA here) are placeholders to set for your process.
+
+# runs once, in the background, for the whole run
+setup:
+  # ensure the beam is OFF (plasma ground energised) before we start
+  - {op: valve, valve: plasma_ground, state: true}
+  # hold the precursor-1 full volume at the dose pressure the entire run
+  - op: start_fill
+    valve: rpm_top                 # right manifold top = precursor 1 fill
+    gauge: "gauge.prec1_dose"      # ai1 Baratron
+    target_torr: 0.020             # PLACEHOLDER dose pressure (Torr)
+    pulse_on_s: 0.10               # PLACEHOLDER fill-pulse open time
+    pulse_off_s: 0.30              # PLACEHOLDER settle between fill pulses
+    tolerance_frac: 0.20           # flag if >20% off setpoint
+
+cycles: 100                        # PLACEHOLDER
+
+steps:
+  # 1. dose precursor 1 into the chamber
+  - {op: dose, valve: prec1, seconds: 0.05}          # PLACEHOLDER dose time
+  # 2. pump / hold
+  - {op: wait, seconds: 10.0}                          # PLACEHOLDER pump A
+  # 3. electron beam on (plasma ground off), with continuous current check
+  - op: electron_beam
+    switch: plasma_ground
+    ammeter: "inst.ammeter"
+    min_current: 5.0e-4            # 500 uA absolute (plasma lit)
+    seconds: 5.0                   # PLACEHOLDER beam exposure time
+    reignite_pulse_s: 0.5          # switch ON time when restriking
+    reignite_settle_s: 1.0         # wait for current after a restrike
+  # 4. pump / hold
+  - {op: wait, seconds: 10.0}                          # PLACEHOLDER pump B
+
+teardown:
+  - {op: message, text: "run complete - fill regulation stopped, beam off"}

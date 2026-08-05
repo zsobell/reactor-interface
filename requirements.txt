@@ -1,0 +1,16 @@
+# Core - needed always
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+PyYAML>=6.0
+
+# MKS mass flow controllers (Modbus TCP)
+pymodbus>=3.6
+
+# NI CompactDAQ. Needs the NI-DAQmx runtime, which the LabVIEW install already
+# provides. Windows only; the app runs in --sim mode without it.
+nidaqmx>=1.0 ; sys_platform == "win32"
+
+# Bench instruments (ammeter, QCM controller) over VISA or raw serial
+pyvisa>=1.14
+pyserial>=3.5

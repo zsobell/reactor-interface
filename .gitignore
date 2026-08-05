@@ -1,0 +1,14 @@
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Machine-local Claude Code settings (permissions, not shared config)
+.claude/settings.local.json

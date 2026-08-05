@@ -1,0 +1,11 @@
+name: "Observe only (no dosing)"
+notes: >
+  The safe first recipe to run against real hardware. It opens no valve and
+  writes no setpoint - it just holds for two minutes so you can confirm that
+  pressure, stage temperature and the ammeter are all reading sensibly and that
+  logging produces the file you expect.
+
+cycles: 1
+steps:
+  - {op: message, text: "observing - confirm all readings look right"}
+  - {op: wait, seconds: 120.0}
