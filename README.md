@@ -168,11 +168,6 @@ gas scheduling (single overlap field, freezes with the plasma), and the
 its parameters, and every valve/MFC/gauge display name.
 
 **Known open items:**
-- The two precursor-dose Baratrons (ai1, ai2) are labelled by the rule "lower
-  reading = precursor 1, higher = precursor 2" — to verify in the lab
-  (`reactor-gkw`).
-- The precursor-1 fill valve is assumed to be `rpm_top` (right manifold top);
-  switch to `rpm_bottom` if reversed (`reactor-zo0`).
 - The NI 9265 current-output module's purpose is unknown, deferred
   (`reactor-5u2`).
 - Run data export is client-side only (a closed browser loses the CSV);

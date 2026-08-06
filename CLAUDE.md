@@ -83,9 +83,8 @@ docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWA
 
 - **NI cDAQ** two chassis. Pressure = cold cathode `cDAQ2Mod1/ai3`, curve
   `P[Torr]=10^(V-10)`. 3 Baratrons on cDAQ2Mod1: ai0 Ar, ai1 precursor-1 dose,
-  ai2 precursor-2 dose (10 Torr heads, 1 V = 1 Torr — ai1/ai2 labelling still
-  unverified, see `reactor-gkw`). Stage TC `cDAQ1Mod4/ai1`, precursor bubbler
-  TC `cDAQ1Mod4/ai0`.
+  ai2 precursor-2 dose (10 Torr heads, 1 V = 1 Torr — confirmed). Stage TC
+  `cDAQ1Mod4/ai1`, precursor bubbler TC `cDAQ1Mod4/ai0`.
 - **3 MKS G50 MFCs** (Ar/H2/N2) at `192.168.2.221/.222/.223`. Read over the
   device HTTP interface, write setpoint over Modbus. **Quirk: the MFC zeros its
   setpoint when the Modbus master disconnects** — flow only holds while the
@@ -121,9 +120,8 @@ beam) that primes the tool ahead of Start run. Live pressure/current/MFC-
 flow/temperature plots each have an independent time window, hover, and
 drag-to-zoom; CSV auto-download on run completion.
 
-**Not yet run on real hardware end-to-end** (`reactor-alz`). Open lab items:
-verify the two precursor-Baratron labels (`reactor-gkw`) + the `rpm_top` fill
-valve (`reactor-zo0`), and tune run parameters (`reactor-2z1`).
+**Not yet run on real hardware end-to-end** (`reactor-alz`). Open lab item:
+tune run parameters (`reactor-2z1`).
 
 Full history — everything shipped and everything still open — is in the
 **bd** issue tracker (`bd list --status=closed`, `bd ready`), not just this

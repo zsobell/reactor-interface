@@ -275,13 +275,12 @@ valves:
 #  Baratrons on the lower box (cDAQ2Mod1, NI 9201, +/-10 V). All 10 Torr heads,
 #  linear 0-10 V = 0-10 Torr, so preset baratron_10torr (1 V = 1 Torr).
 # ---------------------------------------------------------------------------
-#  Three Baratrons, all identified:
+#  Three Baratrons, all identified and CONFIRMED:
 #    ai0  Ar Baratron - CONFIRMED 2026-07-31 by rising to 2.72 Torr under 5 sccm Ar.
-#    ai1  Precursor 1 dose pressure  }  the two remaining Baratrons, labelled by
-#    ai2  Precursor 2 dose pressure  }  operator rule: lower current reading is
-#                                       precursor 1, higher is precursor 2
-#                                       (ai1 ~ -0.003, ai2 ~ +0.017 Torr at rest).
-#  To be verified in the lab; swap these two channels if it turns out reversed.
+#    ai1  Precursor 1 dose pressure  }  lower current reading is precursor 1,
+#    ai2  Precursor 2 dose pressure  }  higher is precursor 2 (ai1 ~ -0.003,
+#                                       ai2 ~ +0.017 Torr at rest) -
+#                                       CONFIRMED by Zach 2026-08-06.
 #  ai4-ai7 sit at the noise floor (nothing connected).
 gauges:
   - id: "ar_baratron"
@@ -291,12 +290,12 @@ gauges:
     unit: "Torr"
   - id: "prec1_dose"
     label: "Precursor 1 dose pressure"
-    channel: "cDAQ2Mod1/ai1"                 # lower reading (to verify in lab)
+    channel: "cDAQ2Mod1/ai1"                 # CONFIRMED lower reading = precursor 1
     scaling: { preset: "baratron_10torr" }
     unit: "Torr"
   - id: "prec2_dose"
     label: "Precursor 2 dose pressure"
-    channel: "cDAQ2Mod1/ai2"                 # higher reading (to verify in lab)
+    channel: "cDAQ2Mod1/ai2"                 # CONFIRMED higher reading = precursor 2
     scaling: { preset: "baratron_10torr" }
     unit: "Torr"
 

@@ -227,12 +227,13 @@ exactly.
 
 - **Valves** — all 11 driven and watched; full line map in `config/reactor.yaml`
   and the `reactor-hardware-inventory` memory. `prec1` (cDAQ1Mod3 line0) is the
-  precursor-1 micro-pulse dose valve; `rpm_top` fills the precursor-1 full volume;
-  `plasma_ground` (cDAQ1Mod3 line9) is the e-beam relay (off = beam on).
+  precursor-1 micro-pulse dose valve; `rpm_top` fills the precursor-1 full
+  volume — **confirmed by Zach 2026-08-06**; `plasma_ground` (cDAQ1Mod3 line9)
+  is the e-beam relay (off = beam on).
 - **3 Baratrons** (all cDAQ2Mod1, 10 Torr heads, 1 V = 1 Torr): `ai0` = Ar
   Baratron (confirmed rising to 2.72 Torr under 5 sccm Ar); `ai1` = Precursor 1
-  dose pressure, `ai2` = Precursor 2 dose pressure (labelled "lower reading =
-  prec1, higher = prec2" — to verify in lab).
+  dose pressure, `ai2` = Precursor 2 dose pressure — lower reading is
+  precursor 1, higher is precursor 2, **confirmed by Zach 2026-08-06**.
 - **MFC setpoint writing** — unlocked and verified; the write lock was removed
   with all other software limits. Flow holds only while the program keeps its
   Modbus connection (MFC watchdog zeros it on disconnect).
@@ -245,8 +246,6 @@ exactly.
 
 | Assumption | Status | How to check |
 |---|---|---|
-| Which precursor Baratron is which | ai1→prec1, ai2→prec2 by the lower/higher rule | verify in the lab; swap the two channels in `gauges:` if reversed |
-| Fill valve is `rpm_top` (vs `rpm_bottom`) | operator thinks top; "switch if wrong" | run the ALD fill and watch which manifold valve charges the volume |
 | Gauge **gain** is exactly 1 decade/V | offset confirmed at one pressure; gain not independently confirmed | compare against the controller at a very different pressure |
 | TC type is **K** | assumed, most common | ask whoever wired it |
 | What `tc_a` / `tc_b` measure | two thermocouples wired and reading; roles unknown | trace them, rename in `aux_inputs` |

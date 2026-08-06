@@ -47,11 +47,10 @@ grounds the beam on teardown, abort, or a crash — never left energized.
 
 - **Full-volume pressure regulation** (the *whole* run, not per-cycle): a
   background loop pulses the fill valve (`rpm_top`, right manifold top —
-  switch to `rpm_bottom` if reversed; unverified, see `reactor-zo0`) whenever
-  the precursor-1 dose Baratron (`gauge.prec1_dose`, ai1 — labelling
-  unverified, see `reactor-gkw`) reads below the setpoint, holding the full
-  volume charged. Flags gently if it drifts more than the tolerance off
-  setpoint; never stops anything.
+  confirmed) whenever the precursor-1 dose Baratron (`gauge.prec1_dose`, ai1
+  — confirmed) reads below the setpoint, holding the full volume charged.
+  Flags gently if it drifts more than the tolerance off setpoint; never
+  stops anything.
 - **Current monitoring during any beam-on period**: exposure/lit-time only
   accumulates while `|Keithley current|` ≥ `min_current`. If the plasma
   extinguishes, the switch is pulsed ON→OFF to reignite (default
@@ -247,10 +246,9 @@ because the log itself lives elsewhere.
 
 1. Close LabVIEW. Start `python -m reactor`, open in a real browser.
 2. Confirm live readings look right (pressure, Baratrons, current, MFCs).
-3. Set the run parameters. Confirm the fill valve (`rpm_top`), the
-   precursor-Baratron labelling, and the current threshold (500 µA) are
-   right for the process — both are still unverified assumptions
-   (`reactor-zo0`, `reactor-gkw`).
+3. Set the run parameters. The fill valve (`rpm_top`) and precursor-Baratron
+   labelling are confirmed; double-check the current threshold (500 µA) is
+   right for the process.
 4. Optionally press **Pre-start** first to strike the plasma and prime Ar +
    fill pressure ahead of time; confirm the dialog once the three valves are
    in REMOTE and supplies are on.
@@ -262,8 +260,7 @@ because the log itself lives elsewhere.
 ## Likely next iterations
 
 - Verify/tune everything on real hardware (dose pressure, durations,
-  threshold, precursor Baratron labelling, fill valve) — `reactor-alz`,
-  `reactor-2z1`, `reactor-gkw`, `reactor-zo0`.
+  threshold) — `reactor-alz`, `reactor-2z1`.
 - Server-side run export so a closed browser doesn't lose the CSV —
   `reactor-f3j`.
 - Identify the NI 9265 current outputs — `reactor-5u2`.
