@@ -52,10 +52,19 @@ unaffected.
 ```bash
 .venv\Scripts\python.exe -c "import reactor.supervisor, reactor.server.app, reactor.control.recipe"
 .venv\Scripts\python.exe -m reactor --check
+.venv\Scripts\python.exe -m tests.run_all
 ```
 
-There is no pytest suite. Control-logic is spot-checked with fake-DAQ harnesses in
-the scratchpad; the app is verified by loading it and driving the API/UI.
+There is no pytest suite, on purpose (see tests/README.md) - but there is a
+real one: `tests/test_*.py` run a real `Supervisor` against
+`reactor/testing/virtual_reactor.py`'s fake DAQ/MFC/instrument devices (fake
+hardware boundary, real everything above it - not a hand-rolled Supervisor
+stand-in). Run any single file directly (`python -m tests.test_ee_cvd_recipe`)
+or all of them (`python -m tests.run_all`). Any change to
+`supervisor.py`/`control/recipe.py`/`datalog.py` should pass this before the
+app-level check. The app itself is still verified by loading it and driving
+the API/UI - the virtual reactor proves control logic, not that ai1 is
+really the precursor-1 Baratron or that a valve physically opens.
 
 ## Architecture (where things live)
 

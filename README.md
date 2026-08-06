@@ -140,10 +140,13 @@ reactor/
   server/
     app.py                  FastAPI HTTP + WebSocket; thin wrapper over Supervisor methods
     static/index.html       the entire GUI
+  testing/virtual_reactor.py  fake DAQ/MFC/instrument devices, real Supervisor on top -
+                            see tests/README.md
 tools/
   discover_hardware.py      read-only enumeration: DAQ, VISA, serial, Modbus, gauge-curve solver, DMM status
   watch_channels.py         read-only: watch all inputs, report what changes (channel identification)
   pulse_line.py             drive ONE digital output line (valve identification), with confirmation
+tests/                      control-logic tests against the virtual reactor; python -m tests.run_all
 docs/                       HARDWARE.md, RUN_PROGRAM.md, CONTROL_MODEL.md, IDENTIFYING_HARDWARE.md, LABVIEW_ANALYSIS.md
 ```
 

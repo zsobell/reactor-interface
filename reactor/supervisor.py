@@ -719,7 +719,11 @@ class Supervisor:
         self._prestart_task = None
         if self.prestart.get("running"):
             self._event("recipe", "pre-start stopped by operator")
-        self.prestart = {"running": False}
+        # _run_prestart's own finally already set running=False/done/phase/
+        # strikes in place by the time the wait above returns - merge, don't
+        # replace, or an operator-initiated stop always reports back as bare
+        # "idle" and throws away the phase/strike-count info the UI shows.
+        self.prestart["running"] = False
 
     async def _run_prestart(self, p: dict) -> None:
         g = lambda k, d: p.get(k, d)  # noqa: E731
