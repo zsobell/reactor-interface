@@ -20,12 +20,27 @@ was all removed on 2026-07-31.
 say-so.** If you think one is warranted, propose it and wait for a yes. (See the
 `no-unrequested-safety-features` memory.)
 
-## The one guard that exists — because it was requested
+## The guards that exist — because they were requested
 
-During an ALD run, if the precursor fill pressure drifts more than ±20% off its
-setpoint, the program emits a gentle **"flag"** event (amber in the event log,
-plus an OUT OF BOUNDS marker on the run panel). It **does not stop the run.** That
-tolerance is a run parameter.
+Two, both explicitly requested by Zach, both narrow:
+
+1. **Fill-pressure flag.** During a run (EE-ALD or EE-CVD), if the precursor
+   fill pressure drifts more than ±20% off its setpoint (a run parameter,
+   default), the program emits a gentle **"flag"** event (amber in the event
+   log, plus an OUT OF BOUNDS marker on the run panel and the fill-pressure
+   hero readout). It **does not stop the run.**
+2. **Ar MFC / `ar_pneumatic` isolation interlock.** The Ar MFC's setpoint
+   cannot be raised above 0 sccm while its isolation valve (`ar_pneumatic`)
+   is closed, and closing that valve zeroes the MFC's setpoint. This is
+   configured per-MFC (`isolation_valve` in `config/reactor.yaml`, currently
+   only on `ar`) and enforced in `Supervisor.set_mfc_setpoint` /
+   `set_valve`. The UI disables the Ar tile's Set Flow button and shows why
+   while the valve is closed.
+
+Both exist **only** because the operator asked for them directly, and both
+are narrow — a flag that never stops anything, and a single valve/MFC pairing
+that refuses one specific invalid combination rather than gating anything
+reactor-wide. Neither is a precedent for adding more without asking first.
 
 ## What still protects the hardware (not this program)
 
@@ -64,4 +79,14 @@ prevent a broken *config*; they do not constrain reactor operation.
   the program sends a "go to local" (USBTMC GTL) on disconnect. If the program is
   killed rather than closed cleanly, press EXIT on the DMM front panel.
 - **The valve-ID sweep has a live STOP** (operator-requested) that drives every
-  swept line low. That is the one emergency control in the program.
+  swept line low. **Pre-start** (see docs/RUN_PROGRAM.md) has the same shape: its
+  plasma-strike step retries **indefinitely, with no timeout or attempt
+  limit**, by explicit instruction — the only way to stop it is the operator
+  pressing Stop pre-start. These are the emergency/manual-stop controls in the
+  program; nothing else auto-stops.
+- **A digital-output write only ever touches its own line.** Early on, writing
+  one valve re-drove its whole DAQ module from an in-memory vector, which could
+  silently close a *different* valve sharing that module (e.g. starting a run
+  closed the Ar isolation valve). Fixed 2026-08-03 by giving every valve its
+  own single-line DAQmx task. Worth remembering if a future change touches
+  `reactor/devices/nidaq.py`: never go back to one task per module for DO.

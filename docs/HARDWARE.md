@@ -236,6 +236,10 @@ exactly.
 - **MFC setpoint writing** — unlocked and verified; the write lock was removed
   with all other software limits. Flow holds only while the program keeps its
   Modbus connection (MFC watchdog zeros it on disconnect).
+- **Precursor bubbler thermocouple** — a TC added later, wired on the port
+  next to the stage TC. Identified as `cDAQ1Mod4/ai0`, confirmed live reading
+  ~32.7 °C on 2026-08-03 (the stage TC on the same module is `ai1`). Shown as
+  `aux.bubbler` in the UI and logged.
 
 ## Still assumed
 

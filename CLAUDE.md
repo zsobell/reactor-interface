@@ -16,9 +16,10 @@ replacing an old, buggy LabVIEW program. Single owner of state + hardware is
 limits, or automatic actions, and you do NOT add any without his explicit OK** —
 propose it and wait for a yes. A previous version added unrequested safety
 machinery built on assumptions and it destroyed trust; it was all removed. See
-**[docs/CONTROL_MODEL.md](docs/CONTROL_MODEL.md)**. The only guard that exists is a
-requested gentle "flag" when precursor fill pressure drifts >20% off setpoint (it
-warns, never stops).
+**[docs/CONTROL_MODEL.md](docs/CONTROL_MODEL.md)**. Only two guards exist, both
+requested: a gentle "flag" when precursor fill pressure drifts >20% off
+setpoint (warns, never stops), and the Ar MFC refusing a nonzero setpoint
+while its isolation valve is closed.
 
 Related standing conventions:
 - **Every parameter Zach edits lives in the UI**, never a YAML/file/code edit.
@@ -60,16 +61,20 @@ the scratchpad; the app is verified by loading it and driving the API/UI.
 
 ```
 config/reactor.yaml     the ONLY hardware map (channels, gauge curves, valves, MFCs). Errors name the key.
-config/recipes/*.yaml   file recipes; the ALD run is built from UI params instead (build_ald_recipe)
+config/recipes/*.yaml   file recipes; EE-ALD/EE-CVD are built from UI params instead (build_ald_recipe/build_cvd_recipe)
+config/labels.json      operator display-name overrides (valves/MFCs/gauges), persisted from the UI
+config/valve_state.json last-commanded valve state, restored (not hardware-read) into the model at startup
 reactor/
   config.py             pydantic validation of the YAML
   supervisor.py         single owner of state + all hardware commands; control loop; fill-pressure
-                        regulator; valve-ID sweep; telemetry fan-out over WebSocket
+                        regulator; pre-start sequence; valve-ID sweep; telemetry fan-out over WebSocket
   datalog.py            tab-delimited run logs
-  devices/{base,nidaq,mks_mfc,instrument}.py   DAQ, MKS G50 MFCs (HTTP read / Modbus write), DMM6500
-  control/recipe.py     recipe engine + step types (dose/wait/electron_beam/start_fill/...) + build_ald_recipe
+  devices/{base,nidaq,mks_mfc,instrument}.py   DAQ (one DAQmx task per DO line), MKS G50 MFCs
+                        (HTTP read / Modbus write), DMM6500
+  control/recipe.py     recipe engine + step types (dose/wait/electron_beam/beam_start/beam_stop/
+                        start_fill/...) + build_ald_recipe/build_cvd_recipe for the two UI-driven modes
   server/app.py         FastAPI HTTP + WebSocket; thin wrapper over Supervisor
-  server/static/index.html   the entire GUI (HTML+CSS+vanilla JS, no build step)
+  server/static/index.html   the entire GUI (HTML+CSS+vanilla JS, no build step; 3 tabs: Run/Hardware/Diagnostics)
 tools/                  discover_hardware.py (read-only), watch_channels.py (read-only), pulse_line.py (drives one line)
 docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWARE, LABVIEW_ANALYSIS
 ```
@@ -78,25 +83,51 @@ docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWA
 
 - **NI cDAQ** two chassis. Pressure = cold cathode `cDAQ2Mod1/ai3`, curve
   `P[Torr]=10^(V-10)`. 3 Baratrons on cDAQ2Mod1: ai0 Ar, ai1 precursor-1 dose,
-  ai2 precursor-2 dose (10 Torr heads, 1 V = 1 Torr). Stage TC `cDAQ1Mod4/ai1`.
+  ai2 precursor-2 dose (10 Torr heads, 1 V = 1 Torr — ai1/ai2 labelling still
+  unverified, see `reactor-gkw`). Stage TC `cDAQ1Mod4/ai1`, precursor bubbler
+  TC `cDAQ1Mod4/ai0`.
 - **3 MKS G50 MFCs** (Ar/H2/N2) at `192.168.2.221/.222/.223`. Read over the
   device HTTP interface, write setpoint over Modbus. **Quirk: the MFC zeros its
   setpoint when the Modbus master disconnects** — flow only holds while the
-  program stays connected.
+  program stays connected. The Ar MFC has an operator-requested isolation
+  interlock: setpoint refused above 0 sccm while `ar_pneumatic` is closed.
 - **Keithley DMM6500** (USB) = sample current, the plasma/e-beam diagnostic.
-- **11 valves** across two control boxes; `plasma_ground` (cDAQ1Mod3 line9) is the
-  e-beam relay (OFF = beam ON). No valve-position feedback on the DAQ.
-- **NI 9265** current outputs: purpose unknown, deferred.
+- **11 valves** across two control boxes, each on its own DAQmx DO task so one
+  write never re-drives (and can't silently flip) a sibling on the same
+  module; `plasma_ground` (cDAQ1Mod3 line9) is the e-beam relay (OFF = beam
+  ON). No valve-position feedback on the DAQ — last-commanded state persists
+  to `config/valve_state.json` across restarts.
+- **NI 9265** current outputs: purpose unknown, deferred (`reactor-5u2`).
 
-## Current state (2026-08)
+## Current state (2026-08-06)
 
-All I/O identified and working; MFC read+write and every valve controllable from
-the UI. The ALD + e-beam run (background fill regulation → dose → beam-with-
-current-check/reignite → pump) is built and logic-verified with a fake DAQ, and
-fully driven from the UI (editable params, phase timers, live pressure/current
-plots with plasma-flip overlays, CSV auto-download). **Not yet run on real
-hardware.** Open lab items: verify the two precursor-Baratron labels + the
-`rpm_top` fill valve, and tune run parameters.
+All I/O identified and working; MFC read+write, every valve, and every
+display label controllable from the UI, with valve state surviving a
+restart. Two run modes are built and logic-verified with fake-DAQ /
+fake-supervisor harnesses, fully driven from a tabbed UI (Run / Hardware /
+Diagnostics):
+
+- **EE-ALD** — background fill regulation → dose → beam-with-
+  current-check/reignite → pump, per cycle.
+- **EE-CVD** — background fill regulation → beam held on for the whole run
+  (its own reignite watchdog) with dose+pump-A cycling on top of it; pump A
+  is lit-time gated so it locks to the plasma, the dose never is (freezing a
+  precursor pulse would dump precursor into the chamber).
+
+Both share a single-overlap gas-scheduling scheme (H2/N2 on/off around the
+beam or the cycle) and an operator **pre-start** sequence (Ar on, fill
+pulsing, strike-and-hold the plasma with unlimited retries, then ground the
+beam) that primes the tool ahead of Start run. Live pressure/current/MFC-
+flow/temperature plots each have an independent time window, hover, and
+drag-to-zoom; CSV auto-download on run completion.
+
+**Not yet run on real hardware end-to-end** (`reactor-alz`). Open lab items:
+verify the two precursor-Baratron labels (`reactor-gkw`) + the `rpm_top` fill
+valve (`reactor-zo0`), and tune run parameters (`reactor-2z1`).
+
+Full history — everything shipped and everything still open — is in the
+**bd** issue tracker (`bd list --status=closed`, `bd ready`), not just this
+file.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
