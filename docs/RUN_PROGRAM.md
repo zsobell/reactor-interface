@@ -4,8 +4,8 @@ The electron-beam run modes, the recipe engine underneath them, and the GUI
 around them. First built 2026-08-01 as a single ALD-only workflow; the run
 panel now supports two modes and a pre-start sequence, added 2026-08-05.
 Control logic is verified with fake-DAQ / fake-supervisor harnesses in the
-scratchpad on every change; **the whole program has not yet been run on real
-hardware** (tracked in `reactor-alz`).
+scratchpad on every change, and **EE-ALD has now been run and tuned on real
+hardware** (`reactor-alz`, `reactor-2z1`, confirmed 2026-08-06).
 
 ## Two run modes, one panel
 
@@ -217,13 +217,26 @@ Follow-live button, hover crosshair with a readout box, and drag-to-zoom
 (box-select a time range; arrow keys pan/zoom while hovering that chart). No
 wheel-zoom — it would hijack page scroll.
 
-**Auto-download**: `recordRun()` accumulates a per-run buffer from the
-moment Start is pressed (keyed on `recipe.started_at`); on completion
-`downloadRun()` writes a CSV — columns `elapsed_s, stage_temp_c,
-sample_current_a, precursor_dosing, precursor_pressure_torr,
-chamber_pressure_torr`, time zeroed to the Start press. This is client-side
-(the browser must stay open during the run); a server-side copy is tracked
-as `reactor-f3j`.
+**Two independent copies of every run's trace, both automatic:**
+- **Client-side auto-download**: `recordRun()` accumulates a per-run buffer
+  from the moment Start is pressed (keyed on `recipe.started_at`); on
+  completion `downloadRun()` writes a CSV — columns `elapsed_s,
+  stage_temp_c, sample_current_a, precursor_dosing,
+  precursor_pressure_torr, chamber_pressure_torr`, time zeroed to the Start
+  press. Requires the browser to stay open through the run.
+- **Server-side run export** (`DataLogger.start_run_export` /
+  `write_run_sample` / `stop_run_export`, in `reactor/datalog.py`): opens
+  `data/<started-at-stamp>_<recipe-name>_run.csv` the instant *any* recipe
+  starts (`Supervisor.start_recipe`, so this covers file recipes too, not
+  just EE-ALD/EE-CVD), and appends one row per telemetry tick (5 Hz
+  default) straight from the same sample dict the trend buffer uses — no
+  extra device I/O. Columns are the same sample dict, dynamically
+  discovered, plus `recipe_cycle`/`recipe_step`, so it's a *richer* trace
+  than the client's fixed six columns. Closed in `Supervisor.finish_run()`,
+  which the recipe runner calls however the run ends — done, aborted, or
+  crashed — so a closed browser no longer loses anything. Independent of
+  the operator's own Data Logging toggle; no button to press. Status
+  (active / path / row count) is in `state().logging.run_export`.
 
 ### Hardware tab
 
@@ -259,8 +272,5 @@ because the log itself lives elsewhere.
 
 ## Likely next iterations
 
-- Verify/tune everything on real hardware (dose pressure, durations,
-  threshold) — `reactor-alz`, `reactor-2z1`.
-- Server-side run export so a closed browser doesn't lose the CSV —
-  `reactor-f3j`.
-- Identify the NI 9265 current outputs — `reactor-5u2`.
+- Identify the NI 9265 current outputs — `reactor-5u2` (low priority, not
+  needed for normal operation).

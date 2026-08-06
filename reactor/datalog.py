@@ -17,6 +17,7 @@ Logging starts on demand, not at launch, so idle time does not fill the disk.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from datetime import datetime
@@ -69,10 +70,23 @@ class DataLogger:
         self.started_at: float | None = None
         self.rows = 0
         self._ext_keys: list[str] = []
+        # Automatic per-run export - independent of the operator-toggled
+        # logger above. Opened the moment any recipe starts (ALD, CVD, or a
+        # file recipe) and closed whenever the run ends, so a run's trace
+        # survives a closed browser without the operator doing anything.
+        self._run_fh = None
+        self.run_path: Path | None = None
+        self.run_started_at: float | None = None
+        self.run_rows = 0
+        self._run_keys: list[str] = []
 
     @property
     def active(self) -> bool:
         return self._fh is not None
+
+    @property
+    def run_export_active(self) -> bool:
+        return self._run_fh is not None
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -117,6 +131,67 @@ class DataLogger:
         path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
         return path
 
+    def start_run_export(self, recipe_name: str, started_at: float) -> Path:
+        """Open a per-run CSV, named on the run's own start time so it lines up
+        with what the browser would otherwise have downloaded (and survives a
+        closed browser, which the client-side download does not).
+
+        Independent of the operator-toggled logger above and of
+        write_ald_snapshot's one-time params JSON - this is the actual
+        time-series trace, at whatever rate _current_cycle samples (5 Hz
+        default), covering every recipe (ALD, CVD, and file recipes alike),
+        not just ALD/CVD.
+        """
+        self.stop_run_export()          # a stale handle must never linger
+        self.dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.fromtimestamp(started_at).strftime("%y%m%d_%H%M%S")
+        slug = "".join(c if c.isalnum() else "_" for c in recipe_name).strip("_") or "run"
+        self.run_path = self.dir / f"{stamp}_{slug}_run.csv"
+        self._run_fh = self.run_path.open("w", encoding="utf-8", newline="")
+        self.run_started_at = started_at
+        self.run_rows = 0
+        self._run_keys = []             # header written with the first sample
+        return self.run_path
+
+    def write_run_sample(self, sample: dict[str, Any], progress=None) -> None:
+        """Append one row from the sample dict _current_cycle already builds
+        every telemetry tick - no extra device I/O, just a write if a run is
+        active. No-op if no run export is open. `progress` (the recipe's
+        RecipeProgress) adds cycle/step context, mirroring the manual
+        extended log's `extra` fields."""
+        if self._run_fh is None:
+            return
+        elapsed = sample.get("t", 0.0) - (self.run_started_at or 0.0)
+        extra = {
+            "recipe_cycle": getattr(progress, "cycle", ""),
+            "recipe_step": getattr(progress, "step_desc", ""),
+        }
+        if not self._run_keys:
+            self._run_keys = sorted(k for k in sample if k != "t")
+            header = ["elapsed_s", *self._run_keys, *extra]
+            self._run_fh.write(",".join(header) + "\n")
+
+        def csv(v: Any) -> str:
+            s = v if isinstance(v, str) else self._fmt(v)
+            return f'"{s}"' if ("," in s or '"' in s) else s
+
+        row = [f"{elapsed:.3f}", *(self._fmt(sample.get(k)) for k in self._run_keys),
+               *(csv(v) for v in extra.values())]
+        try:
+            self._run_fh.write(",".join(row) + "\n")
+            self._run_fh.flush()
+            self.run_rows += 1
+        except Exception:
+            pass
+
+    def stop_run_export(self) -> None:
+        if self._run_fh is not None:
+            with contextlib.suppress(Exception):
+                self._run_fh.flush()
+                self._run_fh.close()
+        self._run_fh = None
+        self.run_started_at = None
+
     def stop(self) -> None:
         for fh in (self._fh, self._ext_fh):
             if fh is not None:
@@ -131,6 +206,7 @@ class DataLogger:
 
     def close(self) -> None:
         self.stop()
+        self.stop_run_export()
 
     # -- writing ------------------------------------------------------------ #
 
@@ -198,4 +274,9 @@ class DataLogger:
             "rows": self.rows,
             "started_at": self.started_at,
             "dir": str(self.dir),
+            "run_export": {
+                "active": self.run_export_active,
+                "path": str(self.run_path) if self.run_path else None,
+                "rows": self.run_rows,
+            },
         }

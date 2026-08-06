@@ -103,6 +103,9 @@ Everything is editable **in the interface** — no YAML/code editing for normal 
   re-attach.
 - When a run ends, a **CSV auto-downloads** (elapsed time zeroed to Start, stage
   temp, sample current, precursor dosing, precursor pressure, chamber pressure).
+  The server independently writes its own, richer copy to `data/` the moment
+  any run starts and closes it however the run ends — so a closed browser
+  no longer loses the trace.
 
 How the run actually behaves is documented in **[docs/RUN_PROGRAM.md](docs/RUN_PROGRAM.md)**.
 
@@ -157,23 +160,21 @@ write, flow holds while the program stays connected), all 11 valves
 (individually actuable, each on its own DAQmx line so one write can't flip a
 sibling), valve state persisted across restarts, editable display labels.
 
+**EE-ALD** (pulsed beam, one exposure per cycle) has now been **run and
+tuned on real hardware** (`reactor-alz`, `reactor-2z1`, confirmed
+2026-08-06).
+
 **Built and logic-verified with fake-DAQ / fake-supervisor harnesses, not yet
-run against real hardware end-to-end** (tracked in `reactor-alz`): the
-**EE-ALD** run (pulsed beam, one exposure per cycle) and **EE-CVD** run
-(continuous beam, dosing on top of it), the operator **pre-start** sequence,
-gas scheduling (single overlap field, freezes with the plasma), and the
-±20% fill-pressure flag.
+confirmed on real hardware:** **EE-CVD** run (continuous beam, dosing on top
+of it), the operator **pre-start** sequence, gas scheduling (single overlap
+field, freezes with the plasma), and the ±20% fill-pressure flag.
 
 **Editable entirely in the UI:** MFC setpoints, every valve, run mode and all
 its parameters, and every valve/MFC/gauge display name.
 
 **Known open items:**
 - The NI 9265 current-output module's purpose is unknown, deferred
-  (`reactor-5u2`).
-- Run data export is client-side only (a closed browser loses the CSV);
-  server-side export is tracked (`reactor-f3j`).
-- Run parameters (dose pressure, all durations, cycles, 500 µA current
-  threshold) are starting values to tune in the lab (`reactor-2z1`).
+  (`reactor-5u2`, low priority — not needed for normal operation).
 
 Full history of what's shipped and what's still open lives in the **bd**
 issue tracker (`bd list --status=closed` / `bd ready`), not just in this file.

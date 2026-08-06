@@ -102,26 +102,27 @@ docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWA
 
 All I/O identified and working; MFC read+write, every valve, and every
 display label controllable from the UI, with valve state surviving a
-restart. Two run modes are built and logic-verified with fake-DAQ /
-fake-supervisor harnesses, fully driven from a tabbed UI (Run / Hardware /
+restart. Two run modes, fully driven from a tabbed UI (Run / Hardware /
 Diagnostics):
 
 - **EE-ALD** — background fill regulation → dose → beam-with-
-  current-check/reignite → pump, per cycle.
+  current-check/reignite → pump, per cycle. **Run and tuned on real
+  hardware** (`reactor-alz`, `reactor-2z1`, confirmed 2026-08-06).
 - **EE-CVD** — background fill regulation → beam held on for the whole run
   (its own reignite watchdog) with dose+pump-A cycling on top of it; pump A
   is lit-time gated so it locks to the plasma, the dose never is (freezing a
-  precursor pulse would dump precursor into the chamber).
+  precursor pulse would dump precursor into the chamber). Logic-verified
+  with fake-DAQ / fake-supervisor harnesses only, not yet confirmed on real
+  hardware.
 
 Both share a single-overlap gas-scheduling scheme (H2/N2 on/off around the
 beam or the cycle) and an operator **pre-start** sequence (Ar on, fill
 pulsing, strike-and-hold the plasma with unlimited retries, then ground the
 beam) that primes the tool ahead of Start run. Live pressure/current/MFC-
 flow/temperature plots each have an independent time window, hover, and
-drag-to-zoom; CSV auto-download on run completion.
-
-**Not yet run on real hardware end-to-end** (`reactor-alz`). Open lab item:
-tune run parameters (`reactor-2z1`).
+drag-to-zoom. Every run's trace is captured twice, automatically: a
+client-side CSV auto-download, and a richer server-side CSV
+(`DataLogger.start_run_export`) that survives a closed browser.
 
 Full history — everything shipped and everything still open — is in the
 **bd** issue tracker (`bd list --status=closed`, `bd ready`), not just this

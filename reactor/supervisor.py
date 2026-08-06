@@ -415,6 +415,7 @@ class Supervisor:
             **{f"aux_{a.id}": snap.get(f"aux.{a.id}") for a in cfg.aux_inputs},
         }
         self.history.append(sample)
+        self.logger.write_run_sample(sample, self.recipes.progress)
         await self._publish()
 
     # ====================================================================== #
@@ -827,6 +828,18 @@ class Supervisor:
     async def start_recipe(self, recipe: Recipe) -> None:
         await self.recipes.start(recipe)
         self._event("recipe", f"started '{recipe.name}' ({recipe.cycles} cycles)")
+        # Automatic server-side trace of this run - every recipe, not just
+        # ALD/CVD, and independent of the operator's own Data Logging toggle.
+        # Keyed on the run's own started_at so the filename correlates with
+        # what the browser would otherwise have downloaded; that download
+        # stays too (this is a redundant copy, not a replacement - it's the
+        # one that survives a closed browser).
+        try:
+            run_path = self.logger.start_run_export(
+                recipe.name, self.recipes.progress.started_at or time.time())
+            self._event("recipe", f"run data recording to {run_path.name}")
+        except Exception as exc:
+            self._event("error", f"could not start run data export: {exc}")
 
     async def start_ald_run(self, params: dict) -> Recipe:
         """Build and launch an e-beam ALD run from UI parameters."""
@@ -872,6 +885,8 @@ class Supervisor:
         """
         with contextlib.suppress(Exception):
             await self.stop_fill_regulation()
+        with contextlib.suppress(Exception):
+            self.logger.stop_run_export()
 
         if not self._run_end_cleanup:
             return
