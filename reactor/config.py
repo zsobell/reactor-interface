@@ -243,6 +243,33 @@ class InstrumentCfg(BaseModel):
     overload_above: float = 1e30
 
 
+class EllipsometerCfg(BaseModel):
+    """Film Sense FS-1 in-situ ellipsometer.
+
+    Read-only, over the instrument's live-broadcast TCP stream (see
+    reactor/devices/ellipsometer.py): the reactor subscribes to the
+    per-measurement stream on port 4001 and timestamps each point with its own
+    clock; it never writes to or commands the instrument (the trigger sockets
+    on 4000/4010 are deliberately untouched). Data flows only while a dynamic
+    acquisition is running on the FS-1 itself.
+
+    This exists so a *refit* dynamic file - downloaded from the FS-1 after a
+    run - can be put back onto the reactor clock and merged with the run log
+    (reactor/analysis/ellipsometer_merge.py). The stream's live thickness is
+    the instrument's uncalibrated fit and is NOT treated as truth.
+    """
+
+    enabled: bool = False
+    label: str = "FS-1 Ellipsometer"
+    host: str = ""
+    port: int = 4001
+    #: Seconds of stream silence that ends an acquisition (points arrive ~1 Hz;
+    #: on stop the socket just goes quiet, with no end marker). The next point
+    #: after this gap - or a point-index reset to 1 - opens a fresh per-run
+    #: sidecar file.
+    idle_gap_s: float = 5.0
+
+
 class LoggingCfg(BaseModel):
     filename_suffix: str = "General"
     #: Column name -> snapshot key. Explicit so the file layout is visible and
@@ -279,6 +306,7 @@ class ReactorConfig(BaseModel):
     valves: list[ValveCfg] = Field(default_factory=list)
     mfcs: list[MfcCfg] = Field(default_factory=list)
     instruments: list[InstrumentCfg] = Field(default_factory=list)
+    ellipsometer: EllipsometerCfg = Field(default_factory=EllipsometerCfg)
     logging: LoggingCfg = Field(default_factory=LoggingCfg)
 
     @model_validator(mode="after")

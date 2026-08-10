@@ -24,6 +24,7 @@ from .config import ReactorConfig
 from .control.recipe import Recipe, RecipeRunner
 from .datalog import DataLogger
 from .devices.base import Device, Reading
+from .devices.ellipsometer import EllipsometerClient, EllipsometerPoint
 from .devices.instrument import ScpiInstrument
 from .devices.mks_mfc import MfcRegisters, MksMfc
 from .devices.nidaq import AiSpec, DaqPlan, DoSpec, NiDaqBackend
@@ -118,6 +119,22 @@ class Supervisor:
         self._reg_task: asyncio.Task | None = None
         self._reg_stop = asyncio.Event()
         self.regulator: dict[str, Any] = {"running": False}
+
+        # In-situ ellipsometer (FS-1) live stream: a read-only subscriber that
+        # timestamps each streamed measurement with the reactor clock into a
+        # per-acquisition sidecar, so a refit file downloaded afterwards can be
+        # put back onto the reactor clock (reactor/analysis/ellipsometer_merge).
+        # Created here, started in start(); None when disabled in config.
+        self.ellipsometer: EllipsometerClient | None = None
+        if cfg.ellipsometer.enabled and cfg.ellipsometer.host:
+            self.ellipsometer = EllipsometerClient(
+                cfg.ellipsometer.host,
+                cfg.ellipsometer.port,
+                on_point=self._on_ellipsometer_point,
+                on_state=self._on_ellipsometer_state,
+            )
+        self._ell_last_recv = 0.0
+        self._ell_last_index = 0
 
     # ====================================================================== #
     #  Startup / shutdown
@@ -236,6 +253,12 @@ class Supervisor:
         self._reconnect_task = asyncio.create_task(
             self._reconnect_loop(), name="instrument-reconnect")
 
+        if self.ellipsometer is not None:
+            self.ellipsometer.start()
+            self._event("startup",
+                        f"ellipsometer subscriber -> {self.cfg.ellipsometer.host}:"
+                        f"{self.cfg.ellipsometer.port} (read-only)")
+
     async def stop(self) -> None:
         """Stop polling and disconnect. Does not actuate anything.
 
@@ -262,6 +285,10 @@ class Supervisor:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+        if self.ellipsometer is not None:
+            with contextlib.suppress(Exception):
+                await self.ellipsometer.stop()
 
         for dev in list(self.mfcs.values()) + list(self.instruments.values()):
             with contextlib.suppress(Exception):
@@ -414,8 +441,15 @@ class Supervisor:
             **{f"inst_{i}": snap.get(f"inst.{i}") for i in self.instruments},
             **{f"aux_{a.id}": snap.get(f"aux.{a.id}") for a in cfg.aux_inputs},
         }
+        # Fractional cycle number + paused flag, computed now (at log time) so a
+        # sample taken mid-wall-step still gets an accurate position. Stored on
+        # progress so the logger's by-cycle export and the telemetry share them.
+        prog = self.recipes.progress
+        prog.cycle_fraction = self.recipes.cycle_fraction()
+        prog.paused = self.recipes.cycle_paused
+
         self.history.append(sample)
-        self.logger.write_run_sample(sample, self.recipes.progress)
+        self.logger.write_run_sample(sample, prog)
         await self._publish()
 
     # ====================================================================== #
@@ -982,6 +1016,38 @@ class Supervisor:
         self._event("config", f"renamed {kind} {dev_id} -> {label or '(default)'}")
         return label
 
+    # -- ellipsometer stream ------------------------------------------------ #
+
+    def _on_ellipsometer_point(self, point: EllipsometerPoint) -> None:
+        """Route one streamed FS-1 measurement into a per-acquisition sidecar,
+        stamped with the reactor clock. A new sidecar opens when the point index
+        resets to 1 or after an idle gap - the two ways one acquisition ends and
+        the next begins (the stream carries no explicit start/stop marker)."""
+        gap = self.cfg.ellipsometer.idle_gap_s
+        if (not self.logger.ellipsometer_active
+                or point.index <= 1
+                or (point.t_recv - self._ell_last_recv) > gap):
+            path = self.logger.start_ellipsometer_capture(point.t_recv)
+            self._event("ellipsometer", f"acquisition start -> {path.name}")
+        self.logger.write_ellipsometer_point(point)
+        self._ell_last_recv = point.t_recv
+        self._ell_last_index = point.index
+
+    def _on_ellipsometer_state(self, connected: bool, detail: str) -> None:
+        self._event("ellipsometer",
+                    "stream connected" if connected
+                    else f"stream disconnected ({detail})")
+
+    def _ellipsometer_state(self) -> dict[str, Any]:
+        cfg = self.cfg.ellipsometer
+        st: dict[str, Any] = {
+            "enabled": cfg.enabled, "label": cfg.label,
+            "host": cfg.host, "port": cfg.port,
+        }
+        if self.ellipsometer is not None:
+            st.update(self.ellipsometer.status())
+        return st
+
     def state(self) -> dict[str, Any]:
         return {
             "t": time.time(),
@@ -1060,6 +1126,7 @@ class Supervisor:
             },
             "recipe": self.recipes.progress.as_dict(),
             "logging": self.logger.status(),
+            "ellipsometer": self._ellipsometer_state(),
             "events": list(self.events)[-40:],
         }
 

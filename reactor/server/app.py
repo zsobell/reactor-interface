@@ -9,7 +9,11 @@ what the UI shows the operator.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import logging
+import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +21,61 @@ from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketD
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..analysis import ellipsometer_merge as ell
 from ..config import ReactorConfig, load_config
 from ..control.recipe import Recipe
 from ..supervisor import Supervisor
 
+log = logging.getLogger("reactor.server")
+
 STATIC = Path(__file__).parent / "static"
 RECIPE_DIR = Path(__file__).resolve().parents[2] / "config" / "recipes"
+
+
+class BasicAuthMiddleware:
+    """HTTP Basic auth over the whole app - pages, API, and the WebSocket - so
+    reaching the server is not enough to touch the reactor. A pure ASGI
+    middleware (not Starlette's http-only BaseHTTPMiddleware) because the live
+    telemetry socket handshake must be guarded too.
+
+    The credential comes from the environment (REACTOR_USER / REACTOR_PASSWORD),
+    never the repo. This is a login, not encryption: run it behind the VPN
+    (Tailscale) or LAN, where the transport is already private - Basic sends the
+    password on each request, so the tunnel is what keeps it off the wire.
+    """
+
+    def __init__(self, app, username: str, password: str) -> None:
+        self.app = app
+        self.username = username
+        self.password = password
+
+    def _ok(self, header: str) -> bool:
+        if not header.startswith("Basic "):
+            return False
+        try:
+            user, _, pw = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+        except Exception:
+            return False
+        # constant-time compares, both sides, so neither field short-circuits
+        return (secrets.compare_digest(user, self.username)
+                & secrets.compare_digest(pw, self.password))
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        header = dict(scope.get("headers") or {}).get(b"authorization", b"").decode()
+        if self._ok(header):
+            return await self.app(scope, receive, send)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})   # policy violation
+            return
+        body = b"Reactor interface: authentication required."
+        await send({"type": "http.response.start", "status": 401, "headers": [
+            (b"www-authenticate", b'Basic realm="Reactor Interface"'),
+            (b"content-type", b"text/plain; charset=utf-8"),
+            (b"content-length", str(len(body)).encode()),
+        ]})
+        await send({"type": "http.response.body", "body": body})
 
 # A command that can't run right now (bad id, unknown device, "a sweep is already
 # running") returns 409 with the reason, rather than a 500.
@@ -43,6 +96,19 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
 
     app = FastAPI(title="Reactor Interface", lifespan=lifespan)
     app.state.supervisor = sup
+
+    # Optional login (see BasicAuthMiddleware). Off unless REACTOR_PASSWORD is
+    # set, so localhost development is unchanged; set it before exposing the
+    # server beyond localhost (Tailscale / LAN). The secret is read from the
+    # environment - it is never stored in the repo or config.
+    _user = os.environ.get("REACTOR_USER", "reactor")
+    _password = os.environ.get("REACTOR_PASSWORD", "")
+    if _password:
+        app.add_middleware(BasicAuthMiddleware, username=_user, password=_password)
+        log.info("auth: HTTP Basic login enabled (user %r)", _user)
+    else:
+        log.warning("auth: DISABLED - set REACTOR_PASSWORD to require a login "
+                    "before exposing this server off localhost")
 
     # Registered as exception handlers rather than a decorator: a decorator would
     # hide each endpoint's signature from FastAPI's dependency injection and
@@ -264,5 +330,79 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
         sup.logger.stop()
         sup._event("log", "logging stopped")
         return sup.logger.status()
+
+    # -- ellipsometer sync ----------------------------------------------- #
+    #  Post-run: put a *refit* FS-1 dynamic file back onto the reactor clock,
+    #  using the (fs_time -> reactor_clock) sidecar captured live during the
+    #  run. Read-only file handling; no hardware.
+
+    def _in_data_dir(name: str) -> Path:
+        d = sup.logger.dir
+        p = (d / name).resolve()
+        if d.resolve() not in p.parents or not p.exists():
+            raise HTTPException(404, f"no such file in data dir: {name}")
+        return p
+
+    @app.get("/api/ellipsometer/sidecars")
+    async def list_sidecars() -> dict[str, Any]:
+        d = sup.logger.dir
+
+        def entries(pattern: str) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            if d.exists():
+                for p in sorted(d.glob(pattern), reverse=True):
+                    with contextlib.suppress(OSError):
+                        st = p.stat()
+                        out.append({"name": p.name, "size": st.st_size,
+                                    "mtime": st.st_mtime})
+            return out
+
+        return {
+            "dir": str(d),
+            "sidecars": entries("*_ellipsometer.csv"),
+            "reactor_runs": entries("*_run.csv"),
+        }
+
+    @app.post("/api/ellipsometer/merge")
+    async def ellipsometer_merge(
+        request: Request,
+        sidecar: str,
+        reactor_run: str = "",
+        channels: str = "",
+        filename: str = "refit",
+    ) -> dict[str, Any]:
+        """Body is the raw text of the refit .txt (no multipart dependency);
+        `sidecar` and `reactor_run` are file names in the data dir. With a
+        reactor_run the output is the combined plot-ready file (reactor channels
+        + interpolated ellipsometry, keyed by cycle number, paused samples
+        dropped); without it, ellipsometry alone on the reactor clock.
+        `channels` optionally limits which reactor columns are included."""
+        dyn_text = (await request.body()).decode("utf-8", errors="replace")
+        if not dyn_text.strip():
+            raise HTTPException(400, "empty refit file body")
+        side_text = _in_data_dir(sidecar).read_text(encoding="utf-8", errors="replace")
+        run_text = None
+        if reactor_run:
+            run_text = _in_data_dir(reactor_run).read_text(
+                encoding="utf-8", errors="replace")
+        chans = [c.strip() for c in channels.split(",") if c.strip()] or None
+        try:
+            result = ell.merge_text(dyn_text, side_text, run_text,
+                                    reactor_channels=chans)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        tm = result.time_map
+        stem = Path(filename).stem or "refit"
+        return {
+            "csv": result.to_csv(),
+            "filename": f"{stem}_reactor_synced.csv",
+            "mode": result.mode,
+            "n_points": result.n_points,
+            "time_map": {"a": tm.a, "b": tm.b, "n": tm.n,
+                         "max_residual_s": tm.max_residual_s},
+            "warnings": result.warnings,
+            "reactor_channels": result.reactor_channels,
+            "ellipsometry_columns": result.ellipsometry_columns,
+        }
 
     return app

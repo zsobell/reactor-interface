@@ -665,6 +665,36 @@
     </div>
   </div>
 
+  <section class="card" data-card="ellipsometer">
+    <h2>Ellipsometer sync</h2>
+    <div class="body">
+      <div class="kv" style="margin-top:0"><span>FS-1 stream</span><span id="ellStream">—</span></div>
+      <div class="kv"><span>Live point</span><span id="ellLive">—</span></div>
+      <div class="hint" style="margin-top:6px">
+        Drop in the refit file you downloaded from the FS-1, pick this run's
+        sidecar and reactor run, and get one plot-ready CSV: every reactor
+        channel plus the interpolated thickness, keyed by cycle number, with
+        reignite-paused samples dropped. (The live fit above is the
+        instrument's, and is not trusted.)
+      </div>
+      <div class="idsetup" style="margin-top:11px">
+        <label>Refit file
+          <input type="file" id="ellFile" accept=".txt,.csv,text/plain">
+        </label>
+        <label>Sidecar (this run's capture)
+          <select id="ellSidecar"></select>
+        </label>
+        <label>Reactor run (for the combined file)
+          <select id="ellReactorLog"></select>
+        </label>
+        <button id="ellMerge">Merge &amp; download</button>
+        <button id="ellRefresh" title="Rescan the data folder">↻</button>
+      </div>
+      <div class="kv" style="margin-top:11px"><span>Result</span><span id="ellResult">—</span></div>
+      <div class="hint" id="ellWarn" style="margin-top:4px"></div>
+    </div>
+  </section>
+
   <section class="card" data-card="events">
     <h2>Event log</h2>
     <div class="body"><div id="events"></div></div>
@@ -799,7 +829,8 @@ let MARKS = [];
 function render(s){
   $("siteName").textContent = s.site;
   banners(s); pressure(s); stage(s); hero(s); gauges(s); instruments(s); aux(s);
-  mfcs(s); valves(s); valveId(s); recipe(s); logging(s); conns(s); events(s);
+  mfcs(s); valves(s); valveId(s); recipe(s); logging(s); conns(s);
+  ellipsometer(s); events(s);
 
   MARKS = s.marks || [];
   const rv = s.run_valves || {dose:"prec1", plasma:"plasma_ground"};
@@ -1289,7 +1320,41 @@ function conns(s){
   for(const i of s.instruments)
     rows.push(tr(i.label || i.id, "SCPI · VISA", i.resource,
       i.connected ? "OK" : "FAIL", i.error || i.identity || ""));
+  const e = s.ellipsometer;
+  if(e && e.enabled)
+    rows.push(tr(e.label || "FS-1 Ellipsometer", "TCP stream · read-only",
+      `${e.host}:${e.port}`, e.connected ? "OK" : "FAIL",
+      e.error || `${e.points_seen||0} pts seen`));
   setHtml($("conns"), rows.join(""));
+}
+
+function ellipsometer(s){
+  const e = s.ellipsometer;
+  if(!e) return;
+  const stream = $("ellStream"), live = $("ellLive");
+  if(!e.enabled){
+    if(stream){ stream.textContent = "disabled in config"; stream.style.color = "var(--dim)"; }
+    if(live) live.textContent = "—";
+    return;
+  }
+  const fresh = e.last_recv && (Date.now()/1000 - e.last_recv) < 5;
+  if(stream){
+    stream.textContent = e.connected
+      ? `connected · ${e.host}:${e.port} · ${e.points_seen||0} pts`
+      : `offline · ${e.error || "no connection"}`;
+    stream.style.color = e.connected ? "var(--ok)" : "var(--bad)";
+  }
+  if(live){
+    if(fresh && e.last_index){
+      const th = (e.last_thickness==null) ? "—"
+        : Number(e.last_thickness).toFixed(2) + " " + (e.last_thickness_unit||"");
+      live.textContent = `#${e.last_index} · t=${num(e.last_time_s,1)}s · ${th} (live fit)`;
+      live.style.color = "var(--fg)";
+    } else {
+      live.textContent = e.points_seen ? "— idle (no acquisition running) —" : "— no data yet —";
+      live.style.color = "var(--dim)";
+    }
+  }
 }
 function tr(a,b,c,state,detail){
   const color = state === "OK" ? "var(--ok)" : "var(--bad)";
@@ -1730,6 +1795,7 @@ window.addEventListener("resize", drawAllCharts);
     for(const b of btns) cls(b, "active", b.dataset.tab === name);
     for(const p of panes) cls(p, "hidden", p.dataset.pane !== name);
     localStorage.setItem("activeTab", name);
+    if(name === "diag" && typeof loadEllSidecars === "function") loadEllSidecars();
     drawAllCharts();
   }
   for(const b of btns) b.onclick = () => show(b.dataset.tab);
@@ -1752,6 +1818,67 @@ $("idStartBtn").onclick = async () => {
     start_index: parseInt($("idStart").value, 10) || 0,
   });
 };
+
+// ---- Ellipsometer sync (Diagnostics tab) ----
+async function loadEllSidecars(){
+  try{
+    const j = await (await fetch("/api/ellipsometer/sidecars")).json();
+    const side = $("ellSidecar"), rlog = $("ellReactorLog");
+    if(side) side.innerHTML = j.sidecars.length
+      ? j.sidecars.map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join("")
+      : `<option value="">— no sidecars in data folder —</option>`;
+    if(rlog) rlog.innerHTML = (j.reactor_runs && j.reactor_runs.length)
+      ? j.reactor_runs.map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join("")
+      : `<option value="">— none (ellipsometry only) —</option>`;
+  }catch(_){ /* keep whatever is there */ }
+}
+if($("ellRefresh")) $("ellRefresh").onclick = loadEllSidecars;
+if($("ellMerge")) $("ellMerge").onclick = async () => {
+  const f = $("ellFile").files && $("ellFile").files[0];
+  if(!f){ toast("Choose the refit file you downloaded from the FS-1 first."); return; }
+  const sidecar = $("ellSidecar").value;
+  if(!sidecar){ toast("No sidecar to align to — capture a run first, then ↻."); return; }
+  const qs = new URLSearchParams({
+    sidecar, reactor_run: $("ellReactorLog").value || "", filename: f.name });
+  let r;
+  try{
+    r = await fetch("/api/ellipsometer/merge?" + qs.toString(),
+      { method:"POST", headers:{"Content-Type":"text/plain"}, body: await f.text() });
+  }catch(_){ toast("Merge request failed."); return; }
+  if(!r.ok){
+    let msg = r.statusText; try{ msg = (await r.json()).detail || msg; }catch(_){}
+    toast(msg); return;
+  }
+  const j = await r.json();
+  const warn = (j.warnings || []);
+  // Nothing to download (e.g. an old run export with no cycle_number column):
+  // surface why instead of handing back a headers-only spreadsheet.
+  if(!j.n_points){
+    $("ellResult").textContent = "no rows produced — nothing downloaded";
+    $("ellWarn").textContent = warn.join("  •  ")
+      || "the selected sidecar / reactor run produced no matching rows";
+    $("ellWarn").style.color = "var(--bad)";
+    toast(warn[0] || "Merge produced no rows.", false);
+    return;
+  }
+  const blob = new Blob([j.csv], {type:"text/csv"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = j.filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  const tm = j.time_map;
+  const nchan = (j.reactor_channels || []).length;
+  $("ellResult").textContent =
+    (j.mode === "combined"
+      ? `${j.n_points} rows · ${nchan} reactor channels + ${(j.ellipsometry_columns||[]).join("/")} by cycle`
+      : `${j.n_points} pts · ellipsometry only (no reactor run selected)`)
+    + ` · clock rate ${tm.b.toFixed(4)} · fit jitter ${(tm.max_residual_s*1000).toFixed(0)} ms`;
+  $("ellWarn").textContent = warn.join("  •  ");
+  $("ellWarn").style.color = warn.length ? "var(--bad)" : "var(--dim)";
+  toast("Merged CSV downloaded", true);
+};
+loadEllSidecars();
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("button[data-mark]");
   if(!b) return;

@@ -79,6 +79,23 @@ class DataLogger:
         self.run_started_at: float | None = None
         self.run_rows = 0
         self._run_keys: list[str] = []
+        # Plot-ready "by cycle" export, opened alongside the run export: the same
+        # channels keyed by fractional cycle number instead of time, with paused
+        # (reignite / operator-pause) samples left out so a property-vs-cycle
+        # plot is clean. See RecipeRunner.cycle_fraction.
+        self._bycycle_fh = None
+        self.bycycle_path: Path | None = None
+        self.bycycle_rows = 0
+        self._bycycle_keys: list[str] = []
+        # Per-acquisition ellipsometer sidecar - the (fs_time -> reactor_clock)
+        # record captured live from the FS-1 stream, so a refit file can later
+        # be put back onto the reactor clock. One file per acquisition; opened
+        # by the supervisor on the first streamed point of a run (see
+        # start_ellipsometer_capture) and independent of everything above.
+        self._ell_fh = None
+        self.ell_path: Path | None = None
+        self.ell_started_at: float | None = None
+        self.ell_rows = 0
 
     @property
     def active(self) -> bool:
@@ -148,9 +165,13 @@ class DataLogger:
         slug = "".join(c if c.isalnum() else "_" for c in recipe_name).strip("_") or "run"
         self.run_path = self.dir / f"{stamp}_{slug}_run.csv"
         self._run_fh = self.run_path.open("w", encoding="utf-8", newline="")
+        self.bycycle_path = self.dir / f"{stamp}_{slug}_bycycle.csv"
+        self._bycycle_fh = self.bycycle_path.open("w", encoding="utf-8", newline="")
         self.run_started_at = started_at
         self.run_rows = 0
-        self._run_keys = []             # header written with the first sample
+        self.bycycle_rows = 0
+        self._run_keys = []             # headers written with the first sample
+        self._bycycle_keys = []
         return self.run_path
 
     def write_run_sample(self, sample: dict[str, Any], progress=None) -> None:
@@ -162,20 +183,30 @@ class DataLogger:
         if self._run_fh is None:
             return
         elapsed = sample.get("t", 0.0) - (self.run_started_at or 0.0)
+        cyc_num = getattr(progress, "cycle_fraction", None)
+        paused = bool(getattr(progress, "paused", False))
         extra = {
             "recipe_cycle": getattr(progress, "cycle", ""),
+            "cycle_number": cyc_num,
+            "paused": paused,
             "recipe_step": getattr(progress, "step_desc", ""),
         }
         if not self._run_keys:
             self._run_keys = sorted(k for k in sample if k != "t")
-            header = ["elapsed_s", *self._run_keys, *extra]
+            header = ["elapsed_s", "iso_time", *self._run_keys, *extra]
             self._run_fh.write(",".join(header) + "\n")
 
         def csv(v: Any) -> str:
             s = v if isinstance(v, str) else self._fmt(v)
             return f'"{s}"' if ("," in s or '"' in s) else s
 
-        row = [f"{elapsed:.3f}", *(self._fmt(sample.get(k)) for k in self._run_keys),
+        # Absolute wall-clock, so the ellipsometer merge can join this run's
+        # channels to the ellipsometry (which is anchored to the same reactor
+        # clock via its sidecar). elapsed_s stays first for back-compat.
+        iso = datetime.fromtimestamp(
+            sample.get("t") or time.time()).isoformat(timespec="milliseconds")
+        row = [f"{elapsed:.3f}", iso,
+               *(self._fmt(sample.get(k)) for k in self._run_keys),
                *(csv(v) for v in extra.values())]
         try:
             self._run_fh.write(",".join(row) + "\n")
@@ -184,13 +215,98 @@ class DataLogger:
         except Exception:
             pass
 
+        # Plot-ready by-cycle row: same channels keyed by fractional cycle
+        # number, only for real (non-paused) in-cycle samples. Written in time
+        # order, and cycle_number is monotonic across kept samples, so the file
+        # is already sorted by cycle - no post-processing needed.
+        if (self._bycycle_fh is not None and not paused
+                and isinstance(cyc_num, (int, float))):
+            if not self._bycycle_keys:
+                self._bycycle_keys = self._run_keys
+                self._bycycle_fh.write(
+                    ",".join(["cycle_number", *self._bycycle_keys, "recipe_step"]) + "\n")
+            brow = [f"{cyc_num:.6f}",
+                    *(self._fmt(sample.get(k)) for k in self._bycycle_keys),
+                    csv(getattr(progress, "step_desc", ""))]
+            try:
+                self._bycycle_fh.write(",".join(brow) + "\n")
+                self._bycycle_fh.flush()
+                self.bycycle_rows += 1
+            except Exception:
+                pass
+
     def stop_run_export(self) -> None:
-        if self._run_fh is not None:
-            with contextlib.suppress(Exception):
-                self._run_fh.flush()
-                self._run_fh.close()
+        for fh in (self._run_fh, self._bycycle_fh):
+            if fh is not None:
+                with contextlib.suppress(Exception):
+                    fh.flush()
+                    fh.close()
         self._run_fh = None
+        self._bycycle_fh = None
         self.run_started_at = None
+
+    # -- ellipsometer sidecar ---------------------------------------------- #
+
+    @property
+    def ellipsometer_active(self) -> bool:
+        return self._ell_fh is not None
+
+    def start_ellipsometer_capture(self, started_at: float) -> Path:
+        """Open a new per-acquisition ellipsometer sidecar, named on the
+        reactor-clock time of the acquisition's first streamed point (closing
+        any previous one). Each row is a live FS-1 measurement paired with the
+        reactor clock; reactor/analysis/ellipsometer_merge.py fits the
+        fs_time -> reactor_epoch line from these and applies it to a downloaded
+        refit file."""
+        self.stop_ellipsometer_capture()
+        self.dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.fromtimestamp(started_at).strftime("%y%m%d_%H%M%S")
+        self.ell_path = self.dir / f"{stamp}_ellipsometer.csv"
+        self._ell_fh = self.ell_path.open("w", encoding="utf-8", newline="")
+        self._ell_fh.write("point_index,fs_time_s,reactor_epoch,reactor_iso,"
+                           "thickness_live,thickness_unit,fit_diff,intensity,"
+                           "temp,align_x,align_y\n")
+        self._ell_fh.flush()
+        self.ell_started_at = started_at
+        self.ell_rows = 0
+        return self.ell_path
+
+    def write_ellipsometer_point(self, point: Any) -> None:
+        """Append one streamed measurement. `point` is duck-typed on
+        EllipsometerPoint (index, time_s, thickness, thickness_unit, fit_diff,
+        intensity, temp, align_x, align_y, t_recv). No-op if no sidecar is open.
+        `thickness_live` is the instrument's uncalibrated fit - a cross-check,
+        never the answer."""
+        if self._ell_fh is None:
+            return
+        iso = datetime.fromtimestamp(point.t_recv).isoformat(timespec="milliseconds")
+        row = [
+            self._fmt(getattr(point, "index", None)),
+            self._fmt(getattr(point, "time_s", None)),
+            f"{point.t_recv:.3f}",
+            iso,
+            self._fmt(getattr(point, "thickness", None)),
+            getattr(point, "thickness_unit", "") or "",
+            self._fmt(getattr(point, "fit_diff", None)),
+            self._fmt(getattr(point, "intensity", None)),
+            self._fmt(getattr(point, "temp", None)),
+            self._fmt(getattr(point, "align_x", None)),
+            self._fmt(getattr(point, "align_y", None)),
+        ]
+        try:
+            self._ell_fh.write(",".join(row) + "\n")
+            self._ell_fh.flush()
+            self.ell_rows += 1
+        except Exception:
+            pass
+
+    def stop_ellipsometer_capture(self) -> None:
+        if self._ell_fh is not None:
+            with contextlib.suppress(Exception):
+                self._ell_fh.flush()
+                self._ell_fh.close()
+        self._ell_fh = None
+        self.ell_started_at = None
 
     def stop(self) -> None:
         for fh in (self._fh, self._ext_fh):
@@ -207,6 +323,7 @@ class DataLogger:
     def close(self) -> None:
         self.stop()
         self.stop_run_export()
+        self.stop_ellipsometer_capture()
 
     # -- writing ------------------------------------------------------------ #
 
@@ -278,5 +395,12 @@ class DataLogger:
                 "active": self.run_export_active,
                 "path": str(self.run_path) if self.run_path else None,
                 "rows": self.run_rows,
+                "bycycle_path": str(self.bycycle_path) if self.bycycle_path else None,
+                "bycycle_rows": self.bycycle_rows,
+            },
+            "ellipsometer": {
+                "active": self.ellipsometer_active,
+                "path": str(self.ell_path) if self.ell_path else None,
+                "rows": self.ell_rows,
             },
         }

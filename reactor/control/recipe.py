@@ -338,6 +338,14 @@ class RecipeProgress:
     #: set by a lit_gated step, whose remaining time is not a wall-clock
     #: countdown and so cannot be derived from step_started/step_duration
     step_remaining_hint: float | None = None
+    #: fractional cycle number for property-vs-cycle plotting, set by the runner
+    #: each telemetry tick: whole part = completed cycles, fraction = progress
+    #: through the current cycle's predicted length, FROZEN during a reignite or
+    #: operator pause. None outside the cycling phase. `paused` marks a sample
+    #: taken while that progress was frozen - those are kept in the raw run log
+    #: but left out of the plot-ready by-cycle file. See RecipeRunner.cycle_fraction.
+    cycle_fraction: float | None = None
+    paused: bool = False
 
     def as_dict(self) -> dict:
         remaining = None
@@ -361,6 +369,8 @@ class RecipeProgress:
             "message": self.message,
             "error": self.error,
             "beam": self.beam,
+            "cycle_number": self.cycle_fraction,
+            "paused": self.paused,
         }
 
 
@@ -397,10 +407,68 @@ class RecipeRunner:
         self._gas_plan: dict | None = None
         self._gas_on: dict[str, bool | None] = {"first": None, "second": None}
         self._gas_overlap_s = 0.0
+        # Fractional-cycle bookkeeping for property-vs-cycle plotting. Progress
+        # through a cycle is wall time since the cycle began MINUS time spent
+        # frozen (reignite or operator pause) - computable at any log instant,
+        # and correct for both ALD (beam exposure freezes on a dead plasma) and
+        # CVD (the lit-gated pump A freezes). Pauses are reference-counted so
+        # overlapping reasons nest cleanly.
+        self._cycle_start_wall: float | None = None
+        self._cycle_paused_accum = 0.0
+        self._pause_start: float | None = None
+        self._pause_reasons: set[str] = set()
+        self._cycle_len = 0.0
 
     @property
     def busy(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    # -- fractional cycle number (for property-vs-cycle plots) -------------- #
+
+    def _cycle_pause(self, reason: str, active: bool) -> None:
+        """Reference-counted freeze of the cycle-progress clock. The clock is
+        frozen while any reason is active; nesting reasons (e.g. a reignite that
+        overlaps an operator pause) accrue paused time only once."""
+        was = bool(self._pause_reasons)
+        if active:
+            self._pause_reasons.add(reason)
+        else:
+            self._pause_reasons.discard(reason)
+        now_active = bool(self._pause_reasons)
+        if now_active and not was:
+            self._pause_start = time.time()
+        elif was and not now_active and self._pause_start is not None:
+            self._cycle_paused_accum += time.time() - self._pause_start
+            self._pause_start = None
+
+    def _begin_cycle_clock(self) -> None:
+        """Reset the cycle-progress clock at the start of a cycle."""
+        self._cycle_start_wall = time.time()
+        self._cycle_paused_accum = 0.0
+        self._pause_start = self._cycle_start_wall if self._pause_reasons else None
+
+    @property
+    def cycle_paused(self) -> bool:
+        return bool(self._pause_reasons) and self._cycle_start_wall is not None
+
+    def cycle_fraction(self, now: float | None = None) -> float | None:
+        """Fractional cycle number at `now`, or None outside the cycling phase.
+        Whole part = completed cycles; fraction = frozen-adjusted progress
+        through the current cycle's predicted length (Recipe.cycle_seconds)."""
+        if (self.progress.phase != "cycling" or self.progress.cycle <= 0
+                or self._cycle_len <= 0 or self._cycle_start_wall is None):
+            return None
+        now = time.time() if now is None else now
+        paused = self._cycle_paused_accum
+        if self._pause_start is not None:
+            paused += now - self._pause_start
+        prog = max(0.0, (now - self._cycle_start_wall) - paused)
+        # The actual cycle can run a little longer than its predicted length
+        # (per-step overhead, reignites already removed above). Cap progress at
+        # the predicted length so cycle N's samples stay in [N-1, N] and the
+        # number never steps backwards at the boundary where cycle increments.
+        prog = min(prog, self._cycle_len)
+        return (self.progress.cycle - 1) + prog / self._cycle_len
 
     async def start(self, recipe: Recipe) -> None:
         if self.busy:
@@ -418,6 +486,10 @@ class RecipeRunner:
         self._gas_plan = None
         self._gas_on = {"first": None, "second": None}
         self._gas_overlap_s = recipe.gas_overlap_s
+        self._cycle_start_wall = None
+        self._cycle_paused_accum = 0.0
+        self._pause_start = None
+        self._pause_reasons = set()
         self.progress = RecipeProgress(
             state="running", recipe=recipe.name,
             cycles_total=recipe.cycles, started_at=time.time(),
@@ -428,11 +500,13 @@ class RecipeRunner:
         if self.busy and self.progress.state == "running":
             self._pause.clear()
             self.progress.state = "paused"
+            self._cycle_pause("operator", True)   # freeze cycle progress too
 
     def resume(self) -> None:
         if self.busy and self.progress.state == "paused":
             self._pause.set()
             self.progress.state = "running"
+            self._cycle_pause("operator", False)
 
     async def abort(self) -> None:
         if not self.busy:
@@ -470,6 +544,7 @@ class RecipeRunner:
                 if self._abort.is_set():
                     break
                 self.progress.cycle = cycle
+                self._begin_cycle_clock()
                 if recipe.mode == "cvd":
                     # Restart the cycle clock, and evaluate the windows here at
                     # 0 rather than leaving it to the watchdog's next tick: that
@@ -483,6 +558,7 @@ class RecipeRunner:
                         self._fire_gas_lead(first_gas, delay), name="gas-lead-in"))
                 await self._run_steps(recipe.steps)
 
+            self._cycle_start_wall = None       # cycle progress stops after cycling
             if not self._abort.is_set():
                 self.progress.phase = "teardown"
                 await self._run_steps(recipe.teardown)
@@ -667,6 +743,9 @@ class RecipeRunner:
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
                 cur_val = float(cur) if isinstance(cur, (int, float)) else None
+                # A dead plasma here freezes the exposure clock, so it freezes
+                # the cycle-progress clock too (points logged now are "paused").
+                self._cycle_pause("reignite", not lit)
                 self.progress.beam = {
                     "remaining": max(0.0, remaining), "current": cur_val, "lit": lit,
                 }
@@ -694,6 +773,7 @@ class RecipeRunner:
                     second_on = False
         finally:
             self.progress.beam = None
+            self._cycle_pause("reignite", False)   # exposure clock resumes/ends
             # However this step exits, no scheduled gas is left flowing.
             if first_on and first is not None:
                 await gas_set(first, 0.0)
@@ -852,6 +932,9 @@ class RecipeRunner:
                     "lit": lit,
                     "lit_s": self._lit_s,
                 }
+                # The cycle clock (and thus cycle progress) freezes exactly when
+                # it would below: during a gated step (pump A) with no plasma.
+                self._cycle_pause("reignite", self._clock_gated and not lit)
                 if lit:
                     self._lit_s += dt
                 else:
@@ -871,6 +954,7 @@ class RecipeRunner:
                     await self._reignite(step)
         finally:
             self.progress.beam = None
+            self._cycle_pause("reignite", False)
             # Deliberately no MFC writes here: this task is normally stopped by
             # cancellation, and awaiting during cancellation is not reliable.
             # Every scheduled gas is zeroed by Supervisor.finish_run instead,

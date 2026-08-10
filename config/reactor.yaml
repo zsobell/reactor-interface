@@ -374,6 +374,23 @@ instruments:
     overload_above: 1.0e30
 
 # ---------------------------------------------------------------------------
+#  In-situ ellipsometer (Film Sense FS-1)
+# ---------------------------------------------------------------------------
+#  READ-ONLY. The FS-1 broadcasts every dynamic-mode measurement, unsolicited,
+#  on TCP <host>:4001 (~1 Hz). The reactor subscribes and timestamps each point
+#  with its own clock into a per-acquisition sidecar, so a *refit* dynamic file
+#  downloaded from the FS-1 afterwards can be put back onto the reactor clock
+#  (Diagnostics tab -> Ellipsometer sync). The reactor NEVER writes to the
+#  instrument; the trigger sockets on 4000/4010 are deliberately untouched.
+#  Confirmed on the wire 2026-08-06: direct link-local Ethernet, 169.254.1.1.
+ellipsometer:
+  enabled: true
+  label: "FS-1 Ellipsometer"
+  host: "169.254.1.1"
+  port: 4001
+  idle_gap_s: 5.0
+
+# ---------------------------------------------------------------------------
 #  Data logging
 # ---------------------------------------------------------------------------
 #  Tab-delimited, named YYMMDD_HHMMSS_<suffix>, like the LabVIEW logger.
