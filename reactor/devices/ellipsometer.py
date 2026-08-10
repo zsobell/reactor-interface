@@ -179,6 +179,10 @@ class EllipsometerClient:
         self.points_seen = 0
         self._task: asyncio.Task | None = None
         self._stop = False
+        #: last connection state we notified on, so a down instrument that
+        #: retries every reconnect_s does not fire an event on every attempt
+        #: (that would flood the 250-entry event log). None = nothing notified yet.
+        self._last_notified: bool | None = None
 
     @property
     def running(self) -> bool:
@@ -221,13 +225,17 @@ class EllipsometerClient:
 
     def _set_state(self, connected: bool, detail: str = "") -> None:
         self.connected = connected
-        if detail:
-            self.last_error = "" if connected else detail
-        if self.on_state is not None:
-            try:
-                self.on_state(connected, detail)
-            except Exception:
-                pass
+        self.last_error = "" if connected else (detail or self.last_error)
+        # Notify only on an actual transition (incl. the first report), so a
+        # persistently-unreachable instrument retrying every reconnect_s doesn't
+        # log an event on every attempt.
+        if connected != self._last_notified:
+            self._last_notified = connected
+            if self.on_state is not None:
+                try:
+                    self.on_state(connected, detail)
+                except Exception:
+                    pass
 
     async def _run(self) -> None:
         while not self._stop:
