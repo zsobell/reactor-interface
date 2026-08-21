@@ -261,6 +261,40 @@ its parameters, and every valve/MFC/gauge display name.
 Full history of what's shipped and what's still open lives in the **bd**
 issue tracker (`bd list --status=closed` / `bd ready`), not just in this file.
 
+### The issue tracker is backed up (set up 2026-08-21)
+
+The **bd** issues live in a Dolt database under `.beads/embeddeddolt/`, which is
+gitignored — so until now the tracker existed on this machine only, and a disk
+failure would have taken the whole project history with it. It now syncs to the
+same GitHub repo as the code, under a separate ref:
+
+```bash
+bd dolt push      # upload the issue history to refs/dolt/data
+bd dolt pull      # bring down changes made elsewhere
+```
+
+The remote is `git+https://github.com/zsobell/reactor-interface.git` — the same
+URL git already uses, so it needs no new account, no SSH key and no separate
+service. Dolt keeps its data in `refs/dolt/data`, well clear of `refs/heads/`,
+so it cannot collide with the source history.
+
+**To restore it on another machine** (verified end to end, 2026-08-21 — a fresh
+clone came back with every issue, note and closure intact): clone the repo, then
+run `bd bootstrap` inside it. Bootstrap notices `refs/dolt/data` on the origin
+remote by itself and clones the database instead of starting an empty one; the
+remote URL does not have to be committed anywhere for that to work.
+
+Two things worth knowing:
+
+- **Clone somewhere with a short path on Windows.** Dolt's remote-cache
+  directory is long and the hashes on the end are 64 characters, so a deep clone
+  path blows past the 260-character limit and `bd bootstrap` fails with
+  `Filename too long`. It is not an auth or config problem. `C:\Users\<you>\repo` is fine;
+  a temp directory several levels down is not.
+- **A `__dolt_remote_info__` branch appears** in the repo's branch list on
+  GitHub. That is Dolt's own bookkeeping, not a stray branch of yours; leave it
+  alone.
+
 ---
 
 ## Common changes
