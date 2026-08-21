@@ -22,9 +22,11 @@ from typing import Any
 
 from .config import ReactorConfig
 from .control.recipe import Recipe, RecipeRunner
+from . import datalog
 from .datalog import DataLogger
 from .devices.base import Device, Reading
 from .devices.ellipsometer import EllipsometerClient, EllipsometerPoint
+from .devices.glassman_fl import GlassmanFL
 from .devices.instrument import ScpiInstrument
 from .devices.mks_mfc import MfcRegisters, MksMfc
 from .devices.nidaq import AiSpec, DaqPlan, DoSpec, NiDaqBackend
@@ -48,6 +50,12 @@ LABELS_PATH = Path(__file__).resolve().parent.parent / "config" / "labels.json"
 #: Restoring it on startup only updates this program's internal model - it
 #: never writes to hardware, so a restart still commands nothing (see start()).
 VALVE_STATE_PATH = Path(__file__).resolve().parent.parent / "config" / "valve_state.json"
+
+#: Name of the last run actually STARTED (not merely typed into the box), so the
+#: UI can pre-fill the next one incremented - "Mo-014" -> "Mo-015". Written when
+#: a run starts, which is what makes the sequence reflect real runs: abandoning a
+#: pre-filled name without starting leaves the counter where it was.
+RUN_NAME_PATH = Path(__file__).resolve().parent.parent / "config" / "last_run.json"
 
 #: Digital-output lines available for valve identification, grouped by module.
 #: Verified present on this hardware. Note a 9375's port0 is INPUT; outputs are
@@ -73,6 +81,11 @@ class Supervisor:
         self.daq: NiDaqBackend | None = None
         self.mfcs: dict[str, Device] = {}
         self.instruments: dict[str, Device] = {}
+        #: Programmable power supplies (the Glassman HV plasma supply). Polled
+        #: polled on the slow loop. The only command this program ever sends
+        #: one is HV OFF at the end of a run or on a pre-start abort (hv_off);
+        #: there is no way to set a level or turn HV on. See CONTROL_MODEL.md.
+        self.supplies: dict[str, Device] = {}
         # Best-effort restore of last-commanded state (see VALVE_STATE_PATH) -
         # falls back to False for any valve it has no record of.
         _persisted_valves = self._load_valve_state()
@@ -83,8 +96,25 @@ class Supervisor:
         self._plan = DaqPlan()
         self._loop_task: asyncio.Task | None = None
         self._current_task: asyncio.Task | None = None
+        self._mfc_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
         self._last_cycle = 0.0
+        #: Monotonic counter of device reads, and the value it had when each
+        #: snapshot key was last actually MEASURED. The snapshot itself always
+        #: carries the latest known value (the live UI needs that), but the run
+        #: export uses these to write a channel only on the rows where it was
+        #: really read, leaving the cell empty otherwise - so the file records
+        #: measurements, not carried-forward copies of them. See
+        #: DataLogger.write_run_sample's `blank`.
+        #:
+        #: A counter rather than a wall-clock stamp because time.time() has
+        #: ~16 ms resolution on Windows: two reads inside one clock tick would
+        #: compare equal and a genuinely fresh reading would be dropped as
+        #: stale.
+        self._read_seq = 0
+        self.snapshot_seq: dict[str, int] = {}
+        #: _read_seq as of the last run-export row: the cutoff for "fresh since"
+        self._last_row_seq = 0
 
         #: operator label overrides, {kind: {id: label}}; persisted to LABELS_PATH
         self.label_overrides: dict[str, dict[str, str]] = self._load_labels()
@@ -114,6 +144,7 @@ class Supervisor:
         self._prestart_task: asyncio.Task | None = None
         self._prestart_stop = asyncio.Event()
         self.prestart: dict[str, Any] = {"running": False}
+        self._prestart_params: dict[str, Any] = {}
 
         # Background fill-pressure regulation
         self._reg_task: asyncio.Task | None = None
@@ -134,7 +165,6 @@ class Supervisor:
                 on_state=self._on_ellipsometer_state,
             )
         self._ell_last_recv = 0.0
-        self._ell_last_index = 0
 
     # ====================================================================== #
     #  Startup / shutdown
@@ -246,10 +276,29 @@ class Supervisor:
                 inst.last_error = f"{type(exc).__name__}: {exc}"
                 self._event("error", f"instrument {i.id}: {inst.last_error}")
 
+        for ps in cfg.power_supplies:
+            if not ps.enabled:
+                continue
+            # Only one driver exists; the config's Literal already rejects
+            # anything else, so this is a lookup rather than a branch.
+            dev = GlassmanFL(ps)
+            self.supplies[ps.id] = dev
+            try:
+                await dev.connect()
+                self._event("startup",
+                            f"power supply {ps.id}: {ps.model or ps.driver} on "
+                            f"{ps.port} @{ps.baud} addr {ps.address}, "
+                            f"firmware {dev.firmware or '?'} "
+                            f"(monitor only; HV off at run end)")
+            except Exception as exc:
+                dev.last_error = f"{type(exc).__name__}: {exc}"
+                self._event("error", f"power supply {ps.id}: {dev.last_error}")
+
         self._running = True
         self._loop_task = asyncio.create_task(self._control_loop(), name="control-loop")
         self._current_task = asyncio.create_task(
             self._current_loop(), name="current-loop")
+        self._mfc_task = asyncio.create_task(self._mfc_loop(), name="mfc-loop")
         self._reconnect_task = asyncio.create_task(
             self._reconnect_loop(), name="instrument-reconnect")
 
@@ -280,7 +329,8 @@ class Supervisor:
             await self.stop_fill_regulation()
         self._sweep_abort.set()
 
-        for task in (self._loop_task, self._current_task, self._reconnect_task):
+        for task in (self._loop_task, self._current_task, self._mfc_task,
+                     self._reconnect_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -290,7 +340,12 @@ class Supervisor:
             with contextlib.suppress(Exception):
                 await self.ellipsometer.stop()
 
-        for dev in list(self.mfcs.values()) + list(self.instruments.values()):
+        # Power supplies are included here purely to close their serial ports.
+        # GlassmanFL.disconnect() deliberately commands nothing - it does NOT
+        # send HV OFF - so stopping the server cannot switch off a plasma Zach
+        # set by hand at the front panel. See reactor/devices/glassman_fl.py.
+        for dev in (list(self.mfcs.values()) + list(self.instruments.values())
+                    + list(self.supplies.values())):
             with contextlib.suppress(Exception):
                 await dev.disconnect()
         if self.daq:
@@ -326,9 +381,15 @@ class Supervisor:
         """Retry any instrument that has dropped (e.g. the DMM was switched off).
 
         Connecting is read-only, so this reopens a session and re-sends the
-        configured setup, nothing more. It never actuates anything. Only bench
-        instruments are retried here; MFCs are left alone deliberately, since an
-        MFC zeroes its setpoint when its Modbus master reconnects.
+        configured setup, nothing more. It never actuates anything. Bench
+        instruments and power supplies are retried here; MFCs are left alone
+        deliberately, since an MFC zeroes its setpoint when its Modbus master
+        reconnects.
+
+        The power supplies are safe to retry for the same reason: GlassmanFL's
+        connect() only asks for the firmware revision, and its COM port can
+        change out from under us anyway (a driver reinstall already moved it
+        once), so a supply that comes back deserves to be picked up.
         """
         while self._running:
             await asyncio.sleep(RECONNECT_EVERY_S)
@@ -344,17 +405,49 @@ class Supervisor:
                     # event log with one line per retry while it stays off.
                     dev.last_error = f"{type(exc).__name__}: {exc}"
 
+            for dev_id, dev in list(self.supplies.items()):
+                if dev.connected or not self._running:
+                    continue
+                try:
+                    await dev.connect()
+                    self._event("startup",
+                                f"power supply {dev_id} reconnected: "
+                                f"firmware {getattr(dev, 'firmware', '') or '?'}")
+                except Exception as exc:
+                    dev.last_error = f"{type(exc).__name__}: {exc}"
+
     async def _cycle(self) -> None:
-        """Slow loop: DAQ analog inputs only, at site.loop_hz (the NI 9211
-        thermocouples cannot be read much faster). Updates the shared snapshot
-        in place and writes the data log. MFCs and the sample-current instrument
-        are independent HTTP/VISA devices with no such limit, so they are polled
-        on the faster _current_loop below instead."""
+        """Slow loop: DAQ analog inputs and the power supplies, at site.loop_hz
+        (the NI 9211 thermocouples cannot be read much faster). Updates the
+        shared snapshot in place and writes the data log. MFCs and the
+        sample-current instrument are independent HTTP/VISA devices with no such
+        limit, so they are polled on the faster _current_loop below instead.
+
+        The power supplies ride this loop rather than getting a timer of their
+        own: site.loop_hz (2 Hz) is the slowest cadence in the program, and one
+        Glassman query round-trips in ~13 ms - under 3% of the 500 ms budget -
+        so it costs the thermocouples nothing. Their columns therefore appear on
+        roughly every other run-export row, exactly as pressure and the
+        thermocouples already do (see write_run_sample's `blank`). If they are
+        ever wanted on every row, move this block into _current_cycle; do not
+        add a fourth timer."""
         cfg = self.cfg
         readings: list[Reading] = []
 
         if self.daq is not None:
             readings.extend(await self.daq.read_ai())
+
+        if self.supplies:
+            for res in await asyncio.gather(
+                    *(d.read() for d in self.supplies.values()),
+                    return_exceptions=True):
+                if isinstance(res, list):
+                    readings.extend(res)
+                elif isinstance(res, BaseException):
+                    # read() is contracted not to raise, so this is a bug rather
+                    # than a dead supply - but never let it kill the loop.
+                    self._event("error",
+                                f"power supply read: {type(res).__name__}: {res}")
 
         snap: dict[str, Any] = {}
         for r in readings:
@@ -384,14 +477,18 @@ class Supervisor:
         # Merge in place so the sample-current keys written by _current_loop are
         # not wiped each slow cycle.
         self.snapshot.update(snap)
+        self._read_seq += 1
+        for k in snap:
+            self.snapshot_seq[k] = self._read_seq
         self.logger.write_sample(self.snapshot, self.recipes.progress)
 
     async def _current_loop(self) -> None:
-        """Fast loop: poll the bench instruments (the DMM6500 sample-current)
-        and the MFCs (HTTP reads, no DAQ involved) at site.current_hz and
-        publish telemetry. This is the plasma diagnostic, so it runs finer than
-        the thermocouple-limited slow loop and drives the chart's current
-        resolution, the MFC flow chart, and the electron-beam reignite cadence."""
+        """Fast loop: poll the bench instruments (the DMM6500 sample-current) at
+        site.current_hz, publish telemetry, and write the run-export row. This is
+        the plasma diagnostic, so it runs finer than the thermocouple-limited
+        slow loop and drives the chart's current resolution and the electron-beam
+        reignite cadence. The MFCs used to be read here too and held it to
+        ~2.1 Hz; they now have their own loop (see _mfc_loop)."""
         period = 1.0 / self.cfg.site.current_hz
         loop = asyncio.get_running_loop()
         next_at = loop.time()
@@ -410,46 +507,116 @@ class Supervisor:
                 delay = 0
             await asyncio.sleep(max(0.0, delay))
 
+    def _absorb(self, results: list) -> None:
+        """Fold device read results into the snapshot, stamping what was read.
+
+        The stamp is what lets the run export tell a fresh measurement from a
+        value that has merely been sitting in the snapshot since the last poll.
+        """
+        self._read_seq += 1
+        for r in results:
+            if isinstance(r, list):
+                for rd in r:
+                    self.readings[rd.key] = rd
+                    self.snapshot[rd.key] = rd.value if rd.ok else None
+                    self.snapshot_seq[rd.key] = self._read_seq
+            elif isinstance(r, BaseException):
+                self._event("error", f"device read: {type(r).__name__}: {r}")
+
+    async def _mfc_loop(self) -> None:
+        """Poll the MFCs on their own cadence (site.mfc_hz).
+
+        Deliberately NOT part of _current_cycle: an MFC HTTP read takes
+        0.45-0.9 s on this hardware, so gathering them there throttled the whole
+        telemetry/logging tick to ~2.1 Hz no matter what current_hz said. Flow
+        readings are for display and the log; no control path waits on them.
+        """
+        period = 1.0 / self.cfg.site.mfc_hz
+        loop = asyncio.get_running_loop()
+        next_at = loop.time()
+        while self._running:
+            next_at += period
+            try:
+                await self._mfc_cycle()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("mfc cycle failed")
+                self._event("error", f"mfc cycle: {type(exc).__name__}: {exc}")
+            delay = next_at - loop.time()
+            if delay < -period:          # fell behind; resync rather than spin
+                next_at = loop.time()
+                delay = 0
+            await asyncio.sleep(max(0.0, delay))
+
+    async def _mfc_cycle(self) -> None:
+        """One poll of every MFC. Separate from _mfc_loop's timing so the
+        virtual reactor can drive it a tick at a time (see VirtualReactor.tick)."""
+        if self.mfcs:
+            self._absorb(await asyncio.gather(
+                *(d.read() for d in self.mfcs.values()),
+                return_exceptions=True,
+            ))
+
     async def _current_cycle(self) -> None:
         cfg = self.cfg
-        devices = list(self.instruments.values()) + list(self.mfcs.values())
-        if devices:
-            results = await asyncio.gather(
-                *(d.read() for d in devices),
+        # Instruments only - the MFCs have their own loop (see _mfc_loop).
+        if self.instruments:
+            self._absorb(await asyncio.gather(
+                *(d.read() for d in self.instruments.values()),
                 return_exceptions=True,
-            )
-            for r in results:
-                if isinstance(r, list):
-                    for rd in r:
-                        self.readings[rd.key] = rd
-                        self.snapshot[rd.key] = rd.value if rd.ok else None
-                elif isinstance(r, BaseException):
-                    self._event("error", f"device read: {type(r).__name__}: {r}")
+            ))
 
         snap = self.snapshot
         self._last_cycle = time.time()
         self._cycle_count += 1
 
+        # Column name -> the snapshot key it is measured from. Used both to
+        # build the sample and to decide which columns are fresh this row.
+        src = {
+            "pressure": "pressure",
+            "stage_temp": "stage.temp",
+            **{f"gauge_{g.id}": f"gauge.{g.id}" for g in cfg.gauges},
+            **{f"mfc_{m}": f"mfc.{m}.flow" for m in self.mfcs},
+            **{f"inst_{i}": f"inst.{i}" for i in self.instruments},
+            **{f"aux_{a.id}": f"aux.{a.id}" for a in cfg.aux_inputs},
+            # Units are per-supply config (unit_v / unit_i, V and mA on the
+            # Glassman) and are deliberately NOT baked into the column names:
+            # the analysis page keys its saved plot layout on column name, so
+            # these have to stay stable. See docs/GLASSMAN_FL.md.
+            **{f"hv_{p}_voltage": f"hv.{p}.voltage" for p in self.supplies},
+            **{f"hv_{p}_current": f"hv.{p}.current" for p in self.supplies},
+            **{f"hv_{p}_arcs": f"hv.{p}.arc_count" for p in self.supplies},
+        }
         sample = {
             "t": self._last_cycle,
-            "pressure": snap.get("pressure"),
-            "stage_temp": snap.get("stage.temp"),
+            # Commanded valve state, not a measurement: always current, so it is
+            # never blanked out of a row.
             "dosing": bool(self.valve_state.get(self._run_dose_valve)),
             "beam_on": not self.valve_state.get(self._run_plasma_switch, True),
-            **{f"gauge_{g.id}": snap.get(f"gauge.{g.id}") for g in cfg.gauges},
-            **{f"mfc_{m}": snap.get(f"mfc.{m}.flow") for m in self.mfcs},
-            **{f"inst_{i}": snap.get(f"inst.{i}") for i in self.instruments},
-            **{f"aux_{a.id}": snap.get(f"aux.{a.id}") for a in cfg.aux_inputs},
+            **{col: snap.get(key) for col, key in src.items()},
         }
+        # Channels NOT measured since the previous row: written blank rather
+        # than repeating a stale reading, since each loop runs at its own rate
+        # (DAQ ~2 Hz, instruments ~5 Hz, MFCs ~1 Hz) and a row should carry only
+        # what was really sampled at that instant. The commanded valve flags are
+        # never in here - they are state, not a measurement.
+        stale = {col for col, key in src.items()
+                 if self.snapshot_seq.get(key, 0) <= self._last_row_seq}
+        self._last_row_seq = self._read_seq
         # Fractional cycle number + paused flag, computed now (at log time) so a
         # sample taken mid-wall-step still gets an accurate position. Stored on
         # progress so the logger's by-cycle export and the telemetry share them.
         prog = self.recipes.progress
         prog.cycle_fraction = self.recipes.cycle_fraction()
         prog.paused = self.recipes.cycle_paused
+        prog.pause_reason = self.recipes.pause_reason
 
+        # history/telemetry keep the carried-forward values: the live charts and
+        # tiles must show the last known reading, not blink out between polls.
+        # Only the file gets the blanks.
         self.history.append(sample)
-        self.logger.write_run_sample(sample, prog)
+        self.logger.write_run_sample(sample, prog, blank=stale)
         await self._publish()
 
     # ====================================================================== #
@@ -735,6 +902,9 @@ class Supervisor:
             raise RuntimeError("a run is in progress - abort it first")
 
         self._prestart_stop.clear()
+        # Kept so abort_prestart can undo exactly what this sequence turned on,
+        # rather than guessing at the default valve/MFC ids.
+        self._prestart_params = dict(params)
         self.prestart = {
             "running": True, "phase": "starting", "lit": False,
             "current": None, "held_s": 0.0, "hold_target_s": 0.0, "strikes": 0,
@@ -758,6 +928,93 @@ class Supervisor:
         # replace, or an operator-initiated stop always reports back as bare
         # "idle" and throws away the phase/strike-count info the UI shows.
         self.prestart["running"] = False
+
+    async def abort_prestart(self) -> None:
+        """One-click undo of the pre-start: Ar off, fill off, beam relay at rest,
+        HV off.
+
+        `stop_prestart` only ends the *sequence*, and leaves the tool primed -
+        Ar flowing, fill pulsing, beam grounded - because that is the state a
+        successful pre-start is supposed to hand over to Start run. Once the
+        plasma had struck there was no button that undid any of it (the Stop
+        button greys out the moment the sequence finishes), so backing out
+        meant closing Ar, stopping the regulator and clearing the relay by
+        hand. This is that, on one click (operator request, 2026-08-21).
+
+        Ordering matters: the sequence is stopped first, and its own teardown
+        grounds the beam on the way out - so the relay is cleared AFTER that,
+        or it would be re-energised behind us.
+
+        The relay ends DE-ENERGISED, which is the "beam on" sense. That is
+        deliberate: the relay box runs off a 9 V battery that only drains while
+        the relay is energised, so at rest it belongs off. With HV commanded off
+        in the same click there is nothing for an ungrounded beam to do.
+        """
+        p = dict(self._prestart_params)
+        g = lambda k, d: p.get(k, d)  # noqa: E731
+
+        await self.stop_prestart()
+
+        errors: list[str] = []
+
+        async def attempt(what: str, coro) -> None:
+            try:
+                await coro
+            except Exception as exc:
+                errors.append(f"{what}: {type(exc).__name__}: {exc}")
+
+        # Ar: flow to zero before the isolation valve closes, so the MFC is not
+        # left commanding gas into a closed valve.
+        await attempt("Ar flow", self.set_mfc_setpoint(g("ar_mfc", "ar"), 0.0))
+        await attempt("Ar isolation valve",
+                      self.set_valve(g("ar_valve", "ar_pneumatic"), False,
+                                     reason="pre-start abort"))
+        # Precursor fill: stop the pulsing, then close the valve it was pulsing.
+        await attempt("fill regulation", self.stop_fill_regulation())
+        await attempt("fill valve",
+                      self.set_valve(g("fill_valve", "rpm_top"), False,
+                                     reason="pre-start abort"))
+        await attempt("beam relay",
+                      self.set_valve(g("plasma_switch", "plasma_ground"), False,
+                                     reason="pre-start abort - relay at rest"))
+        await attempt("HV off", self.hv_off(reason="pre-start abort"))
+
+        # The tool is no longer primed, so the UI must stop offering the abort
+        # (and stop claiming pre-start is complete).
+        self.prestart["running"] = False
+        self.prestart["done"] = False
+        self.prestart["phase"] = "aborted - Ar and fill off, relay at rest, HV off"
+        if errors:
+            self._event("error", "pre-start abort: " + "; ".join(errors))
+        else:
+            self._event("recipe", "pre-start aborted: Ar off, fill off, "
+                                  "beam relay de-energised, HV off")
+
+    async def hv_off(self, *, reason: str = "") -> None:
+        """Command every HV supply's output OFF.
+
+        The only write this program makes to the plasma supply, and it only ever
+        turns it *off* - requested by the operator on 2026-08-21 so a run that
+        ends (completed, aborted, or crashed) cannot leave HV energised. There
+        is still no way to set a voltage or turn HV on from here.
+
+        The supply's dialled-in voltage and current programs are preserved - see
+        GlassmanFL.hv_off for how, and for the fact that any Set command moves
+        the supply into REMOTE until LOC/REM is pressed. A failure is reported,
+        never raised: this runs inside run teardown.
+        """
+        for ps_id, dev in self.supplies.items():
+            off = getattr(dev, "hv_off", None)
+            if off is None:
+                continue
+            try:
+                await off()
+            except Exception as exc:
+                self._event("error",
+                            f"HV off failed for {ps_id}: {type(exc).__name__}: {exc}")
+            else:
+                tail = f" ({reason})" if reason else ""
+                self._event("recipe", f"HV commanded off: {ps_id}{tail}")
 
     async def _run_prestart(self, p: dict) -> None:
         g = lambda k, d: p.get(k, d)  # noqa: E731
@@ -905,26 +1162,71 @@ class Supervisor:
         self._run_plasma_switch = params.get("plasma_switch", "plasma_ground")
         self._run_fill_valve = params.get("fill_valve", "rpm_top")
         self._run_end_cleanup = True     # zero MFCs + close fill valve at run end
+        # Name this run before anything opens a file, so the trace, by-cycle,
+        # params JSON and ellipsometer sidecar all carry the same prefix. Only
+        # remembered once the run is actually starting, which is what makes the
+        # auto-increment track real runs rather than abandoned attempts.
+        run_name = self.logger.set_run_name(str(params.get("run_name") or ""))
+        if run_name:
+            self._remember_run_name(run_name)
+            self._event("recipe", f"run name: {run_name}")
         await self.start_recipe(recipe)
         try:
-            snap_path = self.logger.write_ald_snapshot(params, recipe)
+            snap_path = self.logger.write_run_params(params, recipe)
             self._event("recipe", f"run parameters recorded: {snap_path.name}")
         except Exception as exc:
             self._event("error", f"could not record run parameters: {exc}")
         return recipe
 
+    # -- operator run naming (see RUN_NAME_PATH) ---------------------------- #
+
+    @property
+    def last_run_name(self) -> str:
+        """Name of the last run that actually started, or "" if there is none."""
+        try:
+            data = json.loads(RUN_NAME_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return datalog.sanitize_run_name(str(data.get("name") or ""))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log.warning("could not read %s: %s", RUN_NAME_PATH, exc)
+        return ""
+
+    def suggest_run_name(self) -> str:
+        """What to pre-fill the run-name box with: the last started run's name
+        incremented. Purely a suggestion - the operator can type anything."""
+        return datalog.next_run_name(self.last_run_name)
+
+    def _remember_run_name(self, name: str) -> None:
+        clean = datalog.sanitize_run_name(name)
+        if not clean:
+            return
+        try:
+            RUN_NAME_PATH.parent.mkdir(parents=True, exist_ok=True)
+            RUN_NAME_PATH.write_text(
+                json.dumps({"name": clean, "started_at": time.time()}, indent=2),
+                encoding="utf-8")
+        except Exception as exc:
+            log.warning("could not persist run name: %s", exc)
+
     async def finish_run(self) -> None:
         """Called by the recipe runner however a run ends (done or aborted).
 
         Always stops the background fill regulation so the fill valve is not left
-        pulsing. For an ALD run it additionally returns the tool to a quiet state
-        as the operator requested: every MFC setpoint to zero and the precursor
-        fill valve closed. File recipes get only the fill-regulation stop.
+        pulsing, and always commands HV off (operator request, 2026-08-21 - a
+        run that ends must not leave the plasma supply energised). For an ALD
+        run it additionally returns the tool to a quiet state as the operator
+        requested: every MFC setpoint to zero and the precursor fill valve
+        closed. File recipes get only the fill stop and the HV off.
         """
         with contextlib.suppress(Exception):
             await self.stop_fill_regulation()
         with contextlib.suppress(Exception):
             self.logger.stop_run_export()
+        # Above the ALD/CVD gate below on purpose: HV off applies to EVERY run
+        # ending, file recipes included.
+        await self.hv_off(reason="run end")
 
         if not self._run_end_cleanup:
             return
@@ -936,7 +1238,8 @@ class Supervisor:
         for mfc_id in list(self.mfcs):
             with contextlib.suppress(Exception):
                 await self.set_mfc_setpoint(mfc_id, 0.0)
-        self._event("recipe", "run end: MFCs zeroed, fill stopped, fill valve closed")
+        self._event("recipe", "run end: MFCs zeroed, fill stopped, "
+                              "fill valve closed, HV off")
 
     async def abort_recipe(self) -> None:
         await self.recipes.abort()
@@ -1031,7 +1334,6 @@ class Supervisor:
             self._event("ellipsometer", f"acquisition start -> {path.name}")
         self.logger.write_ellipsometer_point(point)
         self._ell_last_recv = point.t_recv
-        self._ell_last_index = point.index
 
     def _on_ellipsometer_state(self, connected: bool, detail: str) -> None:
         self._event("ellipsometer",
@@ -1046,7 +1348,24 @@ class Supervisor:
         }
         if self.ellipsometer is not None:
             st.update(self.ellipsometer.status())
+        # Points banked in the sidecar for the acquisition in progress, which is
+        # the count the operator cares about mid-run ("points_seen" is every
+        # point since the program started, across all acquisitions).
+        ell_log = self.logger.status().get("ellipsometer", {})
+        st["capture_active"] = bool(ell_log.get("active"))
+        st["capture_rows"] = ell_log.get("rows") or 0
+        st["capture_file"] = (Path(ell_log["path"]).name
+                              if ell_log.get("path") else None)
         return st
+
+    def _recipe_state(self) -> dict[str, Any]:
+        """Recipe progress plus the run-level countdown, computed here rather
+        than cached on progress so the number is fresh at the instant it is
+        published (the UI shows it to 0.1 s)."""
+        d = self.recipes.progress.as_dict()
+        d["run_remaining_s"] = self.recipes.run_remaining_s()
+        d["run_total_s"] = self.recipes.run_total_s()
+        return d
 
     def state(self) -> dict[str, Any]:
         return {
@@ -1111,6 +1430,9 @@ class Supervisor:
                 for mid, st in ((mid, d.status()) for mid, d in self.mfcs.items())
             ],
             "instruments": [i.status() for i in self.instruments.values()],
+            # Read-only. Each status() carries read_only=True, which is what the
+            # UI keys off to render a monitor card with no controls on it.
+            "power_supplies": [p.status() for p in self.supplies.values()],
             "regulator": self.regulator,
             "prestart": self.prestart,
             "marks": [m for m in self.marks if time.time() - m["t"] <= 900][-500:],
@@ -1124,7 +1446,7 @@ class Supervisor:
                     for v in self.cfg.valves if not v.identified
                 ],
             },
-            "recipe": self.recipes.progress.as_dict(),
+            "recipe": self._recipe_state(),
             "logging": self.logger.status(),
             "ellipsometer": self._ellipsometer_state(),
             "events": list(self.events)[-40:],

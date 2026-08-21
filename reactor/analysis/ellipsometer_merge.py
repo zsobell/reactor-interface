@@ -23,7 +23,7 @@ from __future__ import annotations
 import csv
 import io
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 
 DYN_MAGIC = "Film_Sense_Dyn_Data"
 
@@ -224,7 +224,7 @@ def fit_time_map(sidecar: Sidecar) -> TimeMap:
 
 
 # --------------------------------------------------------------------------- #
-#  Optional reactor telemetry (the extended log carries an absolute iso_time)
+#  Merge
 # --------------------------------------------------------------------------- #
 
 def _parse_iso(s: str) -> float | None:
@@ -233,48 +233,6 @@ def _parse_iso(s: str) -> float | None:
     except ValueError:
         return None
 
-
-@dataclass
-class ReactorLog:
-    epoch: list[float]                     # per-row Unix seconds (from iso_time)
-    rows: list[dict[str, str]]
-    channels: list[str]
-
-
-def parse_reactor_extended(text: str) -> ReactorLog:
-    """Parse a reactor extended CSV (has an ``iso_time`` column). Rows without a
-    parseable iso_time are dropped."""
-    reader = csv.DictReader(io.StringIO(text))
-    cols = reader.fieldnames or []
-    skip = {"iso_time", "elapsed_s"}
-    channels = [c for c in cols if c not in skip]
-    epoch, rows = [], []
-    for row in reader:
-        e = _parse_iso(row.get("iso_time", ""))
-        if e is None:
-            continue
-        epoch.append(e)
-        rows.append(row)
-    return ReactorLog(epoch=epoch, rows=rows, channels=channels)
-
-
-def _nearest(sorted_epochs: list[float], target: float) -> int:
-    """Index of the nearest value in an ascending list (binary search)."""
-    import bisect
-    if not sorted_epochs:
-        return -1
-    j = bisect.bisect_left(sorted_epochs, target)
-    if j <= 0:
-        return 0
-    if j >= len(sorted_epochs):
-        return len(sorted_epochs) - 1
-    before, after = sorted_epochs[j - 1], sorted_epochs[j]
-    return j if (after - target) < (target - before) else j - 1
-
-
-# --------------------------------------------------------------------------- #
-#  Merge
-# --------------------------------------------------------------------------- #
 
 @dataclass
 class MergeResult:
@@ -302,6 +260,13 @@ class MergeResult:
 _RUN_META = {"elapsed_s", "iso_time", "recipe_cycle", "cycle_number", "paused",
              "recipe_step"}
 
+#: `recipe_step` values that mean "the tool was not depositing here". Since
+#: 2026-08-21 the run export names a reignite and an operator pause in the step
+#: column itself instead of carrying a separate 0/1 `paused` column; "paused" is
+#: kept in _RUN_META above so older files do not turn that column into a
+#: plottable channel, and is still honoured below when present.
+_PAUSE_STEPS = {"reignite", "pause"}
+
 
 @dataclass
 class ReactorRun:
@@ -318,9 +283,14 @@ class ReactorRun:
 
 
 def parse_reactor_run(text: str) -> ReactorRun:
-    """Parse the automatic reactor run export (``<stamp>_<slug>_run.csv``):
-    absolute iso_time, fractional cycle_number, a paused flag, and every data
-    channel. This is the backbone of the combined plot-ready merge."""
+    """Parse the automatic reactor run export (``<stem>_run.csv``): absolute
+    iso_time, fractional cycle_number, the recipe step, and every data channel.
+    This is the backbone of the combined plot-ready merge.
+
+    "Was this sample paused?" is read from BOTH sources on purpose: the
+    `recipe_step` naming a reignite or a pause (current format) and a `paused`
+    column being set (files written before 2026-08-21). Either marks the row, so
+    both formats merge identically and old runs stay usable."""
     reader = csv.DictReader(io.StringIO(text))
     cols = reader.fieldnames or []
     channels = [c for c in cols if c not in _RUN_META]
@@ -336,7 +306,9 @@ def parse_reactor_run(text: str) -> ReactorRun:
             cyc.append(float(row["cycle_number"]))
         except (KeyError, ValueError):
             cyc.append(None)
-        pau.append(str(row.get("paused", "")).strip() in ("1", "True", "true"))
+        pau.append(
+            str(row.get("paused", "")).strip() in ("1", "True", "true")
+            or str(row.get("recipe_step", "")).strip().lower() in _PAUSE_STEPS)
         try:
             el.append(float(row.get("elapsed_s", "nan")))
         except ValueError:
@@ -361,6 +333,40 @@ def _interp(xs: list[float], ys: list[float], x: float) -> float | None:
         return ys[0]
     x0, x1, y0, y1 = xs[j - 1], xs[j], ys[j - 1], ys[j]
     return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+
+
+def _cycle_at(eps: list[float], cycs: list[float], paused: list[bool],
+              ep: float) -> float | None:
+    """Cycle number at time `ep`, or None if the point should be dropped.
+
+    Interpolates the reactor's own recorded time->cycle curve, which is the
+    right thing to interpolate: cycle number is a function of the clock the
+    reactor kept, not a measurement. Paused samples are INCLUDED in the curve
+    because their recorded cycle_number is already frozen at the pause value, so
+    interpolating across a pause follows the real (flat) curve.
+
+    Returns None outside the cycling window, and None when the nearest reactor
+    sample was paused - a reignite is exactly when the tool is not depositing,
+    so an ellipsometry point landing there is dropped rather than attributed to
+    a cycle position. Using the recorded flag rather than a time-gap heuristic
+    matters because reignite pauses are short (~0.45 s per attempt), comparable
+    to the sample spacing itself.
+    """
+    import bisect
+    if not eps or ep < eps[0] or ep > eps[-1]:
+        return None
+    j = bisect.bisect_left(eps, ep)
+    if j < len(eps) and eps[j] == ep:
+        return None if paused[j] else cycs[j]
+    if j == 0:
+        return None if paused[0] else cycs[0]
+    lo, hi = j - 1, j
+    # Nearest sample decides whether this instant counts as paused.
+    near = lo if (ep - eps[lo]) <= (eps[hi] - ep) else hi
+    if paused[near]:
+        return None
+    e0, e1, c0, c1 = eps[lo], eps[hi], cycs[lo], cycs[hi]
+    return c0 if e1 == e0 else c0 + (c1 - c0) * (ep - e0) / (e1 - e0)
 
 
 def _num(v: object) -> str:
@@ -429,14 +435,33 @@ def merge(
             f"compatible run export; this one can't be merged.")
 
     chans = reactor_channels or reactor_run.channels
-    header = (["cycle_number", "reactor_elapsed_s", "reactor_iso"]
+    header = (["cycle_number", "reactor_elapsed_s", "reactor_iso", "source"]
               + ell_cols + chans + ["recipe_step"])
-    rows: list[dict[str, object]] = []
+
+    # UNION OF INSTANTS, not a resampling. Every reactor sample keeps its own
+    # row (ellipsometry columns blank) and every FS-1 measurement gets its own
+    # row at its true time (reactor columns blank). Nothing is interpolated onto
+    # anything else, so every number in the file is a number that was actually
+    # measured, and a blank cell means "not sampled here" rather than a zero.
+    # (epoch, tie-break, row). Sorting on the exact epoch rather than the
+    # millisecond-rounded reactor_elapsed_s string matters: rounding creates
+    # ties, and a tie resolved the wrong way puts an interpolated cycle number a
+    # fraction below the reactor sample it came from, making cycle_number
+    # non-monotonic. The tie-break keeps the reactor sample first at equal times.
+    stamped: list[tuple[float, int, dict[str, object]]] = []
     dropped_paused = 0
+    # The full in-cycle time->cycle curve, paused samples included (see
+    # _cycle_at): only rows are dropped for being paused, not the curve itself.
+    all_ep: list[float] = []
+    all_cyc: list[float] = []
+    all_paused: list[bool] = []
     for i, ep in enumerate(reactor_run.epoch):
         cyc = reactor_run.cycle_number[i]
         if cyc is None:
             continue                       # setup/teardown - no cycle number
+        all_ep.append(ep)
+        all_cyc.append(cyc)
+        all_paused.append(bool(reactor_run.paused[i]))
         if reactor_run.paused[i]:
             dropped_paused += 1
             continue                       # reignite / operator pause
@@ -444,18 +469,58 @@ def merge(
             "cycle_number": f"{cyc:.6f}",
             "reactor_elapsed_s": _num(reactor_run.elapsed_s[i]),
             "reactor_iso": reactor_run.iso[i],
+            "source": "reactor",
             "recipe_step": reactor_run.recipe_step[i],
         }
         for col in ell_cols:
-            row[col] = _num(_interp(ell_epochs, dyn.columns[col], ep))
+            row[col] = ""              # measured by the FS-1, not here
         for ch in chans:
             row[ch] = reactor_run.rows[i].get(ch, "")
-        rows.append(row)
+        stamped.append((ep, 0, row))
 
-    if not rows:
+    # Ellipsometry rows. Only cycle_number is derived, and only by interpolating
+    # the reactor's own time->cycle curve: the cycle number is a known function
+    # of the clock, not a measurement, and without it these rows could not be
+    # plotted against cycle at all. A point is dropped when it falls outside the
+    # cycling window or inside a gap left by paused samples, because across a
+    # pause the cycle clock is frozen and interpolating over it would invent a
+    # position the tool was never at.
+    dropped_ell = 0
+    run_t0 = (reactor_run.epoch[0] - reactor_run.elapsed_s[0]) if reactor_run.epoch else 0.0
+    for i, ft in enumerate(dyn.time):
+        ep = ell_epochs[i]
+        cyc = _cycle_at(all_ep, all_cyc, all_paused, ep)
+        if cyc is None:
+            dropped_ell += 1
+            continue
+        row = {
+            "cycle_number": f"{cyc:.6f}",
+            "reactor_elapsed_s": f"{ep - run_t0:.3f}",
+            "reactor_iso": datetime.fromtimestamp(ep).isoformat(timespec="milliseconds"),
+            "source": "ellipsometer",
+            "recipe_step": "",
+        }
+        for col in ell_cols:
+            row[col] = _num(dyn.columns[col][i])
+        for ch in chans:
+            row[ch] = ""               # measured by the reactor, not here
+        stamped.append((ep, 1, row))
+
+    # Time order, so cycle_number is monotonic down the file exactly as it was
+    # before - a plot against cycle needs no post-processing.
+    stamped.sort(key=lambda t: (t[0], t[1]))
+    rows = [r for _ep, _tb, r in stamped]
+
+    if not stamped:
         warnings.append("no in-cycle, non-paused reactor samples to merge")
     if dropped_paused:
-        warnings.append(f"dropped {dropped_paused} paused (reignite) sample(s)")
+        warnings.append(
+            f"dropped {dropped_paused} sample(s) taken during a reignite or an "
+            f"operator pause")
+    if dropped_ell:
+        warnings.append(
+            f"dropped {dropped_ell} ellipsometry point(s) taken outside the "
+            f"cycling window or while the run was paused")
     if ell_epochs and reactor_run.epoch and (
             ell_epochs[0] > reactor_run.epoch[0] + 5
             or ell_epochs[-1] < reactor_run.epoch[-1] - 5):

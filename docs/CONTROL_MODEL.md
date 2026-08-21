@@ -42,6 +42,70 @@ are narrow — a flag that never stops anything, and a single valve/MFC pairing
 that refuses one specific invalid combination rather than gating anything
 reactor-wide. Neither is a precedent for adding more without asking first.
 
+## Devices this program reads but (almost) never commands
+
+Some hardware is deliberately monitor-only. Connecting to it is read-only, and
+there is no path from the UI to any write.
+
+- **Film Sense FS-1 ellipsometer.** Subscribes to the instrument's broadcast;
+  the trigger sockets are deliberately untouched. Still fully read-only.
+- **XP Glassman FL1.5F1.0 HV plasma supply.** Polled for voltage, current and
+  arc count at 2 Hz and logged. Zach sets voltage and current by hand on the
+  front panel, and this program **sends it exactly one command: HV OFF.**
+
+### The one HV command (requested 2026-08-21)
+
+`Supervisor.hv_off()` asserts HV Off on every configured supply, and is called
+from exactly two places, both of them an ending:
+
+- `finish_run()` — however a run ends: completed, aborted, or crashed. (The
+  recipe runner calls it from its own `finally`, so a crash is covered too.)
+- `abort_prestart()` (below) — the same intent for the pre-run state.
+
+There is still **no way to set a voltage, and no way to turn HV on**, from the
+supervisor, the API or the browser. The Hardware-tab card has no inputs; not
+disabled inputs, absent ones. Voltage/current control remains a not-yet.
+
+Two protocol facts shape how the off is sent, and both are load-bearing:
+
+- The FL's Set frame **always carries a voltage and a current program** — there
+  is no "HV off only" packet. Sending zeros would wipe the levels Zach dialled
+  in, so `GlassmanFL.hv_off` echoes the supply's own last reading back with the
+  frame. Do not "simplify" that to `set_hv(False, 0, 0)`.
+- **Any Set command puts the supply into REMOTE.** The front-panel LOC/REM
+  button switches it back; the button does nothing while already local, which is
+  normal and not a fault. So after a run ends, the supply will be sitting in
+  remote until Zach presses LOC/REM.
+
+Two older decisions still stand and should not be quietly reversed:
+
+- **`disconnect()` does not send HV OFF.** A driver for this same supply
+  elsewhere in the group does, after an incident where their app exited leaving
+  HV energised. This program still does not: HV off belongs to *a run ending*,
+  not to *the server stopping*, or closing a browser tab would kill a plasma
+  Zach set by hand. Stopping the server closes the port and nothing else.
+- **There is no voltage limit.** An earlier plan capped the setpoint at 1000 V;
+  Zach withdrew it once this became read-only. Nothing here sets a voltage, so
+  there is still nothing to clamp — but **if setpoint control is ever added, the
+  cap should be reconsidered at the same time** (on a 1500 V supply, 1000 V was
+  2730 counts, `0xAAA`). Details in [GLASSMAN_FL.md](GLASSMAN_FL.md).
+
+## The pre-start abort (requested 2026-08-21)
+
+`Supervisor.abort_prestart()` is one click that undoes a pre-start: Ar flow to
+zero then the isolation valve closed, fill regulation stopped and the fill valve
+closed, the beam relay **de-energised**, and HV off.
+
+It exists because `stop_prestart` only ends the *sequence* and deliberately
+leaves the tool primed — Ar flowing, fill pulsing, beam grounded — which is the
+state a successful pre-start hands to Start run. That meant the Stop button
+greyed out at exactly the moment the operator most often wanted to back out.
+
+The relay ending de-energised is deliberate, not an oversight: the relay box
+runs off a 9 V battery that drains only while the relay is energised (see
+[HARDWARE.md](HARDWARE.md)), so at rest it belongs off. HV is commanded off in
+the same call, so there is nothing for an un-grounded relay to do.
+
 ## What still protects the hardware (not this program)
 
 - **The operator.** Every consequential action is a human decision in the UI.

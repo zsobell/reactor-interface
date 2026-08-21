@@ -110,10 +110,21 @@ treated as a substitute for that, and it shouldn't be.
    `virtual_reactor.py` for the exact per-channel-kind semantics).
 5. If a check depends on timing relative to *when something actually
    happens* rather than a fixed wall-clock offset (e.g. "the plasma drops
-   mid-exposure"), poll for the real condition (`progress.beam.get("lit")`)
-   before acting, don't guess an offset. `test_ee_ald_recipe.py`'s section 2
-   has a worked example and a comment on exactly why the naive version was
-   flaky.
+   mid-exposure"), poll for the real condition with
+   `tests._support.wait_for(pred)` — it returns False on timeout rather than
+   hanging — instead of guessing an offset. `test_ee_ald_recipe.py`'s
+   section 2 has a worked example.
+
+   This is the single most common way to write a flaky test here, and it has
+   bitten twice. The second time is worth knowing about because it is subtler
+   than "the offset drifted": `test_prestart.py` section 3 slept 0.35 s, then
+   dropped the sample current for exactly 0.2 s. But `_run_prestart` samples
+   current every 0.2 s — so the entire dropout could fall between two samples.
+   The sequence then never saw it, completed the hold uninterrupted, and the
+   test failed on a race of its own making rather than on anything the reactor
+   code did. **An event staged for less than one poll interval may never be
+   observed at all**: wait for the code to acknowledge it (a counter moving, a
+   state flag flipping) before undoing it.
 6. Use `tests._support.Checker` for the `PASS`/`FAIL` bookkeeping so output
    stays consistent across files.
 7. One `VirtualReactor` is commonly reused across several sections in a
@@ -142,17 +153,43 @@ else still can't damage the real project:
 
 ## What's covered today
 
+Eight files, all run by `python -m tests.run_all`. The first five drive a real
+`Supervisor` against the virtual reactor; the last two are pure-function tests
+needing no reactor at all.
+
 | File | Covers |
 |---|---|
 | `test_ee_ald_recipe.py` | Pulsed-beam mode: per-cycle beam pulse, gas lead/handoff off the single overlap, reignite mid-exposure, abort mid-dose |
 | `test_ee_cvd_recipe.py` | Continuous-beam mode: beam on/off lifecycle, reignite watchdog, the cycle-clock gas schedule staying locked across a reignite, abort |
 | `test_prestart.py` | The operator pre-start sequence: happy path, unlimited-retry strike, a drop mid-hold restarting the hold, grounding the beam however it ends |
-| `test_run_export.py` | Automatic server-side per-run CSV: opens on start, closes on completion/abort, back-to-back runs don't collide |
+| `test_run_export.py` | The automatic per-run files: run CSV opens on start and closes on completion/abort, back-to-back runs don't collide, and the run-parameters JSON is written with a correct gas-schedule summary in both modes |
 | `test_mfc_interlock.py` | The Ar MFC isolation interlock — the one check no earlier ad hoc harness could exercise, because it lives in `Supervisor` itself, which every earlier fake replaced wholesale |
+| `test_cycle_numbering.py` | Fractional cycle numbers: the clock freezing on a reignite/pause, monotonicity across a cycle boundary, the by-cycle export dropping frozen samples, and `recipe_step` naming a freeze itself (`reignite` vs `pause`) rather than a separate 0/1 column |
+| `test_ellipsometer_decode.py` | The FS-1 wire format: record decoding against real captured bytes, resync past garbage, field-name-keyed parsing |
+| `test_ellipsometer_merge.py` | The post-run join: dyn-file parsing (both shapes, minutes vs seconds), the time-map fit, the combined by-cycle merge and its warnings |
+| `test_docs.py` | The docs still describe THIS program: poll rates, hardware addresses, the channel map, MFC register addresses and run-file names quoted in prose are checked against the config and code, every module and test is listed where it should be, and a handful of superseded claims are asserted absent. Reads files only |
+| `test_sample_freshness.py` | The run export blanking a channel on rows where it was not resampled: state columns always filled, a slow channel blank on the ticks it missed and present on the ones it made, and the run-name prefix reaching the filename |
+| `test_glassman_fl.py` | The HV supply's protocol codec, checked against byte strings printed in the vendor manual (and two captured off the real supply) rather than against itself, plus the readings reaching the snapshot and the run CSV |
+| `test_run_timing.py` | The run clock: a cycle takes the sum of its step durations to within 0.1 s, and "est. remaining" starts at cycle-length x cycles, falls one second per second, and freezes for a reignite. Written after Mo-015 ran 124 s long on 150 cycles |
+| `test_hv_and_prestart_abort.py` | The two actuation changes of 2026-08-21: HV commanded off however a run ends, without disturbing the front-panel levels; and `abort_prestart` undoing a pre-start (Ar, fill, relay de-energised, HV off) both after the plasma has struck and mid-strike |
+| `test_file_naming.py` | One run = one folder, one stem, no .json: the run name reaching every file, an ellipsometer sidecar whose acquisition opened before Start run being adopted (renamed AND moved into the run folder, mid-capture, without losing a point), unnamed runs falling back to a timestamp folder, the merged file named after the run rather than the dropped refit, and the merged CSV having no doubled line terminators (the "every other row blank in Excel" bug) |
 
-Two real bugs were found and fixed via this suite on 2026-08-06:
+Three real bugs have been found and fixed via this suite. On 2026-08-06:
 `RecipeRunner._apply_cvd_gas` not being called at a cycle boundary (a gas
 window could be skipped and a gas left stranded on), and
 `Supervisor.stop_prestart()` discarding the phase/done/strike-count info
 `_run_prestart`'s own finally block had just set, so an operator-initiated
 stop always reported back as bare "idle" instead of what actually happened.
+On 2026-08-11, `test_run_export.py` section 5 was added after a maintenance
+sweep found `DataLogger` still summarising the gas schedule via a
+`GasSchedule.lead_s` field deleted when per-gas leads became one shared
+overlap — every gas-scheduled run threw an `AttributeError` and silently lost
+its parameter record. The lesson generalises: a code path whose failure is
+swallowed into an event-log line needs a test, because nothing else will
+notice it broke.
+
+The same sweep fixed two flaky tests, both of which had been passing on luck:
+`test_run_export.py` section 3 (two runs in the same second collide on the
+one-second filename stamp — `reactor-cod`) and `test_prestart.py` section 3
+(the poll-interval race described above). A test that fails once in ten runs
+is worse than no test, because it teaches you to ignore a red suite.

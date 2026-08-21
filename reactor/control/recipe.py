@@ -170,6 +170,11 @@ class Recipe(BaseModel):
         return sum(s.seconds or 0.0 for s in self.steps)
 
 
+#: Poll period for the beam's current check and the EE-CVD reignite watchdog.
+#: The operator asked for a check at least twice a second; the last tick of a
+#: timed beam step is clamped short of this so the step cannot overrun.
+BEAM_TICK_S = 0.2
+
 #: MFCs eligible for beam-proximal gas scheduling. Ar is excluded - it's
 #: regulated separately (see the isolation-valve interlock), not gated to the
 #: beam exposure.
@@ -242,10 +247,37 @@ def build_ald_recipe(p: dict) -> Recipe:
                  reignite_settle_s=float(g("reignite_settle_s", 0.15))),
             Step(op="wait", seconds=float(g("pump_b_s", 10.0))),
         ],
-        teardown=[Step(op="message", text="run complete")],
+        teardown=_end_of_run(g, plasma),
         gas_schedules=gas_schedules,
         gas_overlap_s=float(g("gas_overlap_s", 0.0)),
     )
+
+
+def _end_of_run(g, plasma: str) -> list[Step]:
+    """The operator's end-of-run sequence, shared by EE-ALD and EE-CVD.
+
+    Requested behaviour, in this order: zero the Ar setpoint, hold the Ar
+    isolation valve open a further `ar_close_delay_s` (timed from the end of the
+    last cycle, i.e. the start of teardown) so the line keeps purging, then close
+    it, and finally leave the plasma ground OFF - which is beam-ON mode, the
+    state the operator wants the tool parked in.
+
+    The Ar setpoint is zeroed *before* the valve closes because the MFC refuses a
+    nonzero setpoint while its isolation valve is shut, so closing first would
+    strand a live setpoint behind a closed valve.
+
+    Note Supervisor.finish_run runs after this and zeroes every MFC and closes
+    the fill valve; it does not touch the plasma switch, so the beam-on state set
+    here survives. `_run`'s beam-off safety only fires if a beam_stop has not
+    already cleared `_beam_switch`, which the EE-CVD teardown does first.
+    """
+    return [
+        Step(op="set_flow", mfc=g("ar_mfc", "ar"), sccm=0.0),
+        Step(op="wait", seconds=float(g("ar_close_delay_s", 10.0))),
+        Step(op="valve", valve=g("ar_valve", "ar_pneumatic"), state=False),
+        Step(op="valve", valve=plasma, state=False),   # beam ON mode
+        Step(op="message", text="run complete"),
+    ]
 
 
 def build_cvd_recipe(p: dict) -> Recipe:
@@ -303,10 +335,10 @@ def build_cvd_recipe(p: dict) -> Recipe:
             # Pump A freezes with the plasma, in lockstep with the gas clock.
             Step(op="wait", seconds=float(g("pump_a_s", 10.0)), lit_gated=True),
         ],
-        teardown=[
-            Step(op="beam_stop", switch=plasma),
-            Step(op="message", text="run complete"),
-        ],
+        # beam_stop first: it kills the watchdog (and grounds the beam) so the
+        # shared end-of-run sequence can leave the switch where the operator
+        # wants it without the watchdog fighting it.
+        teardown=[Step(op="beam_stop", switch=plasma), *_end_of_run(g, plasma)],
         gas_schedules=gas_schedules,
         gas_overlap_s=float(g("gas_overlap_s", 0.0)),
     )
@@ -346,6 +378,26 @@ class RecipeProgress:
     #: but left out of the plot-ready by-cycle file. See RecipeRunner.cycle_fraction.
     cycle_fraction: float | None = None
     paused: bool = False
+    #: WHY the cycle clock is frozen right now: "operator", "reignite", or "".
+    #: Set by the supervisor each telemetry tick, alongside `paused`.
+    pause_reason: str = ""
+
+    def log_step(self) -> str:
+        """What the run log's `recipe_step` column says for a sample taken now.
+
+        A reignite is an event in its own right, not part of the electron-beam
+        step it interrupts, and an operator pause is not a recipe step at all.
+        Both therefore get their own label here, instead of a separate 0/1
+        `paused` column sitting beside whichever step they happened to freeze
+        (operator request, 2026-08-21): one descriptive column rather than two,
+        and narrowing a raw run file to just the deposition is
+        `recipe_step not in ("reignite", "pause")`.
+        """
+        if self.pause_reason == "operator":
+            return "pause"
+        if self.pause_reason == "reignite":
+            return "reignite"
+        return self.step_desc
 
     def as_dict(self) -> dict:
         remaining = None
@@ -371,6 +423,7 @@ class RecipeProgress:
             "beam": self.beam,
             "cycle_number": self.cycle_fraction,
             "paused": self.paused,
+            "pause_reason": self.pause_reason,
         }
 
 
@@ -417,7 +470,6 @@ class RecipeRunner:
         self._cycle_paused_accum = 0.0
         self._pause_start: float | None = None
         self._pause_reasons: set[str] = set()
-        self._cycle_len = 0.0
 
     @property
     def busy(self) -> bool:
@@ -451,6 +503,22 @@ class RecipeRunner:
     def cycle_paused(self) -> bool:
         return bool(self._pause_reasons) and self._cycle_start_wall is not None
 
+    @property
+    def pause_reason(self) -> str:
+        """Which freeze is active, operator first: an operator pause that
+        overlaps a reignite is the one worth reporting.
+
+        Deliberately NOT gated on the cycling phase the way `cycle_paused` is -
+        if the operator pauses during setup or teardown the log should still say
+        so. Those rows carry no cycle number and are dropped from the by-cycle
+        and merged files regardless, so the two cannot disagree where it counts.
+        """
+        if "operator" in self._pause_reasons:
+            return "operator"
+        if "reignite" in self._pause_reasons:
+            return "reignite"
+        return ""
+
     def cycle_fraction(self, now: float | None = None) -> float | None:
         """Fractional cycle number at `now`, or None outside the cycling phase.
         Whole part = completed cycles; fraction = frozen-adjusted progress
@@ -469,6 +537,46 @@ class RecipeRunner:
         # number never steps backwards at the boundary where cycle increments.
         prog = min(prog, self._cycle_len)
         return (self.progress.cycle - 1) + prog / self._cycle_len
+
+    # -- deterministic run clock (for the operator's "est. remaining") ----- #
+
+    def run_total_s(self) -> float | None:
+        """Nominal length of the cycling phase: one cycle's step durations times
+        the cycle count. Setup and teardown are excluded - they are operator
+        preamble, not the run the countdown is about."""
+        if not self.progress.cycles_total or self._cycle_len <= 0:
+            return None
+        return self.progress.cycles_total * self._cycle_len
+
+    def run_remaining_s(self) -> float | None:
+        """Seconds left in the cycling phase, from the recipe - NOT from measured
+        pace.
+
+        This used to be extrapolated in the browser from the run's own average
+        cycle time, which meant the number moved every few seconds for reasons
+        the operator could not see, and never agreed with the arithmetic they
+        had done from the parameters they typed. The requirement is the plain
+        one: start at (cycle length x cycles) and tick down in real time,
+        holding still only when the cycle itself is held still.
+
+        That falls straight out of `cycle_fraction`, which is already exactly
+        "how far through the run are we, in cycles, with reignites and operator
+        pauses subtracted". Remaining is the rest of it, in seconds. So the
+        countdown freezes during a reignite or a pause for the same reason and
+        by the same mechanism as the cycle number does - there is no second
+        clock to keep in step.
+        """
+        total = self.run_total_s()
+        if total is None or self.progress.state not in ("running", "paused"):
+            return None
+        if self.progress.phase == "teardown":
+            return 0.0                      # the cycles are done
+        if self.progress.phase != "cycling":
+            return total                    # "" (just started) or setup
+        frac = self.cycle_fraction()
+        if frac is None:
+            return total
+        return max(0.0, (self.progress.cycles_total - frac) * self._cycle_len)
 
     async def start(self, recipe: Recipe) -> None:
         if self.busy:
@@ -719,27 +827,38 @@ class RecipeRunner:
         first_on = False
         second_on = False
 
-        async def gas_set(schedule: GasSchedule, sccm: float) -> None:
-            try:
-                await sup.set_mfc_setpoint(schedule.mfc, sccm)
-            except Exception as exc:
-                sup._event("error", f"gas schedule ({schedule.mfc}): {exc}")
-
         await sup.set_valve(step.switch, False, reason="beam on")   # plasma ground off
+        # That flip IS the strike - one is always required to start the beam.
+        # The current needs the same settle time a reignite gets before it is
+        # fair to judge whether the strike took; without it a healthy strike
+        # that needs longer than one tick reads as "extinguished" and gets
+        # pulsed back off, which both interrupts a good plasma and flags a
+        # reignite every cycle.
+        #
+        # That settle used to be a blind sleep BEFORE the exposure loop, which
+        # made the step reignite_settle_s longer than the exposure it was asked
+        # for - 10.2 s of beam for a 10 s step, every cycle. It is now a grace
+        # WINDOW inside the loop (the `t0 - strike_at` branch below): the same
+        # protection from a premature reignite, but current that appears during
+        # it counts as the exposure it is, so `seconds` is honest wall time.
+        strike_at = time.time()
         try:
             if first is not None:
                 # Defensive re-assert: the lead-in task should already have
                 # turned this on before this step started, but this step is
                 # the one place that actually needs it on, so make sure.
-                await gas_set(first, first.flow_sccm)
+                await self._gas_set(first, first.flow_sccm)
                 first_on = True
 
             remaining = total
             while remaining > 0 and not self._abort.is_set():
                 await self._pause.wait()
                 t0 = time.time()
-                await asyncio.sleep(0.2)
-                dt = time.time() - t0            # ~0.2 s; unaffected by pausing
+                # Clamp the last tick to what is actually left. A fixed 0.2 s
+                # tick overshot the step by up to a full tick every time it ran
+                # (0.1 s on average), which across 150 cycles is minutes.
+                await asyncio.sleep(min(BEAM_TICK_S, remaining))
+                dt = time.time() - t0            # unaffected by pausing
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
                 cur_val = float(cur) if isinstance(cur, (int, float)) else None
@@ -755,6 +874,12 @@ class RecipeRunner:
                         f"beam on: |I|={abs(cur)*1e3:.2f} mA, "
                         f"{remaining:.1f}s exposure left"
                     )
+                elif t0 - strike_at < step.reignite_settle_s:
+                    # Still inside the strike's settle window: a plasma that is
+                    # simply taking its time to come up is not out yet, so do
+                    # not pulse the switch at it.
+                    self.progress.message = "beam on - waiting for current"
+                    continue
                 else:
                     self.progress.message = "plasma out - reigniting"
                     sup._event("flag", "plasma extinguished during beam - reigniting")
@@ -763,22 +888,22 @@ class RecipeRunner:
 
                 consumed = min(total, max(0.0, total - remaining))
                 if second is not None and not second_on and consumed >= second_on_s:
-                    await gas_set(second, second.flow_sccm)
+                    await self._gas_set(second, second.flow_sccm)
                     second_on = True
                 if first_on and consumed >= handoff_s:
-                    await gas_set(first, 0.0)
+                    await self._gas_set(first, 0.0)
                     first_on = False
                 if second_on and consumed >= second_off_s:
-                    await gas_set(second, 0.0)
+                    await self._gas_set(second, 0.0)
                     second_on = False
         finally:
             self.progress.beam = None
             self._cycle_pause("reignite", False)   # exposure clock resumes/ends
             # However this step exits, no scheduled gas is left flowing.
             if first_on and first is not None:
-                await gas_set(first, 0.0)
+                await self._gas_set(first, 0.0)
             if second_on and second is not None:
-                await gas_set(second, 0.0)
+                await self._gas_set(second, 0.0)
             # Beam OFF between phases = plasma ground ON.
             await sup.set_valve(step.switch, True, reason="beam off")
 
@@ -839,6 +964,9 @@ class RecipeRunner:
             self.progress.step_remaining_hint = None
 
     async def _gas_set(self, schedule: GasSchedule, sccm: float) -> None:
+        """Drive one scheduled gas, used by both modes' schedulers. A refused or
+        failed setpoint is logged and swallowed: a gas that cannot be set must
+        not take down the beam step or the watchdog around it."""
         try:
             await self.sup.set_mfc_setpoint(schedule.mfc, sccm)
         except Exception as exc:
@@ -879,6 +1007,10 @@ class RecipeRunner:
         self._gas_on = {"first": None, "second": None}
         self._beam_switch = step.switch
         await self.sup.set_valve(step.switch, False, reason="beam on (EE-CVD)")
+        # Same as _electron_beam: this flip is the strike, so let the current
+        # settle before the watchdog starts judging - otherwise the watchdog's
+        # first tick reignites a plasma that was still coming up.
+        await asyncio.sleep(step.reignite_settle_s)
         self._beam_task = asyncio.create_task(
             self._beam_watch(step), name="beam-watch")
 
@@ -922,7 +1054,7 @@ class RecipeRunner:
             while True:
                 await self._pause.wait()
                 t0 = time.time()
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(BEAM_TICK_S)
                 dt = time.time() - t0
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
@@ -991,17 +1123,14 @@ class RecipeRunner:
         )
 
     async def _sleep(self, seconds: float) -> None:
-        """Absolute-deadline sleep, interruptible by abort.
+        """Sleep `seconds`, returning early if the run is aborted.
 
-        The deadline is computed once so the scheduler's lateness does not
-        accumulate into a drifting cycle time.
+        One timed wait, not a poll loop: the scheduler's lateness is never
+        re-added per iteration, so a busy UI cannot stretch a dose.
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + seconds
-        remaining = deadline - loop.time()
-        if remaining <= 0:
+        if seconds <= 0:
             return
         try:
-            await asyncio.wait_for(self._abort.wait(), timeout=remaining)
+            await asyncio.wait_for(self._abort.wait(), timeout=seconds)
         except asyncio.TimeoutError:
             return       # slept the full duration

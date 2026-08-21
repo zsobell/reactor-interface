@@ -27,8 +27,9 @@ site:
 # ---------------------------------------------------------------------------
 #  NI CompactDAQ  --  VERIFIED against the real hardware on this PC
 # ---------------------------------------------------------------------------
-#  Enumerated by tools/discover_hardware.py. Module types are facts; which
-#  CHANNEL carries which signal is not yet confirmed.
+#  Enumerated by tools/discover_hardware.py. Module types are facts, and every
+#  channel below has since been identified by observation too - see the
+#  CONFIRMED notes on each entry and docs/HARDWARE.md for how each was settled.
 #
 #    cDAQ1  (cDAQ-9174)
 #      Mod1  NI 9265   4x analog OUT, 0-20 mA current      <- purpose unknown
@@ -59,20 +60,9 @@ daq:
 # ---------------------------------------------------------------------------
 #  Chamber pressure
 # ---------------------------------------------------------------------------
-#  Currently reads ~5.9e-8 Torr, so this is a UHV gauge with a LOGARITHMIC
-#  output. A linear 0-10 V scale cannot resolve 1e-8 at all.
+#  A UHV cold-cathode gauge with a LOGARITHMIC output (it reads ~3e-8 Torr at
+#  base; a linear 0-10 V scale cannot resolve 1e-8 at all).
 #
-#  ---- THE CURVE BELOW IS A GUESS. CONFIRM IT. ----
-#  On a log gauge a 0.1 V error is a ~30% pressure error, and the wrong curve
-#  can be off by decades. Identify it from a known reading:
-#      python -m tools.discover_hardware --read-pressure --expect 5.9e-8
-#  That prints the measured voltage and what each candidate curve implies.
-#  If none match, take a second reading at a very different pressure and the
-#  curve can be solved exactly from two points.
-#
-#  Candidates: pkr251, inficon_bpg402, pfeiffer_pkr361, ion_gauge_1v_decade,
-#              baratron_1torr / _10torr / _100torr
-#  Or drop `preset` and give type/gain/offset directly.
 #  CHANNEL CONFIRMED by survey: of the eight NI 9201 inputs, ai3 is the only one
 #  carrying a real signal - 2.4719 V, stable to 15 mV. Every other channel sits
 #  at the noise floor (see docs/HARDWARE.md).
@@ -81,11 +71,20 @@ daq:
 #  1 decade per volt. 2.4718 V -> 2.96e-8 Torr, which matched the controller's
 #  display. The offset landing on a round -10 is what identifies the family.
 #
-#  Caveat worth knowing: this was matched at ONE pressure, which fixes the
-#  OFFSET but not the GAIN - a different gain with a compensating offset would
-#  also fit that single point. Next time the chamber is at a very different
-#  pressure, check the number here still agrees with the controller. If it
-#  drifts apart at the far end, the gain needs adjusting.
+#  ONE CAVEAT, still open: that was matched at a SINGLE pressure, which fixes
+#  the OFFSET but not the GAIN - a different gain with a compensating offset
+#  would fit that one point equally well. Next time the chamber is at a very
+#  different pressure, check this still agrees with the controller; if the two
+#  drift apart at the far end, the gain needs adjusting. To re-derive it:
+#      python -m tools.discover_hardware --read-pressure --expect <controller reading>
+#  That prints the measured voltage, what each preset implies, and - if none
+#  match - solves the curve from your reading.
+#
+#  Other presets, if the gauge is ever swapped: pkr251, inficon_bpg402,
+#  pfeiffer_pkr361, ion_gauge_e10, ion_gauge_e11, baratron_0p1torr / _1torr /
+#  _2torr / _10torr / _100torr / _1000torr. Or drop `preset` and give
+#  type/gain/offset directly. The full list lives in GAUGE_PRESETS
+#  (reactor/config.py) and an unknown name is rejected by name on load.
 pressure:
   label: "Cold Cathode chamber pressure"
   channel: "cDAQ2Mod1/ai3"                   # CONFIRMED by input survey
@@ -111,28 +110,20 @@ stage_temp:
   unit: "C"
 
 # ---------------------------------------------------------------------------
-#  Unidentified analog inputs
+#  Other analog inputs
 # ---------------------------------------------------------------------------
-#  The old log had columns A/B/C/D. The hardware makes the likely explanation
-#  clear: there are two NI 9211 four-channel thermocouple modules, so A/B/C/D
-#  was very probably the four TC inputs of one of them - four thermocouples, not
-#  four heater zones.
+#  Three of the eight thermocouple inputs are physically connected: the stage TC
+#  (cDAQ1Mod4/ai1, configured above) and the two below, which were already wired
+#  and read steady room temperature. The other five read 2385 C, the NI 9211
+#  open-circuit full-scale. That also settles the old log's A/B/C/D columns:
+#  four channels of a four-channel TC module, not four heater zones.
 #
-#  Still unverified, because LabVIEW was holding every AI module when this was
-#  checked. To settle it: close the LabVIEW VI, then run
+#  Nobody has said what tc_a / tc_b measure, so they are logged under neutral
+#  names - rename them here once identified. Anything listed here flows into
+#  the UI, the trend and the extended log automatically, no code change.
+#
+#  To re-check what is connected (needs the LabVIEW VI closed):
 #      python -m tools.discover_hardware --survey-inputs
-#  It reads each channel and reports open-circuit vs. connected. Any TC that
-#  reads near ambient has something attached; add those here.
-#
-#  Anything listed here flows into the UI, the trend and the extended log
-#  automatically - no code change.
-#  ANSWERED: three thermocouples are now physically connected out of eight TC
-#  inputs - the stage TC (cDAQ1Mod4/ai1, configured above) plus these two, which
-#  were already wired and read steady room temperature. Nobody has said what they
-#  measure yet, so they are logged under neutral names. Rename them here once
-#  identified; the label flows straight through to the UI and the extended log.
-#
-#  The other five TC inputs read 2385 C, the NI 9211 open-circuit full-scale.
 aux_inputs:
   # Precursor bubbler thermocouple, added on the port next to the stage TC
   # (stage is cDAQ1Mod4/ai1). Expected ~30-60 C. If this reads the NI 9211
@@ -374,6 +365,52 @@ instruments:
     overload_above: 1.0e30
 
 # ---------------------------------------------------------------------------
+#  Power supplies (XP Glassman FL high-voltage plasma supply)
+# ---------------------------------------------------------------------------
+#  MONITOR + ONE COMMAND. The reactor polls the supply's voltage and current
+#  monitors and logs them, and commands HV OFF when a run ends or is aborted
+#  (operator request, 2026-08-21). Zach sets voltage and current by hand on the
+#  front panel: there is no way to set a level or turn HV on from this program,
+#  no UI setpoint, and no software limit - see docs/CONTROL_MODEL.md before
+#  changing that. Note that any Set command (including the HV-off one) leaves
+#  the supply in REMOTE until its front-panel LOC/REM button is pressed.
+#
+#  CONFIRMED on the wire 2026-08-21 (see docs/GLASSMAN_FL.md):
+#    firmware revision 02, replies to Q with a valid 16-byte 'R' packet.
+#
+#  *** baud and address are MEASURED, not defaults, and NOT what the DIP
+#  switches suggest. *** The FL manual documents 9600/address 0 as the default
+#  and every DIP switch on this unit reads "down", yet it answers only at
+#  19200/address 1. Bringing it up cost a day because those were assumed.
+#  If it ever goes silent, sweep all four supported baud rates (2400/4800/
+#  9600/19200) against addresses 0-7 before suspecting hardware:
+#      .venv\Scripts\python.exe -m tools.probe_glassman
+#
+#  `port` is the Windows COM port the USB cable presents. It is NOT stable:
+#  the TI TUSB3410 bridge has already moved COM7 -> COM8 across a driver
+#  reinstall. If the supply stops answering after any driver or USB change,
+#  check the port number first - probe_glassman finds it automatically.
+#
+#  full_scale_v / full_scale_i come off the nameplate and scale the supply's
+#  12-bit monitor counts (0x000-0xFFF) into real units. This is an FL1.5F1.0:
+#  1500 V, 1.0 A. Getting them wrong silently mis-scales every logged value,
+#  so config.py refuses to load an enabled supply with either set to zero.
+power_supplies:
+  - id: "hv"
+    label: "Glassman HV (plasma)"
+    enabled: true
+    driver: "glassman_fl"
+    model: "FL1.5F1.0"
+    port: "COM8"
+    baud: 19200
+    address: 1
+    full_scale_v: 1500.0
+    full_scale_i: 1000.0
+    unit_v: "V"
+    unit_i: "mA"
+    timeout_s: 1.0
+
+# ---------------------------------------------------------------------------
 #  In-situ ellipsometer (Film Sense FS-1)
 # ---------------------------------------------------------------------------
 #  READ-ONLY. The FS-1 broadcasts every dynamic-mode measurement, unsolicited,
@@ -410,5 +447,8 @@ logging:
     "Ar sccm": "mfc.ar.flow"
     "H2 sccm": "mfc.h2.flow"
     "N2 sccm": "mfc.n2.flow"
+    "HV V": "hv.hv.voltage"
+    "HV mA": "hv.hv.current"
+    "HV arcs": "hv.hv.arc_count"
   # Richer parallel CSV: every channel plus recipe position.
   extended_log: true

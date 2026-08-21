@@ -218,6 +218,10 @@ class EllipsometerClient:
             "last_time_s": p.time_s if p else None,
             "last_thickness": p.thickness if p else None,
             "last_thickness_unit": p.thickness_unit if p else "",
+            # Fit residual alongside the thickness: the Hardware card shows the
+            # live fit, and a thickness is only worth reading next to how well
+            # the model actually fitted.
+            "last_fit_diff": p.fit_diff if p else None,
             "last_recv": p.t_recv if p else None,
         }
 

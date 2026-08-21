@@ -2,7 +2,9 @@
 
 Intentionally thin. Every route is a direct call to a Supervisor method - there
 is no control logic here, so the UI cannot invent a new way to touch hardware.
-Refusals from the safety layer come back as 409 with the reason text, which is
+There is no safety layer to speak for (see docs/CONTROL_MODEL.md); a command the
+Supervisor cannot carry out right now - an unknown id, a sweep already running,
+the Ar isolation-valve check - comes back as 409 with its reason text, which is
 what the UI shows the operator.
 """
 
@@ -82,6 +84,32 @@ class BasicAuthMiddleware:
 REFUSALS = (RuntimeError, KeyError, ValueError)
 
 
+def merged_name(reactor_run: str, sidecar: str, filename: str) -> str:
+    """Name the merged file after the RUN, not after the dropped refit file.
+
+    The refit comes out of the FS-1 software as "DynData - <timestamp>.txt",
+    so naming the output off it produced
+    `DynData - 2026-08-21T140934.713_reactor_synced.csv` for a run the
+    operator had named Mo-015 - the one file in the set that did not say
+    which experiment it belonged to. The reactor run export is the best
+    source: it already carries the run name and the run's own timestamp
+    (`Mo-015_260821_131320_run.csv`), so the merged file becomes
+    `Mo-015_260821_131320_reactor_synced.csv` and sorts next to it.
+
+    Falls back to the sidecar (also run-name prefixed) and finally to the
+    refit filename, for an ellipsometry-only merge with neither selected.
+    """
+    for src, suffix in ((reactor_run, "_run.csv"),
+                        (sidecar, "_ellipsometer.csv")):
+        if not src:
+            continue
+        base = Path(src).name
+        stem = base[:-len(suffix)] if base.endswith(suffix) else Path(base).stem
+        if stem:
+            return f"{stem}_reactor_synced.csv"
+    return f"{Path(filename).stem or 'refit'}_reactor_synced.csv"
+
+
 def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
     cfg = cfg or load_config()
     sup = Supervisor(cfg)
@@ -131,8 +159,73 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
         return FileResponse(STATIC / "index.html",
                             headers={"Cache-Control": "no-cache"})
 
+    @app.get("/analysis")
+    async def analysis_page():
+        """Post-run plotting. A separate page, not a tab, on purpose: it reads
+        finished CSVs and can touch no hardware, so it stays out of the control
+        UI entirely and can be opened alongside a running experiment."""
+        return FileResponse(STATIC / "analysis.html",
+                            headers={"Cache-Control": "no-cache"})
+
     if STATIC.exists():
         app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    # -- data files (read-only; feeds the analysis page) ------------------- #
+
+    def _in_data_dir(name: str) -> Path:
+        """Resolve `name` inside the data dir, refusing anything that escapes
+        it. Used by every route below that reads a file by name."""
+        d = sup.logger.dir
+        p = (d / name).resolve()
+        if d.resolve() not in p.parents or not p.exists():
+            raise HTTPException(404, f"no such file in data dir: {name}")
+        return p
+
+    def _data_entries(pattern: str) -> list[dict[str, Any]]:
+        """Matching files in the data dir AND its per-run subfolders, newest
+        first.
+
+        `name` is the path RELATIVE to the data dir ("Mo-015/Mo-015_..._run.csv"
+        for a file in a run folder, a bare filename for one still loose in
+        data/), which is what `_in_data_dir` resolves and what the picker shows
+        - so the folder is visible in the dropdown rather than hidden.
+
+        Sorted by mtime rather than by name: with run folders in play, sorting
+        by path orders by folder name, which is not chronological, and the
+        analysis page relies on "newest first" to pick up a fresh merge.
+        """
+        d = sup.logger.dir
+        out: list[dict[str, Any]] = []
+        if d.exists():
+            for p in d.rglob(pattern):
+                with contextlib.suppress(OSError):
+                    st = p.stat()
+                    out.append({"name": p.relative_to(d).as_posix(),
+                                "size": st.st_size, "mtime": st.st_mtime})
+        out.sort(key=lambda f: f["mtime"], reverse=True)
+        return out
+
+    #: filename suffix -> what that file is, for the analysis page's picker
+    DATA_KINDS = {
+        "_bycycle.csv": "by cycle",
+        "_run.csv": "run (by time)",
+        "_reactor_synced.csv": "merged + ellipsometry",
+        "_ellipsometer.csv": "ellipsometer sidecar",
+    }
+
+    @app.get("/api/data/files")
+    async def list_data_files() -> dict[str, Any]:
+        """Every CSV in the data dir, newest first, tagged with what it is."""
+        files = _data_entries("*.csv")
+        for f in files:
+            f["kind"] = next(
+                (label for suffix, label in DATA_KINDS.items()
+                 if f["name"].endswith(suffix)), "csv")
+        return {"dir": str(sup.logger.dir), "files": files}
+
+    @app.get("/api/data/file")
+    async def get_data_file(name: str):
+        return FileResponse(_in_data_dir(name), media_type="text/csv")
 
     # -- state ----------------------------------------------------------- #
 
@@ -273,6 +366,12 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
                 out.append({"file": p.name, "name": p.stem, "error": str(exc)})
         return {"recipes": out}
 
+    @app.get("/api/run/next-name")
+    async def next_run_name() -> dict[str, Any]:
+        """Name to pre-fill for the next run: the last STARTED run's name with
+        its trailing number incremented (Mo-014 -> Mo-015)."""
+        return {"suggested": sup.suggest_run_name(), "last": sup.last_run_name}
+
     @app.post("/api/run/ald")
     async def start_ald(params: dict = Body(...)) -> dict[str, Any]:
         recipe = await sup.start_ald_run(params)
@@ -291,6 +390,15 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
     @app.post("/api/prestart/stop")
     async def prestart_stop() -> dict[str, Any]:
         await sup.stop_prestart()
+        return sup.prestart
+
+    @app.post("/api/prestart/abort")
+    async def prestart_abort() -> dict[str, Any]:
+        """Undo the pre-start in one call: Ar off, fill off, beam relay at rest,
+        HV off. Unlike /stop this stays available after the sequence has
+        finished - a struck, primed tool is the state the operator most often
+        needs to back out of, and until now nothing in the UI did it."""
+        await sup.abort_prestart()
         return sup.prestart
 
     @app.post("/api/recipe/start")
@@ -336,31 +444,12 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
     #  using the (fs_time -> reactor_clock) sidecar captured live during the
     #  run. Read-only file handling; no hardware.
 
-    def _in_data_dir(name: str) -> Path:
-        d = sup.logger.dir
-        p = (d / name).resolve()
-        if d.resolve() not in p.parents or not p.exists():
-            raise HTTPException(404, f"no such file in data dir: {name}")
-        return p
-
     @app.get("/api/ellipsometer/sidecars")
     async def list_sidecars() -> dict[str, Any]:
-        d = sup.logger.dir
-
-        def entries(pattern: str) -> list[dict[str, Any]]:
-            out: list[dict[str, Any]] = []
-            if d.exists():
-                for p in sorted(d.glob(pattern), reverse=True):
-                    with contextlib.suppress(OSError):
-                        st = p.stat()
-                        out.append({"name": p.name, "size": st.st_size,
-                                    "mtime": st.st_mtime})
-            return out
-
         return {
-            "dir": str(d),
-            "sidecars": entries("*_ellipsometer.csv"),
-            "reactor_runs": entries("*_run.csv"),
+            "dir": str(sup.logger.dir),
+            "sidecars": _data_entries("*_ellipsometer.csv"),
+            "reactor_runs": _data_entries("*_run.csv"),
         }
 
     @app.post("/api/ellipsometer/merge")
@@ -392,10 +481,45 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         tm = result.time_map
-        stem = Path(filename).stem or "refit"
+        out_name = merged_name(reactor_run, sidecar, filename)
+        csv_text = result.to_csv()
+
+        # Also drop a copy in the data dir. The browser download stays exactly
+        # as it was - this is a redundant copy, same reasoning as the run
+        # export - so the analysis page can open the merged file straight from
+        # the data folder instead of hunting through Downloads. A failure here
+        # must not cost the operator the download, so it is only reported.
+        saved, save_error = None, None
+        if result.n_points:
+            try:
+                # Into the run's own folder, alongside the files it was built
+                # from - not loose in data/. Falls back to the data dir for an
+                # ellipsometry-only merge with no run selected.
+                out_dir = sup.logger.dir
+                for src in (reactor_run, sidecar):
+                    if src:
+                        out_dir = _in_data_dir(src).parent
+                        break
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = (out_dir / Path(out_name).name)
+                # newline="" matters: the csv module already terminates
+                # its rows with CR LF, and writing that back in text mode
+                # translates the LF again, giving CR CR LF - which Excel
+                # reads as a blank row between every row of data. That is
+                # the "every other row empty" the operator hit on Mo-015.
+                with out_path.open("w", encoding="utf-8", newline="") as fh:
+                    fh.write(csv_text)
+                # Relative to the data dir, so it matches the names in
+                # /api/data/files and the page can load it straight back.
+                saved = out_path.relative_to(sup.logger.dir).as_posix()
+            except OSError as exc:
+                save_error = f"{type(exc).__name__}: {exc}"
+
         return {
-            "csv": result.to_csv(),
-            "filename": f"{stem}_reactor_synced.csv",
+            "csv": csv_text,
+            "filename": out_name,
+            "saved_as": saved,
+            "save_error": save_error,
             "mode": result.mode,
             "n_points": result.n_points,
             "time_map": {"a": tm.a, "b": tm.b, "n": tm.n,

@@ -1,13 +1,17 @@
 """A "no physics" virtual reactor: fake devices, real everything else.
 
-The fakes replace exactly the three classes Supervisor.start() constructs -
-NiDaqBackend, MksMfc, ScpiInstrument - and nothing else. Supervisor itself,
-RecipeRunner, and every control-logic method (set_valve, set_mfc_setpoint,
-start_fill_regulation, start_prestart, the recipe engine's whole state
-machine) run completely unmodified, exactly as they would against the real
-reactor. Only the boundary where bytes would otherwise cross onto a wire -
-DAQmx, Modbus, VISA - is replaced with an in-memory stand-in a test can pose
-and inspect.
+The fakes replace exactly the four classes Supervisor.start() constructs -
+NiDaqBackend, MksMfc, ScpiInstrument, GlassmanFL - and nothing else.
+Supervisor itself, RecipeRunner, and every control-logic method (set_valve,
+set_mfc_setpoint, start_fill_regulation, start_prestart, the recipe engine's
+whole state machine) run completely unmodified, exactly as they would against
+the real reactor. Only the boundary where bytes would otherwise cross onto a
+wire - DAQmx, Modbus, VISA, the HV supply's serial port - is replaced with an
+in-memory stand-in a test can pose and inspect.
+
+Keeping FakeSupply in step matters for a second reason: the real GlassmanFL
+opens a COM port at construction time, so a harness that let Supervisor build
+the real one would have tests talking to the actual 1.5 kV supply.
 
 "No physics" is deliberate: the fakes do not model solenoid response time,
 MFC settling curves, or plasma strike probability. A written value is
@@ -198,6 +202,95 @@ class FakeInstrument(Device):
         return [Reading(key=key, value=self.value, unit=self.cfg.unit)]
 
 
+class FakeSupply(Device):
+    """Stands in for GlassmanFL (the HV plasma supply).
+
+    Set `.voltage` / `.current` / `.arc_count` directly to control what the
+    next read() reports, `.ok = False` to simulate the supply powered off or
+    its USB unplugged, and the status flags to exercise fault handling::
+
+        vr.supplies["hv"].voltage = 850.0      # volts
+        vr.supplies["hv"].hv_on = True
+        vr.supplies["hv"].faults = ["interlock"]
+
+    The program sends this supply exactly ONE command - `hv_off()`, at the end
+    of a run or on abort - so that is the only write modelled here. Calls land
+    in `.hv_off_calls` and clear `.hv_on`; the voltage and current programs are
+    deliberately left alone, mirroring GlassmanFL.hv_off, so a test can catch a
+    regression that zeroes the operator's front-panel levels. There is still no
+    way to set a level or turn HV *on*, because there is none in the program.
+    """
+
+    def __init__(self, cfg) -> None:
+        super().__init__(cfg.id, cfg.label or cfg.id)
+        self.cfg = cfg
+        self.firmware = "02"
+        self.ok = True
+        self.voltage: float | None = 0.0
+        self.current: float | None = 0.0
+        self.arc_count: int = 0
+        self.hv_on = False
+        self.remote = False
+        self.voltage_mode = True
+        self.current_trip_enabled = False
+        self.faults: list[str] = []
+        self.hv_off_calls = 0
+
+    async def hv_off(self) -> None:
+        """Mirror of GlassmanFL.hv_off: no-op while disconnected, and it clears
+        HV without touching the voltage/current programs."""
+        if not self.connected:
+            return
+        self.hv_off_calls += 1
+        self.hv_on = False
+        self.remote = True          # any Set command moves the supply to remote
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    async def disconnect(self) -> None:
+        self.connected = False
+
+    async def read(self) -> list[Reading]:
+        vkey = f"hv.{self.id}.voltage"
+        ikey = f"hv.{self.id}.current"
+        akey = f"hv.{self.id}.arc_count"
+        if not self.ok or self.voltage is None or self.current is None:
+            return [self._bad(vkey, self.cfg.unit_v, "virtual: not ok"),
+                    self._bad(ikey, self.cfg.unit_i, "virtual: not ok"),
+                    self._bad(akey, "", "virtual: not ok")]
+        return [
+            Reading(key=vkey, value=self.voltage, unit=self.cfg.unit_v),
+            Reading(key=ikey, value=self.current, unit=self.cfg.unit_i),
+            Reading(key=akey, value=float(self.arc_count), unit=""),
+        ]
+
+    def status(self) -> dict:
+        return {
+            **super().status(),
+            "driver": self.cfg.driver,
+            "model": self.cfg.model or "VIRTUAL",
+            "port": f"virtual:{self.cfg.id}",
+            "baud": self.cfg.baud,
+            "address": self.cfg.address,
+            "firmware": self.firmware,
+            "full_scale_v": self.cfg.full_scale_v,
+            "full_scale_i": self.cfg.full_scale_i,
+            "unit_v": self.cfg.unit_v,
+            "unit_i": self.cfg.unit_i,
+            "read_only": True,
+            "voltage": self.voltage,
+            "current": self.current,
+            "arc_count": self.arc_count,
+            "hv_on": self.hv_on,
+            "remote": self.remote,
+            "voltage_mode": self.voltage_mode,
+            "current_trip_enabled": self.current_trip_enabled,
+            "faulted": bool(self.faults),
+            "faults": list(self.faults),
+        }
+
+
 class VirtualReactor:
     """A real Supervisor wired to fake devices instead of real hardware.
 
@@ -234,6 +327,7 @@ class VirtualReactor:
         self.daq: FakeDaq | None = None
         self.mfcs: dict[str, FakeMfc] = {}
         self.instruments: dict[str, FakeInstrument] = {}
+        self.supplies: dict[str, FakeSupply] = {}
 
     async def __aenter__(self) -> "VirtualReactor":
         self._tmpdir = tempfile.TemporaryDirectory(prefix="virtual_reactor_")
@@ -269,6 +363,14 @@ class VirtualReactor:
             sup.instruments[i.id] = dev
             self.instruments[i.id] = dev
 
+        for ps in cfg.power_supplies:
+            if not ps.enabled:
+                continue
+            dev = FakeSupply(ps)
+            await dev.connect()
+            sup.supplies[ps.id] = dev
+            self.supplies[ps.id] = dev
+
         sup._running = True     # so abort()/etc behave; background loops NOT started
         self.sup = sup
         return self
@@ -290,12 +392,21 @@ class VirtualReactor:
 
     async def tick(self) -> None:
         """Advance telemetry by exactly one sample: one slow-loop DAQ read
-        (`_cycle`) and one fast-loop current/MFC read + publish
-        (`_current_cycle`) - the same two methods the real background loops
-        call every period, just invoked on your schedule instead of a timer's.
-        This is what drives self.sup.history, the run-export CSV, and the
-        manual data logger, so call it in a loop alongside whatever you're
-        actually testing (a recipe run, pre-start, ...) rather than only at
-        the end - a test that never ticks never produces a sample."""
+        (`_cycle`), one MFC poll (`_mfc_cycle`) and one fast-loop current read
+        + publish (`_current_cycle`) - the same three methods the real
+        background loops call every period, just invoked on your schedule
+        instead of a timer's. This is what drives self.sup.history, the
+        run-export CSV, and the manual data logger, so call it in a loop
+        alongside whatever you're actually testing (a recipe run, pre-start,
+        ...) rather than only at the end - a test that never ticks never
+        produces a sample.
+
+        On real hardware these three run at different rates (site.loop_hz,
+        site.mfc_hz, site.current_hz) precisely because an MFC read is slow;
+        here they advance together, so every channel is fresh on every tick.
+        A test that needs the real staggering - e.g. checking that a channel
+        which wasn't resampled is logged blank - must call the individual
+        methods itself rather than tick()."""
         await self.sup._cycle()
+        await self.sup._mfc_cycle()
         await self.sup._current_cycle()

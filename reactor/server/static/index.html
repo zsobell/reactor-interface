@@ -125,10 +125,17 @@
   .diagcol{display:grid;gap:14px;align-content:start;min-width:0}
   @media(max-width:1000px){ .diagtop{grid-template-columns:1fr} }
 
-  /* ---- tiles (instruments / gauges / aux / MFCs) ------------------------ */
+  /* ---- tiles (instruments / gauges / aux / MFCs / power supplies) ------- */
   .tilegrid{display:grid;gap:10px}
   #mfcs{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
   #instruments,#gauges,#aux{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+  #supplies{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+  /* Status chips on a supply tile: neutral by default, coloured when asserted. */
+  .chips{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0 2px}
+  .chip{font-size:11px;padding:1px 7px;border-radius:10px;
+        border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+  .chip.on{border-color:var(--ok);color:var(--ok)}
+  .chip.hot{border-color:var(--bad);color:var(--bad);font-weight:600}
   .tile{border:1px solid var(--line);border-radius:8px;padding:10px 11px;
         background:#0d1117;min-width:0}
   .tile.trip{border-color:var(--bad);background:#2a0f10}
@@ -175,9 +182,10 @@
   #events{max-height:min(46vh,440px);overflow-y:auto;font-family:var(--mono);font-size:12px}
   #events div{padding:2px 0;border-bottom:1px solid #1b2027}
   #events .t{color:var(--dim);margin-right:7px}
-  .k-error,.k-trip{color:var(--bad)} .k-safety,.k-flag{color:var(--warn)}
-  .k-valve{color:var(--hot)} .k-recipe,.k-fill,.k-mfc{color:var(--accent)}
-  .k-flag{font-weight:600}
+  /* one class per event kind the supervisor emits (see Supervisor._event) */
+  .k-error{color:var(--bad)} .k-flag{color:var(--warn);font-weight:600}
+  .k-valve,.k-valve-id{color:var(--hot)}
+  .k-recipe,.k-fill,.k-mfc,.k-ellipsometer{color:var(--accent)}
 
   /* ---- ALD run panel --------------------------------------------------- */
   button.primary{background:#193a2a;border-color:#2ea043;color:#7ee787;font-weight:600}
@@ -233,6 +241,9 @@
   .legend i{display:inline-block;width:11px;height:3px;vertical-align:middle;margin-right:5px}
   .prog{height:6px;background:#21262d;border-radius:4px;overflow:hidden;margin:8px 0}
   .prog>i{display:block;height:100%;background:var(--accent);transition:width .25s}
+  .progmeta{display:flex;justify-content:space-between;gap:12px;font-size:11.5px;
+            color:var(--dim);margin:-3px 0 8px}
+  .progmeta b{font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums}
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:50;
          padding:11px 16px;border-radius:8px;max-width:min(680px,90vw);
          box-shadow:0 8px 28px #0009;
@@ -276,6 +287,10 @@
     <button data-tab="hardware">Hardware</button>
     <button data-tab="diag">Diagnostics<span class="tabdot" id="diagDot"></span></button>
   </nav>
+  <!-- Post-run plotting. A separate page, not a tab: it reads finished CSVs
+       and touches no hardware, so it stays out of the control UI. -->
+  <a class="badge" href="/analysis" target="_blank" rel="noopener"
+     style="text-decoration:none" title="Post-run plotting (opens in a new tab)">Analysis ↗</a>
   <div class="spacer"></div>
   <div class="alertchip hidden" id="alertChip" title="latest warning — click for the event log"></div>
 </header>
@@ -409,9 +424,17 @@
               <label class="adv">Flag tolerance (%)<input type="number" id="p_tolerance_pct" step="1" value="20"></label>
               <label class="adv">Reignite pulse (s)<input type="number" id="p_reignite_pulse_s" step="0.01" min="0" value="0.10"></label>
               <label class="adv">Reignite settle (s)<input type="number" id="p_reignite_settle_s" step="0.01" min="0" value="0.15"></label>
+              <label class="adv">Ar close delay (s)<input type="number" id="p_ar_close_delay_s" step="1" min="0" value="10"></label>
             </div>
             <div class="hint">Flag tolerance only warns — fill pressure drifting
-              past it raises an event, it never stops or changes the run.</div>
+              past it raises an event, it never stops or changes the run.<br>
+              <strong>Reignite settle</strong> is also how long the initial strike
+              is given to draw current before it counts as a failure — the first
+              flip of the plasma ground is always required to start the beam, so
+              it is never reported as a reignite.<br>
+              <strong>Ar close delay</strong>: at the end of a run the Ar setpoint
+              is zeroed, this delay runs, then the Ar pneumatic closes. The run
+              then parks with the plasma ground OFF (beam-on mode).</div>
           </div>
         </details>
 
@@ -419,16 +442,28 @@
           <summary><span class="stitle">Pre-start</span><span class="sum" id="preStatus">idle</span></summary>
           <div class="dbody">
             <div class="params">
+              <label class="adv">Run name<input type="text" id="p_run_name" placeholder="Mo-001" autocomplete="off"></label>
               <label class="adv">Ar flow (sccm)<input type="number" id="p_pre_ar_sccm" step="0.1" min="0" value="4"></label>
               <label class="adv">Valve settle (s)<input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1"></label>
               <label class="adv">Hold current (s)<input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5"></label>
             </div>
-            <div class="hint">Opens the Ar pneumatic, waits, flows Ar, starts the
+            <div class="hint"><strong>Run name</strong> prefixes every file this
+              run writes (trace, by-cycle, parameters, ellipsometer), e.g.
+              <code>Mo-014_260817_142530_run.csv</code>. It pre-fills from the
+              last run you actually started, incremented — start Mo-014 and the
+              next one offers Mo-015. Editing it here is enough; there is nothing
+              to confirm.<br><br>
+              Opens the Ar pneumatic, waits, flows Ar, starts the
               precursor fill pulse, then runs the reignite protocol until sample
               current appears and holds it. <strong>The strike retries
               indefinitely</strong> — it stops only when you press Stop pre-start.
               However it ends, the beam is grounded on the way out; Ar and the
-              fill pulse are left running.</div>
+              fill pulse are left running.<br><br>
+              <strong>Abort pre-start</strong> is the undo, and stays available
+              after the plasma has struck: it stops Ar (flow then isolation
+              valve), stops the fill pulse and closes the fill valve, returns the
+              beam relay to de-energised, and commands the HV supply off — one
+              click.</div>
           </div>
         </details>
 
@@ -442,6 +477,7 @@
         <div class="row">
           <button id="preStartBtn">Pre-start</button>
           <button id="preStopBtn" class="estop">Stop pre-start</button>
+          <button id="preAbortBtn" class="estop">Abort pre-start</button>
           <button id="fillStart">Initiate fill pulse</button>
           <button id="fillStop">Stop fill</button>
         </div>
@@ -457,6 +493,11 @@
 
         <div class="note" id="recipeInfo">No run in progress.</div>
         <div class="prog"><i id="recipeBar" style="width:0"></i></div>
+        <div class="progmeta">
+          <span>elapsed <b id="rElapsed">—</b></span>
+          <span id="rEtaWrap">est. remaining <b id="rEta">—</b></span>
+          <span>finish <b id="rFinish">—</b></span>
+        </div>
         <div class="runstats">
           <div class="kv"><span>Cycle</span><span id="rCycle">—</span></div>
           <div class="kv"><span>Step</span><span id="rStep">—</span></div>
@@ -571,6 +612,34 @@
       <div class="body"><div id="instruments" class="tilegrid"></div></div>
     </section>
 
+    <!-- No setpoint controls here on purpose: the Glassman is operated by hand
+         from its front panel. The one command this program ever sends it is HV
+         OFF at the end of a run or on abort, and that is not driven from here.
+         See docs/CONTROL_MODEL.md before adding any control. -->
+    <section class="card">
+      <h2>Power supplies</h2>
+      <div class="body"><div id="supplies" class="tilegrid"></div></div>
+    </section>
+
+    <!-- The FS-1 belongs with the other hardware: it is a live instrument the
+         operator watches during a run. Its connection row is in the Diagnostics
+         connection table with every other device, and post-run sync onto the
+         reactor clock is on the Analysis page next to the plots it feeds. -->
+    <section class="card">
+      <h2>Ellipsometer</h2>
+      <div class="body">
+        <div class="kv" style="margin-top:0"><span>FS-1 stream</span><span id="ellStream">—</span></div>
+        <div class="kv"><span>Points this acquisition</span><span id="ellPoints">—</span></div>
+        <div class="kv"><span>Live fit</span><span id="ellLive">—</span></div>
+        <div class="hint" style="margin-top:6px">Read-only — the reactor
+          subscribes to the instrument's broadcast and never writes to it. The
+          live fit is the FS-1's own and is a sanity check, not the answer: the
+          number that counts comes from refitting the acquisition and syncing it
+          on the <a href="/analysis" target="_blank" rel="noopener">Analysis page</a>.
+        </div>
+      </div>
+    </section>
+
     <section class="card">
       <h2>Primary sensor detail</h2>
       <div class="body">
@@ -664,36 +733,6 @@
       </section>
     </div>
   </div>
-
-  <section class="card" data-card="ellipsometer">
-    <h2>Ellipsometer sync</h2>
-    <div class="body">
-      <div class="kv" style="margin-top:0"><span>FS-1 stream</span><span id="ellStream">—</span></div>
-      <div class="kv"><span>Live point</span><span id="ellLive">—</span></div>
-      <div class="hint" style="margin-top:6px">
-        Drop in the refit file you downloaded from the FS-1, pick this run's
-        sidecar and reactor run, and get one plot-ready CSV: every reactor
-        channel plus the interpolated thickness, keyed by cycle number, with
-        reignite-paused samples dropped. (The live fit above is the
-        instrument's, and is not trusted.)
-      </div>
-      <div class="idsetup" style="margin-top:11px">
-        <label>Refit file
-          <input type="file" id="ellFile" accept=".txt,.csv,text/plain">
-        </label>
-        <label>Sidecar (this run's capture)
-          <select id="ellSidecar"></select>
-        </label>
-        <label>Reactor run (for the combined file)
-          <select id="ellReactorLog"></select>
-        </label>
-        <button id="ellMerge">Merge &amp; download</button>
-        <button id="ellRefresh" title="Rescan the data folder">↻</button>
-      </div>
-      <div class="kv" style="margin-top:11px"><span>Result</span><span id="ellResult">—</span></div>
-      <div class="hint" id="ellWarn" style="margin-top:4px"></div>
-    </div>
-  </section>
 
   <section class="card" data-card="events">
     <h2>Event log</h2>
@@ -829,6 +868,7 @@ let MARKS = [];
 function render(s){
   $("siteName").textContent = s.site;
   banners(s); pressure(s); stage(s); hero(s); gauges(s); instruments(s); aux(s);
+  supplies(s);
   mfcs(s); valves(s); valveId(s); recipe(s); logging(s); conns(s);
   ellipsometer(s); events(s);
 
@@ -967,6 +1007,75 @@ function instruments(s){
     put(el, "setup", (i.setup_sent && i.setup_sent.length)
       ? "setup sent: " + i.setup_sent.join(" · ") : "");
     put(el, "err", bad ? rd.detail : (i.error || ""));
+  }
+}
+
+/* Power supplies (the Glassman HV plasma supply).
+   MONITOR ONLY — no setpoint inputs, no HV button, nothing that writes. Zach
+   drives this supply from its front panel; the program reads and logs it.
+   Adding controls here is a change to reactor behaviour (docs/CONTROL_MODEL.md)
+   and needs his explicit go-ahead, not just a code change. */
+function supplies(s){
+  const box = $("supplies");
+  const list = s.power_supplies || [];
+  reconcile(box, list, p => p.id, p => `
+    <div class="tile" data-id="${esc(p.id)}">
+      <div class="top">
+        <span class="name">${esc(p.label || p.id)}</span>
+        <div style="flex:1"></div>
+        <span class="read"><span data-f="v">—</span
+          ><span class="unit">${esc(p.unit_v || "V")}</span></span>
+      </div>
+      <div class="kv"><span>Current</span>
+        <span><span data-f="i">—</span> ${esc(p.unit_i || "mA")}</span></div>
+      <div class="kv"><span>Arc count</span><span data-f="arcs">—</span></div>
+      <div class="chips">
+        <span class="chip" data-f="chipHv">HV</span>
+        <span class="chip" data-f="chipMode">mode</span>
+        <span class="chip" data-f="chipRem">local</span>
+        <span class="chip" data-f="chipTrip">I-trip</span>
+      </div>
+      <div class="kv"><span>Model</span><span data-f="model">—</span></div>
+      <div class="kv"><span>Link</span><span data-f="link">—</span></div>
+      <div class="note" data-f="faults"></div>
+      <div class="note" data-f="err"></div>
+      <div class="hint">Monitor only — set voltage and current on the supply's
+        front panel.</div>
+    </div>`);
+
+  for(const p of list){
+    const el = box.querySelector(`[data-id="${CSS.escape(p.id)}"]`);
+    if(!el) continue;
+    const rd = s.readings["hv."+p.id+".voltage"];
+    const bad = !!(rd && !rd.ok);
+    /* Red border for a dead link OR an asserted fault: both mean "the number
+       above is not what you think it is". */
+    cls(el, "trip", !p.connected || !!p.faulted);
+
+    const v = put(el, "v", sci(s.snapshot["hv."+p.id+".voltage"], 4));
+    if(v) cls(v, "stale", bad);
+    put(el, "i", sci(s.snapshot["hv."+p.id+".current"], 4));
+    const arcs = s.snapshot["hv."+p.id+".arc_count"];
+    put(el, "arcs", (arcs === null || arcs === undefined) ? "—" : String(arcs));
+
+    const chip = (field, text, on, hot) => {
+      const c = put(el, field, text);
+      if(c){ cls(c, "on", !!on && !hot); cls(c, "hot", !!hot); }
+    };
+    chip("chipHv",   p.hv_on ? "HV ON" : "HV off", p.hv_on, p.hv_on);
+    chip("chipMode", p.voltage_mode === null || p.voltage_mode === undefined
+                       ? "mode —"
+                       : (p.voltage_mode ? "V mode" : "I mode"), false, false);
+    chip("chipRem",  p.remote ? "remote" : "local", false, false);
+    chip("chipTrip", p.current_trip_enabled ? "I-trip on" : "I-trip off",
+                     p.current_trip_enabled, false);
+
+    put(el, "model", p.model || p.driver || "—");
+    put(el, "link", `${p.port || "?"} · ${p.baud || "?"} 8N1 · addr ${p.address}`
+                    + (p.firmware ? ` · fw ${p.firmware}` : ""));
+    put(el, "faults", (p.faults && p.faults.length)
+      ? "FAULT: " + p.faults.join(", ") : "");
+    put(el, "err", bad ? rd.detail : (p.error || ""));
   }
 }
 
@@ -1193,6 +1302,10 @@ function recipe(s){
   $("abortBtn").disabled  = !running;
   $("preStartBtn").disabled = running || !!pre.running;
   $("preStopBtn").disabled  = !pre.running;
+  // Stop only ends the SEQUENCE, so it greys out the moment the plasma has
+  // struck and held - exactly when the tool is primed and most likely to need
+  // backing out of. Abort stays live for that whole primed state.
+  $("preAbortBtn").disabled = running || !(pre.running || pre.done);
 
   const pEl = $("preStatus");
   pEl.textContent = pre.running
@@ -1212,6 +1325,7 @@ function recipe(s){
     : "No run in progress.";
   $("recipeBar").style.width =
     ((r.cycles_total ? r.cycle / r.cycles_total : 0)*100).toFixed(1) + "%";
+  updateEta(r, running);
   $("rCycle").textContent  = r.cycles_total ? `${r.cycle} / ${r.cycles_total}` : "—";
   $("rStep").textContent   = r.step_desc || "—";
   $("rRemain").textContent = (r.step_remaining_s ?? null) === null
@@ -1255,6 +1369,37 @@ function recipe(s){
     : (b.lit ? "beam lit" : "no plasma");
 }
 
+/* Estimated time remaining. The server computes it (recipe.run_remaining_s):
+   cycle length x cycles, ticking down in real time, frozen while a reignite or
+   an operator pause has the cycle held still. See RecipeRunner.run_remaining_s.
+
+   It used to be extrapolated here from the run's own measured pace, which is
+   why it wandered: the divisor changed every time a cycle completed, so the
+   number moved for reasons invisible from the Run tab and never matched the
+   arithmetic the operator had already done from the parameters they typed. */
+function fmtDur(s){
+  if(!isFinite(s) || s < 0) return "—";
+  // Under a minute, show tenths - the run clock is good to 0.1 s and the last
+  // seconds of a run are the ones anyone is actually watching.
+  if(s < 60) return `${s.toFixed(1)}s`;
+  s = Math.round(s);
+  const h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = s%60;
+  return h ? `${h}h ${String(m).padStart(2,"0")}m`
+           : `${m}m ${String(sec).padStart(2,"0")}s`;
+}
+function updateEta(r, running){
+  const showing = running || r.state === "paused";
+  const elapsed = (showing && r.started_at) ? (Date.now()/1000 - r.started_at) : null;
+  $("rElapsed").textContent = elapsed == null ? "—" : fmtDur(elapsed);
+
+  const eta = showing ? (r.run_remaining_s ?? null) : null;
+  const held = showing && r.paused;
+  $("rEta").textContent = eta == null ? "—"
+    : fmtDur(eta) + (held ? " (held)" : "");
+  $("rFinish").textContent = eta == null ? "—"
+    : new Date(Date.now() + eta*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+}
+
 // ------------------------------------------------ run recording + auto-download
 let runData = null;     // {startT, rows:[...]} while a run is active
 let lastRunState = "idle";
@@ -1273,7 +1418,7 @@ function recordRun(s, sample){
   }
   // on transition out of a running state into done/idle/error, export
   if(runData && !running && ["done","idle","error"].includes(r.state)
-     && lastRunState !== r.state && lastRunState !== "" ){
+     && lastRunState !== r.state){
     if(runData.rows.length) downloadRun(runData);
     runData = null;
   }
@@ -1320,6 +1465,12 @@ function conns(s){
   for(const i of s.instruments)
     rows.push(tr(i.label || i.id, "SCPI · VISA", i.resource,
       i.connected ? "OK" : "FAIL", i.error || i.identity || ""));
+  for(const p of (s.power_supplies || []))
+    rows.push(tr(p.label || p.id, "Glassman ASCII · serial · monitor + HV off",
+      `${p.port || "?"} ${p.baud || "?"} addr ${p.address}`,
+      p.connected ? "OK" : "FAIL",
+      p.error || ((p.faults && p.faults.length) ? "FAULT: " + p.faults.join(", ")
+                  : (p.firmware ? "firmware " + p.firmware : ""))));
   const e = s.ellipsometer;
   if(e && e.enabled)
     rows.push(tr(e.label || "FS-1 Ellipsometer", "TCP stream · read-only",
@@ -1331,24 +1482,35 @@ function conns(s){
 function ellipsometer(s){
   const e = s.ellipsometer;
   if(!e) return;
-  const stream = $("ellStream"), live = $("ellLive");
+  const stream = $("ellStream"), live = $("ellLive"), pts = $("ellPoints");
   if(!e.enabled){
     if(stream){ stream.textContent = "disabled in config"; stream.style.color = "var(--dim)"; }
+    if(pts) pts.textContent = "—";
     if(live) live.textContent = "—";
     return;
   }
   const fresh = e.last_recv && (Date.now()/1000 - e.last_recv) < 5;
   if(stream){
     stream.textContent = e.connected
-      ? `connected · ${e.host}:${e.port} · ${e.points_seen||0} pts`
+      ? `connected · ${e.host}:${e.port}`
       : `offline · ${e.error || "no connection"}`;
     stream.style.color = e.connected ? "var(--ok)" : "var(--bad)";
+  }
+  // Two different counts, and the distinction matters: capture_rows is what is
+  // in the sidecar for the acquisition running now (what gets refit and
+  // merged); points_seen is everything streamed since the program started.
+  if(pts){
+    pts.textContent = e.capture_active
+      ? `${e.capture_rows||0}` + (e.capture_file ? ` · ${e.capture_file}` : "")
+      : (e.points_seen ? `none · ${e.points_seen} seen since start` : "—");
+    pts.style.color = e.capture_active ? "var(--fg)" : "var(--dim)";
   }
   if(live){
     if(fresh && e.last_index){
       const th = (e.last_thickness==null) ? "—"
         : Number(e.last_thickness).toFixed(2) + " " + (e.last_thickness_unit||"");
-      live.textContent = `#${e.last_index} · t=${num(e.last_time_s,1)}s · ${th} (live fit)`;
+      const fd = (e.last_fit_diff==null) ? "" : ` · fit diff ${sci(e.last_fit_diff, 3)}`;
+      live.textContent = `#${e.last_index} · t=${num(e.last_time_s,1)}s · ${th}${fd}`;
       live.style.color = "var(--fg)";
     } else {
       live.textContent = e.points_seen ? "— idle (no acquisition running) —" : "— no data yet —";
@@ -1364,27 +1526,63 @@ function tr(a,b,c,state,detail){
     <td style="color:var(--dim)">${esc(detail||"")}</td></tr>`;
 }
 
-// The event log lives on the Diagnostics tab, so the newest warning is also
-// pinned in the header for two minutes - otherwise a fill-pressure flag raised
-// mid-run would never be seen from the Run tab. Display only.
-const LOUD_KINDS = new Set(["error","trip","safety","flag"]);
-const ALERT_HOLD_S = 120;
+// The event log lives on the Diagnostics tab, so a condition that needs seeing
+// from the Run tab is also shown on a chip in the header.
+//
+// The chip reports what is wrong RIGHT NOW. It used to pin the newest error or
+// flag EVENT for two minutes, which meant a fill-pressure excursion that had
+// already corrected itself kept shouting long after the pressure was back, and
+// the operator had no way to tell a live problem from a stale one. Events are
+// history and the log keeps them; this is the live condition, and it clears the
+// moment the condition does. Display only - it never changes reactor behaviour.
+function liveAlerts(s){
+  const out = [];                            // {msg, bad} - bad = red, else amber
+  const r = s.recipe || {};
+
+  if(r.state === "error" && r.error) out.push({msg: r.error, bad: true});
+
+  // The operator's example: precursor fill pressure off its setpoint. This is
+  // the same flag the fill readout shows, read from the same field.
+  const g = s.regulator || {};
+  if(g.running && g.in_bounds === false)
+    out.push({msg: `precursor fill pressure out of bounds (target ${num(g.target_torr,3)} Torr)`,
+              bad: false});
+
+  // Plasma out mid-beam, while it is out.
+  if(r.beam && r.beam.lit === false)
+    out.push({msg: "plasma out — reigniting", bad: false});
+
+  // Hardware that is faulted or unreachable, while it is.
+  for(const p of (s.power_supplies || [])){
+    if(p.faults && p.faults.length)
+      out.push({msg: `${p.label || p.id}: ${p.faults.join(", ")}`, bad: true});
+    else if(p.connected === false)
+      out.push({msg: `${p.label || p.id} disconnected`, bad: true});
+  }
+  for(const m of (s.mfcs || []))
+    if(m.connected === false) out.push({msg: `${m.label || m.id} disconnected`, bad: true});
+  for(const i of (s.instruments || []))
+    if(i.connected === false) out.push({msg: `${i.label || i.id} disconnected`, bad: true});
+  if(s.daq && s.daq.configured === false && s.daq.error)
+    out.push({msg: `DAQ: ${s.daq.error}`, bad: true});
+
+  out.sort((a, b) => (b.bad ? 1 : 0) - (a.bad ? 1 : 0));   // errors first
+  return out;
+}
 function events(s){
   const list = s.events || [];
   setHtml($("events"), list.slice().reverse().map(e =>
     `<div><span class="t">${clock(e.t)}</span>
      <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
 
-  const now = Date.now()/1000;
-  let loud = null;
-  for(const e of list)                       // oldest-first, so this keeps the newest
-    if(LOUD_KINDS.has(e.kind) && now - e.t <= ALERT_HOLD_S) loud = e;
+  const live = liveAlerts(s);
   const chip = $("alertChip");
-  cls(chip, "hidden", !loud);
-  cls($("diagDot"), "on", !!loud);
-  if(loud){
-    chip.textContent = `⚠ ${loud.message}`;
-    cls(chip, "bad", loud.kind === "error" || loud.kind === "trip");
+  cls(chip, "hidden", !live.length);
+  cls($("diagDot"), "on", !!live.length);
+  if(live.length){
+    const more = live.length > 1 ? `  (+${live.length - 1} more)` : "";
+    chip.textContent = `⚠ ${live[0].msg}${more}`;
+    cls(chip, "bad", live[0].bad);
   }
 }
 
@@ -1795,7 +1993,6 @@ window.addEventListener("resize", drawAllCharts);
     for(const b of btns) cls(b, "active", b.dataset.tab === name);
     for(const p of panes) cls(p, "hidden", p.dataset.pane !== name);
     localStorage.setItem("activeTab", name);
-    if(name === "diag" && typeof loadEllSidecars === "function") loadEllSidecars();
     drawAllCharts();
   }
   for(const b of btns) b.onclick = () => show(b.dataset.tab);
@@ -1819,66 +2016,10 @@ $("idStartBtn").onclick = async () => {
   });
 };
 
-// ---- Ellipsometer sync (Diagnostics tab) ----
-async function loadEllSidecars(){
-  try{
-    const j = await (await fetch("/api/ellipsometer/sidecars")).json();
-    const side = $("ellSidecar"), rlog = $("ellReactorLog");
-    if(side) side.innerHTML = j.sidecars.length
-      ? j.sidecars.map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join("")
-      : `<option value="">— no sidecars in data folder —</option>`;
-    if(rlog) rlog.innerHTML = (j.reactor_runs && j.reactor_runs.length)
-      ? j.reactor_runs.map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join("")
-      : `<option value="">— none (ellipsometry only) —</option>`;
-  }catch(_){ /* keep whatever is there */ }
-}
-if($("ellRefresh")) $("ellRefresh").onclick = loadEllSidecars;
-if($("ellMerge")) $("ellMerge").onclick = async () => {
-  const f = $("ellFile").files && $("ellFile").files[0];
-  if(!f){ toast("Choose the refit file you downloaded from the FS-1 first."); return; }
-  const sidecar = $("ellSidecar").value;
-  if(!sidecar){ toast("No sidecar to align to — capture a run first, then ↻."); return; }
-  const qs = new URLSearchParams({
-    sidecar, reactor_run: $("ellReactorLog").value || "", filename: f.name });
-  let r;
-  try{
-    r = await fetch("/api/ellipsometer/merge?" + qs.toString(),
-      { method:"POST", headers:{"Content-Type":"text/plain"}, body: await f.text() });
-  }catch(_){ toast("Merge request failed."); return; }
-  if(!r.ok){
-    let msg = r.statusText; try{ msg = (await r.json()).detail || msg; }catch(_){}
-    toast(msg); return;
-  }
-  const j = await r.json();
-  const warn = (j.warnings || []);
-  // Nothing to download (e.g. an old run export with no cycle_number column):
-  // surface why instead of handing back a headers-only spreadsheet.
-  if(!j.n_points){
-    $("ellResult").textContent = "no rows produced — nothing downloaded";
-    $("ellWarn").textContent = warn.join("  •  ")
-      || "the selected sidecar / reactor run produced no matching rows";
-    $("ellWarn").style.color = "var(--bad)";
-    toast(warn[0] || "Merge produced no rows.", false);
-    return;
-  }
-  const blob = new Blob([j.csv], {type:"text/csv"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = j.filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-  const tm = j.time_map;
-  const nchan = (j.reactor_channels || []).length;
-  $("ellResult").textContent =
-    (j.mode === "combined"
-      ? `${j.n_points} rows · ${nchan} reactor channels + ${(j.ellipsometry_columns||[]).join("/")} by cycle`
-      : `${j.n_points} pts · ellipsometry only (no reactor run selected)`)
-    + ` · clock rate ${tm.b.toFixed(4)} · fit jitter ${(tm.max_residual_s*1000).toFixed(0)} ms`;
-  $("ellWarn").textContent = warn.join("  •  ");
-  $("ellWarn").style.color = warn.length ? "var(--bad)" : "var(--dim)";
-  toast("Merged CSV downloaded", true);
-};
-loadEllSidecars();
+// ---- Ellipsometer refit merge ----
+// Lives on the Analysis page (/analysis) now: it both merges the refit file
+// and plots the result, so the file never has to be saved and dragged back.
+// This tab keeps only the live FS-1 stream status.
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("button[data-mark]");
   if(!b) return;
@@ -1938,7 +2079,7 @@ document.addEventListener("click", async ev => {
 // runParams(), not this list.
 const ALD_KEYS = ["cycles","dose_pressure_torr","dose_s","pump_a_s","beam_s",
   "pump_b_s","min_current_ua","fill_pulse_on_s","fill_pulse_off_s","tolerance_pct",
-  "reignite_pulse_s","reignite_settle_s",
+  "reignite_pulse_s","reignite_settle_s","ar_close_delay_s",
   "pre_ar_sccm","pre_valve_delay_s","pre_hold_s",
   "gas_overlap_s","smooth_on","smooth_n",
   "h2_gas_enable","h2_gas_order","h2_gas_pct","h2_gas_flow_sccm",
@@ -1987,6 +2128,25 @@ function loadParams(){
 function saveParams(){
   const p={}; for(const k of ALD_KEYS) p[k]=paramGet(k);
   localStorage.setItem("aldParams", JSON.stringify(p));
+}
+
+/* Run name. Deliberately NOT persisted in localStorage with the other params:
+   it is owned by the server, which records the name of each run as it actually
+   starts, so the sequence follows real runs and is the same on every browser
+   that connects. `force` overwrites whatever is in the box (used after a run
+   starts, when the old name has just been consumed); otherwise a name the
+   operator has typed is left alone. */
+let suggestedRunName = "";
+async function refreshRunName(force){
+  try{
+    const r = await fetch("/api/run/next-name");
+    if(!r.ok) return;
+    const d = await r.json();
+    const el = $("p_run_name");
+    const untouched = !el.value.trim() || el.value.trim() === suggestedRunName;
+    suggestedRunName = d.suggested || "";
+    if(force || untouched) el.value = suggestedRunName;
+  }catch(_){ /* naming is a convenience; a failed fetch must not block a run */ }
 }
 // Shows the achieved retry rate so it's obvious whether the two fields above
 // meet "at least twice a second" without doing the arithmetic by hand. A full
@@ -2079,6 +2239,8 @@ function runParams(){
     fill_pulse_on_s: P("fill_pulse_on_s"), fill_pulse_off_s: P("fill_pulse_off_s"),
     tolerance_frac: (P("tolerance_pct")||20)/100,
     reignite_pulse_s: P("reignite_pulse_s"), reignite_settle_s: P("reignite_settle_s"),
+    ar_close_delay_s: P("ar_close_delay_s"),
+    run_name: ($("p_run_name").value || "").trim(),
   };
   if(!cvd){ params.beam_s = P("beam_s"); params.pump_b_s = P("pump_b_s"); }
   params.gas_overlap_s = P("gas_overlap_s") || 0;
@@ -2101,8 +2263,12 @@ $("aldStart").onclick = async () => {
       + `whole run.`
     : `This doses precursor and fires the electron beam each cycle.`;
   if(!confirm(`Start ${cvd ? "EE-CVD" : "EE-ALD"} run — ${params.cycles} cycles?`
+    + `\n\nRun name: ${params.run_name || "(unnamed)"}`
     + `\n\n${what}`)) return;
-  try{ await post(cvd ? "/api/run/cvd" : "/api/run/ald", params); }catch(_){}
+  try{
+    await post(cvd ? "/api/run/cvd" : "/api/run/ald", params);
+    await refreshRunName(true);   // this name is now used; offer the next one
+  }catch(_){}
 };
 
 // Pre-start: the dialog is the point of the button as much as the sequence is -
@@ -2132,6 +2298,7 @@ $("preStartBtn").onclick = async () => {
   }catch(_){}
 };
 $("preStopBtn").onclick = () => post("/api/prestart/stop");
+$("preAbortBtn").onclick = () => post("/api/prestart/abort");
 
 $("pauseBtn").onclick  = () => post("/api/recipe/pause");
 $("resumeBtn").onclick = () => post("/api/recipe/resume");
@@ -2161,6 +2328,7 @@ $("logStop").onclick   = () => post("/api/log/stop");
   $("modeSel").value = localStorage.getItem("runMode") || "ald";
   loadParams();
   applyMode();
+  refreshRunName(false);
   connect();
 })();
 </script>

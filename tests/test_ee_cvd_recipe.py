@@ -88,9 +88,13 @@ async def main() -> int:
         writes_before = len(vr.daq.do_writes)
         await run_cvd(vr, P)
         beam_writes = [w for w in vr.daq.do_writes[writes_before:] if w[1] == "plasma_ground"]
-        c.check("beam turned on once at setup (one closed write)",
-                sum(1 for t, k, v in beam_writes if v is False) == 1)
-        c.check("beam ends grounded", vr.daq.do_state["plasma_ground"] is True)
+        # One strike at setup, plus the end-of-run park: a completed run is
+        # deliberately left in beam-ON mode at the operator's request. Abort is
+        # unaffected (teardown is skipped) - section 4 still pins grounded.
+        c.check("beam struck at setup + parked at end of run (two closed writes)",
+                sum(1 for t, k, v in beam_writes if v is False) == 2)
+        c.check("completed run parks in beam-ON mode",
+                vr.daq.do_state["plasma_ground"] is False)
         c.check("MFCs zeroed at run end",
                 vr.mfcs["h2"].commanded_sccm == 0.0 and vr.mfcs["n2"].commanded_sccm == 0.0)
         c.check("fill valve closed at run end", vr.sup.valve_state["rpm_top"] is False)
@@ -104,7 +108,8 @@ async def main() -> int:
         reignite_pulses = [w for w in vr.daq.do_writes[writes_before:] if w[1] == "plasma_ground"]
         c.check("reignite pulsed the switch more than the single setup/teardown pair",
                 len(reignite_pulses) > 2, f"{len(reignite_pulses)} plasma_ground writes")
-        c.check("beam still ends grounded", vr.daq.do_state["plasma_ground"] is True)
+        c.check("beam still parks in beam-ON mode after a reignite",
+                vr.daq.do_state["plasma_ground"] is False)
 
         c.section("4. abort mid-run: beam grounded, everything cleaned up")
         vr.instruments["ammeter"].value = 1.0e-3
@@ -129,7 +134,7 @@ async def main() -> int:
                      if e["kind"] == "mfc"]
         c.check("no scheduling writes beyond end-of-run zeroing",
                 all("-> 0.00" in m for m in mfc_events), str(mfc_events))
-        c.check("beam grounded", vr.daq.do_state["plasma_ground"] is True)
+        c.check("beam parked in beam-ON mode", vr.daq.do_state["plasma_ground"] is False)
 
         c.section("6. realistic timings: gas windows land where the UI predicts")
         # dose 0.05 + pump A 4.0 = 4.05s cycle, overlap 0.5, h2 first 40%,

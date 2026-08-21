@@ -11,10 +11,12 @@ Notes that matter for correctness:
   task drives that output to its idle state, so it is deferred until something is
   actually commanded.
 
-* **The analog-output path assumes a VOLTAGE module.** The only AO hardware here
-  is an NI 9265, which is a 0-20 mA CURRENT output - it needs
-  `add_ao_current_chan`, not `add_ao_voltage_chan`. Nothing configures an analog
-  output today; fix this before the 9265 is ever used. See docs/HARDWARE.md.
+* **There is no analog-output path, deliberately.** The only AO hardware here is
+  an NI 9265 (4 x 0-20 mA CURRENT output) and nothing is known to be wired to it
+  (`reactor-5u2`). An earlier unreachable AO path was removed because it called
+  `add_ao_voltage_chan`, which is simply wrong for a current module - a
+  plausible-looking trap for whoever eventually identifies the 9265. When that
+  day comes, write it fresh against `add_ao_current_chan`. See docs/HARDWARE.md.
 
 * Reads are wrapped so a flaky channel yields `ok=False` instead of taking down
   the control loop.
@@ -54,17 +56,6 @@ class AiSpec:
 
 
 @dataclass
-class AoSpec:
-    key: str
-    channel: str
-    rng: tuple[float, float] = (0.0, 10.0)
-
-    @property
-    def device(self) -> str:
-        return self.channel.split("/")[0]
-
-
-@dataclass
 class DoSpec:
     key: str
     line: str                      # "cDAQ2Mod2/port0/line0"
@@ -78,7 +69,6 @@ class DoSpec:
 @dataclass
 class DaqPlan:
     ai: list[AiSpec] = field(default_factory=list)
-    ao: list[AoSpec] = field(default_factory=list)
     do: list[DoSpec] = field(default_factory=list)
 
 
@@ -91,13 +81,11 @@ class NiDaqBackend:
     def __init__(self) -> None:
         self._plan = DaqPlan()
         self._ai_tasks: dict[str, tuple[object, list[AiSpec]]] = {}
-        self._ao_tasks: dict[str, tuple[object, list[AoSpec]]] = {}
         #: One single-line DO task PER VALVE, keyed by valve key. Each write then
         #: touches only its own line, so actuating one valve can never re-drive a
         #: sibling on the same module. (Digital output has no one-task-per-module
         #: restriction - that limit is analog-input only.)
         self._do_tasks: dict[str, object] = {}
-        self._ao_values: dict[str, float] = {}
         self._do_values: dict[str, bool] = {}
         #: one-off single-line DO tasks used only by valve identification, keyed
         #: by raw line name. Separate from the configured-valve _do_tasks.
@@ -217,38 +205,6 @@ class NiDaqBackend:
 
     # -- writes ------------------------------------------------------------- #
 
-    async def write_ao(self, key: str, volts: float) -> None:
-        spec = next((s for s in self._plan.ao if s.key == key), None)
-        if spec is None:
-            raise KeyError(f"no analog output configured for '{key}'")
-        volts = max(spec.rng[0], min(spec.rng[1], volts))
-        async with self._lock:
-            self._ao_values[key] = volts
-            await asyncio.to_thread(self._flush_ao, spec.device)
-
-    def _flush_ao(self, device: str) -> None:
-        task, specs = self._ensure_ao_task(device)
-        vector = [self._ao_values.get(s.key, 0.0) for s in specs]
-        task.write(vector if len(vector) > 1 else vector[0], auto_start=True)
-
-    def _ensure_ao_task(self, device: str):
-        existing = self._ao_tasks.get(device)
-        if existing:
-            return existing
-        nidaqmx = self._mod()
-        specs = [s for s in self._plan.ao if s.device == device and s.channel]
-        task = nidaqmx.Task(new_task_name=f"ao_{device}")
-        try:
-            for s in specs:
-                task.ao_channels.add_ao_voltage_chan(
-                    s.channel, min_val=s.rng[0], max_val=s.rng[1]
-                )
-        except Exception:
-            task.close()
-            raise
-        self._ao_tasks[device] = (task, specs)
-        return self._ao_tasks[device]
-
     async def write_do(self, key: str, value: bool) -> None:
         spec = next((s for s in self._plan.do if s.key == key), None)
         if spec is None:
@@ -275,9 +231,6 @@ class NiDaqBackend:
             raise
         self._do_tasks[spec.key] = task
         return task
-
-    def commanded(self) -> dict[str, float | bool]:
-        return {**self._ao_values, **self._do_values}
 
     # -- raw line pulsing (valve identification only) ----------------------- #
 
@@ -319,22 +272,18 @@ class NiDaqBackend:
             for line in list(self._id_tasks):
                 self._id_release_sync(line)
 
-    def id_states(self) -> dict[str, bool]:
-        return dict(self._id_state)
-
     # -- teardown ----------------------------------------------------------- #
 
     async def close(self) -> None:
         await asyncio.to_thread(self._close_sync)
 
     def _close_sync(self) -> None:
-        for store in (self._ai_tasks, self._ao_tasks):
-            for task, _ in store.values():
-                try:
-                    task.close()
-                except Exception:
-                    pass
-            store.clear()
+        for task, _ in self._ai_tasks.values():   # (task, specs) tuples
+            try:
+                task.close()
+            except Exception:
+                pass
+        self._ai_tasks.clear()
         for task in self._do_tasks.values():   # per-line DO tasks (task, not tuple)
             try:
                 task.close()

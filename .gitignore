@@ -12,3 +12,9 @@ __pycache__/
 
 # Machine-local Claude Code settings (permissions, not shared config)
 .claude/settings.local.json
+
+# Experimental run data. Each run writes several MB into data/<run name>/ and
+# those files are the experiment's record, not the program's source - they do
+# not belong in the control software's history. One params file from the very
+# first commit was tracked by accident and is dropped here; it stays on disk.
+data/

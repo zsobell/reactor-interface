@@ -92,11 +92,6 @@ class Scaling(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-#  Safety
-# --------------------------------------------------------------------------- #
-
-
-# --------------------------------------------------------------------------- #
 #  Inputs
 # --------------------------------------------------------------------------- #
 
@@ -108,6 +103,18 @@ class Site(BaseModel):
     #: plasma diagnostic and the electron-beam reignite logic run at a finer time
     #: step than the slow thermocouples allow. Telemetry publishes at this rate.
     current_hz: float = Field(default=5.0, gt=0, le=50)
+    #: MFCs are polled on their OWN loop rather than inside the current loop, so
+    #: that a device which stops answering can never stall the plasma-diagnostic
+    #: tick or the run log. (Originally they WERE gathered in the current loop,
+    #: over HTTP at 0.45-0.9 s per read, which throttled every logged sample to
+    #: ~2.1 Hz and was the cause of the sparse compiled data.) Reads are Modbus
+    #: now and take ~1 ms, so this can run fast.
+    #:
+    #: Deliberately a little ABOVE current_hz: the two loops are independent
+    #: timers, and polling slightly faster than rows are written guarantees at
+    #: least one fresh flow reading between consecutive rows, so the MFC columns
+    #: are filled on every row instead of dropping out whenever the phases drift.
+    mfc_hz: float = Field(default=6.0, gt=0, le=50)
     data_dir: Path = Path("./data")
 
 
@@ -243,6 +250,43 @@ class InstrumentCfg(BaseModel):
     overload_above: float = 1e30
 
 
+class PowerSupplyCfg(BaseModel):
+    """A programmable power supply on a serial (or USB virtual-COM) port.
+
+    Today this means the XP Glassman FL-series high-voltage plasma supply.
+    Monitor-only apart from one command: the reactor polls its voltage/current
+    monitors and logs them, and commands HV OFF at the end of a run or on an
+    abort. There is no way to set a level or turn HV on.
+    See reactor/devices/glassman_fl.py.
+
+    `baud` and `address` are NOT guessable and must not be assumed from the
+    supply's DIP switches - this reactor's FL answers at 19200/address 1 while
+    both its DIP switches and the manual's default say otherwise. Measure them
+    with tools/probe_glassman.py rather than inferring them.
+    """
+
+    id: str
+    label: str = ""
+    enabled: bool = False
+    driver: Literal["glassman_fl"] = "glassman_fl"
+    #: Free text, for the UI and the record - e.g. "FL1.5F1.0". Not parsed.
+    model: str = ""
+    #: Windows COM port name, e.g. "COM8". The FL's USB port presents a virtual
+    #: COM port via a TI TUSB3410 bridge; RS-232 would look the same here.
+    port: str = ""
+    #: 2400, 4800, 9600 or 19200 are the only rates the FL supports.
+    baud: int = Field(default=9600, gt=0)
+    #: FL address byte, 0-7. Every command carries it.
+    address: int = Field(default=0, ge=0, le=7)
+    #: Rated output, used to scale the 12-bit monitor counts into real units.
+    #: Read them off the nameplate; they are per-model.
+    full_scale_v: float = Field(default=0.0, ge=0)
+    full_scale_i: float = Field(default=0.0, ge=0)
+    unit_v: str = "V"
+    unit_i: str = "mA"
+    timeout_s: float = Field(default=1.0, gt=0)
+
+
 class EllipsometerCfg(BaseModel):
     """Film Sense FS-1 in-situ ellipsometer.
 
@@ -306,6 +350,7 @@ class ReactorConfig(BaseModel):
     valves: list[ValveCfg] = Field(default_factory=list)
     mfcs: list[MfcCfg] = Field(default_factory=list)
     instruments: list[InstrumentCfg] = Field(default_factory=list)
+    power_supplies: list[PowerSupplyCfg] = Field(default_factory=list)
     ellipsometer: EllipsometerCfg = Field(default_factory=EllipsometerCfg)
     logging: LoggingCfg = Field(default_factory=LoggingCfg)
 
@@ -317,11 +362,28 @@ class ReactorConfig(BaseModel):
             ("gauges", [g.id for g in self.gauges]),
             ("mfcs", [m.id for m in self.mfcs]),
             ("instruments", [i.id for i in self.instruments]),
+            ("power_supplies", [p.id for p in self.power_supplies]),
             ("aux_inputs", [a.id for a in self.aux_inputs]),
         ):
             dupes = {i for i in ids if ids.count(i) > 1}
             if dupes:
                 raise ValueError(f"{label}: duplicate id(s) {sorted(dupes)}")
+
+        # An enabled supply with no port, or with a zero full scale, would poll
+        # into the void or scale every reading to 0.0 and look plausible doing
+        # it. Catch both at load, where the message can name the key.
+        for ps in self.power_supplies:
+            if not ps.enabled:
+                continue
+            if not ps.port:
+                raise ValueError(
+                    f"power_supplies['{ps.id}']: enabled but no 'port' set")
+            if ps.full_scale_v <= 0 or ps.full_scale_i <= 0:
+                raise ValueError(
+                    f"power_supplies['{ps.id}']: full_scale_v and full_scale_i "
+                    f"must both be > 0 (they scale the supply's 12-bit monitor "
+                    f"counts into real units); got {ps.full_scale_v} / "
+                    f"{ps.full_scale_i}. Read them off the nameplate.")
 
         # A valve pointing at a bank that does not exist is a typo worth catching.
         banks = {b.id for b in self.valve_banks}

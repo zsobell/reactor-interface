@@ -21,6 +21,12 @@ requested: a gentle "flag" when precursor fill pressure drifts >20% off
 setpoint (warns, never stops), and the Ar MFC refusing a nonzero setpoint
 while its isolation valve is closed.
 
+Automatic actions that DO exist, each individually requested 2014 do not remove
+them as "unrequested safety machinery", and do not treat them as licence to add
+more: MFCs zeroed + fill valve closed at run end; **HV commanded off at run end
+or abort** (2026-08-21); the beam relay parked de-energised (9 V battery 2014 see
+[docs/HARDWARE.md](docs/HARDWARE.md)); and the one-click pre-start abort.
+
 Related standing conventions:
 - **Every parameter Zach edits lives in the UI**, never a YAML/file/code edit.
 - **Don't assume hardware facts** — query the reactor (`tools/discover_hardware.py`,
@@ -78,14 +84,28 @@ reactor/
   supervisor.py         single owner of state + all hardware commands; control loop; fill-pressure
                         regulator; pre-start sequence; valve-ID sweep; telemetry fan-out over WebSocket
   datalog.py            tab-delimited run logs
-  devices/{base,nidaq,mks_mfc,instrument}.py   DAQ (one DAQmx task per DO line), MKS G50 MFCs
-                        (HTTP read / Modbus write), DMM6500
+  devices/{base,nidaq,mks_mfc,instrument}.py   DAQ (one DAQmx task per DO line; no analog-output
+                        path on purpose), MKS G50 MFCs (flow/temp/setpoint all over Modbus;
+                        HTTP only for full scale + identity), DMM6500
   control/recipe.py     recipe engine + step types (dose/wait/electron_beam/beam_start/beam_stop/
                         start_fill/...) + build_ald_recipe/build_cvd_recipe for the two UI-driven modes
-  server/app.py         FastAPI HTTP + WebSocket; thin wrapper over Supervisor
-  server/static/index.html   the entire GUI (HTML+CSS+vanilla JS, no build step; 3 tabs: Run/Hardware/Diagnostics)
-tools/                  discover_hardware.py (read-only), watch_channels.py (read-only), pulse_line.py (drives one line)
-docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWARE, LABVIEW_ANALYSIS
+  devices/glassman_fl.py     XP Glassman FL HV plasma supply over serial. Polls V/I/arc-count;
+                        the ONE command sent is hv_off() at run end / abort. No setpoints,
+                        no HV-on, ever (docs/GLASSMAN_FL.md)
+  devices/ellipsometer.py    FS-1 live TCP stream: read-only subscriber + record decoder
+  analysis/ellipsometer_merge.py   post-run join of a refit FS-1 file onto the reactor clock
+  testing/virtual_reactor.py fake DAQ/MFC/instrument, real Supervisor above them (see tests/README.md)
+  server/app.py         FastAPI HTTP + WebSocket; thin wrapper over Supervisor. Optional HTTP Basic
+                        auth over everything incl. the WebSocket, on only if REACTOR_PASSWORD is set
+  server/static/index.html   the control GUI (HTML+CSS+vanilla JS, no build step; 3 tabs: Run/Hardware/Diagnostics)
+  server/static/analysis.html   post-run plotting page at /analysis (prototype). Reads finished
+                        files only - no hardware, no telemetry - which is why it is a separate page,
+                        not a 4th tab. Persistent grid of property-vs-cycle plots; layout in
+                        localStorage. A dropped Auger (AES) spectrum is its own dataset (kinetic
+                        energy, not cycle number) with its own plot, never merged into the run file.
+tools/                  discover_hardware.py (read-only), watch_channels.py (read-only), pulse_line.py (drives one line),
+                        probe_glassman.py (read-only: finds the HV supply's port/baud/address)
+docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWARE, LABVIEW_ANALYSIS, GLASSMAN_FL
 ```
 
 ## Hardware quick reference (all identified; details in docs/HARDWARE.md)
@@ -94,20 +114,45 @@ docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWA
   `P[Torr]=10^(V-10)`. 3 Baratrons on cDAQ2Mod1: ai0 Ar, ai1 precursor-1 dose,
   ai2 precursor-2 dose (10 Torr heads, 1 V = 1 Torr — confirmed). Stage TC
   `cDAQ1Mod4/ai1`, precursor bubbler TC `cDAQ1Mod4/ai0`.
-- **3 MKS G50 MFCs** (Ar/H2/N2) at `192.168.2.221/.222/.223`. Read over the
-  device HTTP interface, write setpoint over Modbus. **Quirk: the MFC zeros its
+- **3 MKS G50 MFCs** (Ar/H2/N2) at `192.168.2.221/.222/.223`. Flow, temperature,
+  valve position and setpoint are **all read over Modbus** (~1 ms), from the
+  register table each unit serves at `http://<host>/modbus.html` - NOT the
+  generic MKS docs, which are a different family. Measured values are INPUT
+  registers (FC 4), settable ones HOLDING (FC 3); getting that wrong is what
+  made an earlier attempt conclude flow was unreachable. HTTP is used only for
+  full scale (per device AND per gas: Ar 29 / H2 10 / N2 50 sccm, not in the
+  Modbus map) and identity, at connect and on the slow refresh. Polled on their
+  own loop at `mfc_hz` 6 Hz, deliberately just above the 5 Hz row rate so every
+  logged row has a fresh flow. **Quirk: the MFC zeros its
   setpoint when the Modbus master disconnects** — flow only holds while the
   program stays connected. The Ar MFC has an operator-requested isolation
   interlock: setpoint refused above 0 sccm while `ar_pneumatic` is closed.
 - **Keithley DMM6500** (USB) = sample current, the plasma/e-beam diagnostic.
+- **Film Sense FS-1 ellipsometer** at `169.254.1.1:4001`, direct link-local
+  Ethernet. **Read-only**: the reactor subscribes to the instrument's live
+  broadcast and never writes to it (ports 4000/4010 deliberately untouched).
 - **11 valves** across two control boxes, each on its own DAQmx DO task so one
   write never re-drives (and can't silently flip) a sibling on the same
   module; `plasma_ground` (cDAQ1Mod3 line9) is the e-beam relay (OFF = beam
-  ON). No valve-position feedback on the DAQ — last-commanded state persists
-  to `config/valve_state.json` across restarts.
+  ON). **Its resting state is de-energised (OFF)** — the relay box runs off a
+  9 V battery that drains only while the relay is energised, so run end and
+  pre-start abort both park it off (and command HV off alongside). No
+  valve-position feedback on the DAQ — last-commanded state persists to
+  `config/valve_state.json` across restarts.
+- **XP Glassman FL1.5F1.0** HV plasma supply (1500 V / 1.0 A) on USB, `COM8`
+  **19200 8N1 address 1** - none of which is the documented default or readable
+  off its DIP switches; the COM number moved once already. Polled at 2 Hz for
+  voltage/current/arc count. **The only command this program sends it is HV OFF**
+  (run end or abort, requested 2026-08-21); there is no way to set a level or
+  turn HV on. Zach sets it by hand on the front panel. Note any Set command
+  leaves the supply in REMOTE until LOC/REM is pressed.
+  `python -m tools.probe_glassman` if it ever goes quiet.
+  Full protocol + bring-up account in **[docs/GLASSMAN_FL.md](docs/GLASSMAN_FL.md)**.
 - **NI 9265** current outputs: purpose unknown, deferred (`reactor-5u2`).
+- **ACCES USB-AO16-8A** 8-channel analog output board: present and healthy,
+  purpose not established, unused by this program.
 
-## Current state (2026-08-06)
+## Current state (2026-08-21, after the Mo-015 run)
 
 All I/O identified and working; MFC read+write, every valve, and every
 display label controllable from the UI, with valve state surviving a
@@ -121,17 +166,88 @@ Diagnostics):
   (its own reignite watchdog) with dose+pump-A cycling on top of it; pump A
   is lit-time gated so it locks to the plasma, the dose never is (freezing a
   precursor pulse would dump precursor into the chamber). Logic-verified
-  with fake-DAQ / fake-supervisor harnesses only, not yet confirmed on real
-  hardware.
+  against the virtual reactor only, not yet confirmed on real hardware.
 
 Both share a single-overlap gas-scheduling scheme (H2/N2 on/off around the
 beam or the cycle) and an operator **pre-start** sequence (Ar on, fill
 pulsing, strike-and-hold the plasma with unlimited retries, then ground the
-beam) that primes the tool ahead of Start run. Live pressure/current/MFC-
+beam) that primes the tool ahead of Start run, plus a one-click **Abort
+pre-start** that undoes all of it (Ar off, fill off, relay de-energised, HV
+off) and stays live after the plasma has struck. Live pressure/current/MFC-
 flow/temperature plots each have an independent time window, hover, and
 drag-to-zoom. Every run's trace is captured twice, automatically: a
 client-side CSV auto-download, and a richer server-side CSV
-(`DataLogger.start_run_export`) that survives a closed browser.
+(`DataLogger.start_run_export`) that survives a closed browser, alongside a
+by-cycle CSV and a run-parameters **.txt** report.
+
+**The three run files are raw / filtered / merged.** `_run.csv` is the raw
+trace: every telemetry tick, nothing dropped, reignites and operator pauses
+included. `_bycycle.csv` is the same rows minus anything frozen and minus
+setup/teardown, keyed by fractional cycle. The merged `_reactor_synced.csv` is
+that plus the ellipsometry. There is **no `paused` column** - since 2026-08-21
+`recipe_step` names a freeze itself (`reignite`, `pause`), because a reignite is
+an event in its own right, not part of the beam step it interrupts. Filtering a
+raw file to the deposition is `recipe_step not in ("reignite", "pause")`. The
+merge honours the old `paused` column too, so pre-2026-08-21 runs still merge.
+
+**One run = one folder.** Everything a run writes lands in `data/<run name>/`
+(`data/Mo-015/`), sharing one stem, with an unnamed run falling back to
+`data/<stamp>/`. `DataLogger.run_dir` is set by `start_run_export` and cleared
+by `stop_run_export`. The ellipsometer sidecar is the awkward case - the FS-1
+streams continuously so its acquisition opens BEFORE the run exists - so it
+starts loose in `data/` and `_adopt_open_sidecar` renames and moves it in when
+the run begins (close/move/reopen: Windows will not rename an open file). The
+merged file is written next to the run it came from. `/api/data/files`
+recurses and returns names relative to the data dir, sorted by mtime.
+
+The parameters file is **plain text, not JSON** - Zach could not open a .json.
+`datalog.format_run_params` renders it (header, summary, every UI parameter,
+every setup/cycle/teardown step) as UTF-8-with-BOM so Notepad shows the
+em-dash. It is importable on its own, which is how the historical .json files
+were re-rendered as .txt.
+
+**Run timing is exact.** A cycle takes the sum of its step durations, and the
+"est. remaining" countdown is that number times the cycle count, ticking down
+in real time and freezing only for a reignite or an operator pause
+(`RecipeRunner.run_remaining_s`; `tests/test_run_timing.py` holds it to 0.1 s).
+Before 2026-08-21 the beam step slept its settle time before starting its
+exposure clock and ticked in fixed 0.2 s steps, so Mo-015's 150 cycles ran
+124 s long, and the countdown was extrapolated from measured pace in the
+browser, so it wandered.
+
+The **FS-1 ellipsometer** streams read-only into a per-acquisition sidecar
+during a run. Its live readout (stream state, points banked this acquisition,
+live fit + fit residual) is on the **Hardware** tab; its connection row is in
+the Diagnostics connections table with every other device; and the post-run
+sync — merging a refit FS-1 file back onto the reactor clock, keyed by cycle
+number — lives on the **Analysis page** next to the plots it feeds. Nothing
+ellipsometer-related is on the Diagnostics tab any more. Not yet validated
+across a real deposition (`reactor-nde`).
+
+The **Analysis page** (`/analysis`, prototype) plots the merged file: a
+persistent grid of property-vs-cycle plots, layout remembered in localStorage
+and re-applied by column name so a newly merged file repopulates it. A column
+counts as numeric on the cells that HAVE a value, not on the row count — in a
+merged file nearly every column is sparse by construction, and the old rule
+silently hid thickness, resistivity, bubbler, stage temp and the HV channels
+from the dropdown entirely. Series are drawn as ONE line through every datum;
+a row with no value for that column is skipped, not treated as a break (which
+is what made merged files look dashed). An **Auger (AES) spectrum** dropped on
+the same page gets its own autoscaled plot, kept as a separate dataset.
+
+The **Glassman FL plasma supply**: voltage, current and arc count polled at
+2 Hz on the slow control loop, shown on a Hardware-tab card with no setpoint
+inputs, and logged into both the manual log and the per-run CSV. **The one
+command this program sends it is HV OFF** at run end or abort (requested
+2026-08-21) — preserving the front-panel levels, since the FL's Set frame
+always carries them. There is still no way to set a level or turn HV on, and
+`disconnect()` still commands nothing. Setpoint control remains a deliberate
+not-yet (`docs/CONTROL_MODEL.md`, `docs/GLASSMAN_FL.md`).
+
+The header **alert chip** shows only conditions that are true right now (fill
+pressure off setpoint, plasma out, a disconnected or faulted device) and
+clears itself when they clear; it used to pin the newest error event for two
+minutes. The event log is the history.
 
 Full history — everything shipped and everything still open — is in the
 **bd** issue tracker (`bd list --status=closed`, `bd ready`), not just this

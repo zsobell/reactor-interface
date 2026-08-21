@@ -1,11 +1,11 @@
 # Identifying what is wired where
 
-> **Status (2026-08-01): identification is essentially complete.** All inputs
-> (pressure, 3 Baratrons, stage TC) and all 11 valves are mapped — see
-> [HARDWARE.md](HARDWARE.md) and `config/reactor.yaml`. This document is the
-> *method*, kept for the remaining loose ends (verify the two precursor Baratrons
-> and the `rpm_top` vs `rpm_bottom` fill valve in the lab) and for any hardware
-> added later.
+> **Status (2026-08-06): identification is complete.** All inputs (pressure, 3
+> Baratrons, stage TC, bubbler TC) and all 11 valves are mapped and confirmed,
+> including the last two loose ends — which precursor Baratron is which, and
+> `rpm_top` as the precursor-1 fill valve, both confirmed by Zach 2026-08-06.
+> See [HARDWARE.md](HARDWARE.md) and `config/reactor.yaml`. What follows is the
+> *method*, kept for any hardware added later.
 
 Every channel was found the same way: **change one thing, look at what moved.**
 No guessing from labels, folder names, or documentation that might describe a
@@ -52,9 +52,10 @@ essentially 0 V, same as an unconnected input. Only `ai2` showed anything at all
 `--threshold` is in volts. At 0.02 V a 10 Torr Baratron reports at about
 0.02 Torr, so lower it if you are working with small changes.
 
-The HCPES foreline may be identifiable without touching anything: if the
-foreline pump is running, that gauge should read clearly above zero while the
-two predose volumes sit at base.
+**How these three were actually settled:** `ai0` gave itself away by rising to
+2.72 Torr under 5 sccm Ar while the others stayed put. `ai1` and `ai2` were
+separated by their resting offsets — the lower reading is precursor 1, the
+higher precursor 2 — confirmed by Zach 2026-08-06.
 
 ### Also needed: each head's full-scale range
 
@@ -136,38 +137,25 @@ Do not run it casually.
 
 ### RULED OUT: reading valve state back from the DAQ
 
-Tested 2026-07-30 with several valves physically ON (Ar MFC to remote, a
-precursor valve, plasma ground). Result: **all 16 digital inputs low, and every
-spare analog input at its base-pressure baseline.** Nothing on the DAQ reflects
-valve state.
+The attractive idea was to identify valves with nothing energised from
+software: `cDAQ1Mod3/port0` has 16 digital **inputs**, so if either control box
+wired position or status feedback back to the DAQ, flipping a valve by hand at
+the box would show up there. `tools/watch_channels.py` was written to catch
+exactly that — it baselines every input and prints a line whenever one moves.
 
-Conclusion: there is no valve-position feedback wired to this DAQ. Flipping a
-valve by hand — or remotely — cannot identify which line drives it, because the
-DAQ only *commands* the outputs and reads nothing back. Both remaining methods
-below require someone physically at the box.
+It does not work here. Tested 2026-07-30 with several valves physically ON (Ar
+MFC to remote, a precursor valve, plasma ground): **all 16 digital inputs low,
+and every spare analog input at its base-pressure baseline.** Nothing on the
+DAQ reflects valve state.
 
-### The chosen method here: flip them by hand and watch  [does not work — see above]
+Conclusion: there is no valve-position feedback wired to this DAQ. The DAQ only
+*commands* the outputs and reads nothing back, so every remaining method needs
+someone physically at the box. This is also why the program persists
+last-commanded valve state to `config/valve_state.json` rather than reading it
+(see [CONTROL_MODEL.md](CONTROL_MODEL.md)).
 
-`cDAQ1Mod3/port0` has 16 digital **inputs**. If either control box wires position
-or status feedback back to the DAQ, flipping a valve at the box will show up
-there — identifying it with nothing energised from software.
-
-All 16 read `low` at rest (checked 2026-07-30), which neither confirms nor rules
-out feedback; it just means nothing was actuated at the time.
-
-Run the watcher, then go and flip valves at the box:
-
-```bash
-.venv\Scripts\python.exe -m tools.watch_channels
-```
-
-It takes a baseline and then prints a timestamped line whenever any digital input
-changes state or any analog input moves. Flip one valve, note what it prints,
-flip the next. Read-only throughout — it creates input tasks only and cannot
-drive an output.
-
-If nothing appears when you flip a valve, then feedback is not wired and
-identification has to come from tracing the cable or from supervised toggling.
+`watch_channels` is still the right tool for **inputs** — it is how the
+Baratrons were separated above.
 
 ---
 

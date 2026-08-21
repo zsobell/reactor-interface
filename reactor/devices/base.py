@@ -36,9 +36,6 @@ class Reading:
 class Device(abc.ABC):
     """Base for anything with a connection lifecycle and readable channels."""
 
-    #: dotted prefix for this device's reading keys
-    prefix: str = ""
-
     def __init__(self, dev_id: str, label: str = "") -> None:
         self.id = dev_id
         self.label = label or dev_id

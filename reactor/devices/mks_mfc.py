@@ -1,35 +1,55 @@
 """MKS G50 mass flow controllers.
 
-Reads over the device's own HTTP interface; writes the setpoint over Modbus TCP.
+Flow, temperature and setpoint over Modbus TCP; setpoint writes over Modbus;
+full scale and identity over the device's own HTTP interface.
 
 --------------------------------------------------------------------------
-  WHY HTTP FOR READING
+  THE REGISTER MAP COMES FROM THE DEVICE
 --------------------------------------------------------------------------
-These are MKS G50 units (`GM50A...`, product `G_MFC_A_Modbus`). Each serves a
-small web UI whose data comes from plain JavaScript files - `iobuf.js`,
-`deviceid.js`, `device_html.js`, `mfc.js` - that are just `name = value;` lines.
-Fetching them is a GET: read-only, and authoritative in a way a guessed register
-is not.
+These are MKS G50 units (`GM50A...`, product `G_MFC_A_Modbus`). Each one serves
+its own Modbus register table at `http://<host>/modbus.html`. That page is the
+source for every address in MfcRegisters - not the generic MKS documentation,
+which describes a different family and does not apply here:
 
-That matters because of what a register sweep got wrong here. Scanning found
-`0xA000` (setpoint), `0xC000`, `0xC002` and `0xC006`, and it was tempting to call
-`0xC000` "flow". Then the Ar unit was set to 5 sccm and actually flowed 5 sccm -
-while `0xC000` and `0xC002` both sat at 0.1. Neither is flow. The Modbus map for
-this family is not the one in the generic MKS documentation, and reading alone
-could not find flow.
+    I/O              FC(read)  Register  Regs  Unit    Type
+    Flow                4      0x4000     2    sccm    float
+    Temperature         4      0x4002     2    degC    float
+    Valve Position      4      0x4004     2    0-100%  float
+    Flow Set Point      3      0xA000     2    sccm    float
+    Opt_Kp/Ki/Kd        3      0xC000/2/4 2    -       float
 
-Meanwhile `iobuf.js` states it outright:
+**The two function codes are the whole trick.** Measured values are INPUT
+registers (FC 4); settable ones are HOLDING registers (FC 3).
 
-    iobuf.flow_sensor  = 5.000144      actual flow, sccm
-    iobuf.setpoint     = 5.000000      commanded setpoint, sccm
-    iobuf.full_scale   = 29.000000     sccm  <-- differs per device AND per gas
+An earlier attempt here concluded flow was not reachable over Modbus at all, and
+that conclusion was wrong in two ways worth remembering. It swept with FC 3 only,
+so `0x4000` answered "illegal data address" and looked like the wrong address -
+it is the right address, on the wrong function code. And it nearly labelled
+`0xC000` "flow" because that register sat at 0.1 while idle; `0xC000` is
+`Opt_Kp`, a PID gain, which is why it stayed at 0.1 while the Ar unit really
+flowed 5 sccm. Verified 2026-08-17: FC 4 `0x4000` tracks `iobuf.flow_sensor` on
+all three units, to 4 decimal places and including sign.
 
-**Full scale must be read, not configured.** It changes when the gas is changed
-(Ar 29, H2 10, N2 50 on this system), and every flow number and setpoint limit
-scales with it.
+Reading over Modbus is also ~600x faster: ~1 ms against 450-900 ms for one
+`iobuf.js` GET. That is not a micro-optimisation - the HTTP poll was slower than
+the whole telemetry tick and used to throttle every logged sample to ~2 Hz.
 
 --------------------------------------------------------------------------
-  WHY MODBUS FOR WRITING
+  WHAT STILL COMES OVER HTTP, AND WHY
+--------------------------------------------------------------------------
+`iobuf.js`, `deviceid.js`, `device_html.js` and `mfc.js` are plain
+`name = value;` files behind the web UI; fetching them is a GET, so read-only.
+
+    iobuf.full_scale = 29.000000     sccm  <-- differs per device AND per gas
+
+**Full scale must be read, not configured**, and it is not in the Modbus map.
+`0xC006` is called `Opt_FullScale` and is NOT it: it reads 100.0 on all three
+units, whose real full scales are 29 / 10 / 50 sccm. Full scale changes with the
+gas, and every flow percentage and setpoint limit scales with it, so it is read
+over HTTP at connect and on the slow identity refresh - never in the hot path.
+
+--------------------------------------------------------------------------
+  SETPOINT UNITS
 --------------------------------------------------------------------------
 `0xA000` holds the setpoint in ENGINEERING UNITS (sccm), not percent of full
 scale. Confirmed: with full scale at 29 sccm the register read exactly 5.0 for a
@@ -53,9 +73,8 @@ from .base import Device, Reading
 #  HTTP data access
 # --------------------------------------------------------------------------- #
 
-#: The four JS objects the web UI loads. `iobuf` carries the live process values.
-JS_OBJECTS = ("iobuf", "deviceid", "device_html", "mfc")
-
+#: The web UI loads four such files - `iobuf` (live process values), `deviceid`,
+#: `device_html` and `mfc` - each a list of `obj.key = value;` lines.
 _ASSIGN = re.compile(r"^(\w+)\.(\w+)\s*=\s*(.+?);\s*$", re.M)
 
 
@@ -90,13 +109,24 @@ def _f(d: dict[str, str], key: str) -> float | None:
 
 @dataclass
 class MfcRegisters:
-    """Holding-register addresses, 32-bit IEEE-754 float over two registers.
+    """Register addresses, 32-bit IEEE-754 float over two registers.
 
-    Only the setpoint is used. See the module docstring for why the other
-    registers found by scanning are not trusted as flow/valve position.
+    Taken from the device's OWN register table, served at `http://<host>/
+    modbus.html` - not guessed, and not from the generic MKS documentation
+    (which describes a different family). Every address below is quoted from
+    that page; the flow read is additionally verified against `iobuf.flow_sensor`
+    on all three units.
+
+    Note the two different function codes. The measured values live in INPUT
+    registers (FC 4) and the settable ones in HOLDING registers (FC 3). Reading
+    0x4000 with FC 3 returns "illegal data address", which is exactly how an
+    earlier attempt concluded the address was wrong - see the module docstring.
     """
 
-    setpoint_read: int = 0xA000    # CONFIRMED: reads the setpoint, in sccm
+    flow_read: int = 0x4000        # CONFIRMED: input reg (FC 4), actual flow, sccm
+    temp_read: int = 0x4002        # input reg (FC 4), degC (per modbus.html)
+    valve_pos_read: int = 0x4004   # input reg (FC 4), 0-100% (per modbus.html)
+    setpoint_read: int = 0xA000    # CONFIRMED: holding reg (FC 3), setpoint, sccm
     setpoint_write: int = 0xA000
     word_order: Literal["big", "little"] = "big"   # CONFIRMED by decode sanity
 
@@ -217,13 +247,26 @@ class MksMfc(Device):
         if self._tick % self.SLOW_EVERY == 1:
             await self._refresh_identity()
 
+        # Fast path: Modbus. One HTTP poll of iobuf.js measures 0.45-0.9 s on
+        # this hardware, which is slower than the whole telemetry tick and used
+        # to throttle every logged sample; the same values over Modbus take
+        # ~1 ms. Full scale still comes from HTTP (see _read_modbus): it is not
+        # in the Modbus map, and 0xC006 "Opt_FullScale" is NOT it - it reads
+        # 100.0 on all three units whose real full scales are 29/10/50 sccm.
+        if self._client is not None:
+            got = await self._read_modbus(p)
+            if got is not None:
+                return got
+
         try:
             io = await asyncio.to_thread(http_fetch_js, self.cfg.host, "iobuf")
         except Exception as exc:
+            # Same keys the success path below publishes, so a failed poll marks
+            # the readings the UI actually shows rather than inventing a key.
             return [
                 self._bad(f"{p}.flow", "sccm", exc),
                 self._bad(f"{p}.setpoint", "sccm", exc),
-                self._bad(f"{p}.valve", "%", exc),
+                self._bad(f"{p}.temp", "C", exc),
             ]
 
         fs = _f(io, "full_scale")
@@ -233,9 +276,9 @@ class MksMfc(Device):
         flow = _f(io, "flow_sensor")
         setpoint = _f(io, "setpoint")
         temp = _f(io, "temp_sensor")
-        # valve_command is a raw drive number, not a percentage. Normalise it
-        # against the observed full-open command so the UI shows something
-        # comparable; the raw value is kept alongside.
+        # valve_command is a raw drive number, not a percentage, and nothing is
+        # known about what full-open reads - so it is published raw and left to
+        # the reader rather than scaled into a made-up percentage.
         valve_raw = _f(io, "valve_command")
 
         self.last_error = ""
@@ -249,6 +292,46 @@ class MksMfc(Device):
             Reading(key=f"{p}.full_scale", value=self.full_scale_sccm, unit="sccm"),
         ]
         if flow is not None and self.full_scale_sccm:
+            out.append(Reading(key=f"{p}.flow_pct",
+                               value=100.0 * flow / self.full_scale_sccm, unit="%"))
+        return out
+
+    async def _read_modbus(self, p: str) -> list[Reading] | None:
+        """Flow / temperature / setpoint over Modbus, or None to fall back.
+
+        Returns None (rather than raising or publishing an error) on any Modbus
+        trouble, so a device whose session has gone stale simply drops back to
+        the HTTP path for that poll instead of showing the operator a dead
+        channel. `full_scale` is whatever the last HTTP identity refresh found -
+        it is not exposed over Modbus.
+        """
+        regs = self.regs
+        try:
+            async with self._lock:
+                flow_rr = await self._client.read_input_registers(
+                    regs.flow_read, count=2, **self._kw)
+                temp_rr = await self._client.read_input_registers(
+                    regs.temp_read, count=2, **self._kw)
+                sp_rr = await self._client.read_holding_registers(
+                    regs.setpoint_read, count=2, **self._kw)
+        except Exception as exc:
+            self.last_error = f"modbus read: {type(exc).__name__}: {exc}"
+            return None
+        if flow_rr.isError() or temp_rr.isError() or sp_rr.isError():
+            return None
+
+        flow = regs.decode_float(list(flow_rr.registers))
+        temp = regs.decode_float(list(temp_rr.registers))
+        setpoint = regs.decode_float(list(sp_rr.registers))
+
+        self.last_error = ""
+        out = [
+            Reading(key=f"{p}.flow", value=flow, unit="sccm"),
+            Reading(key=f"{p}.setpoint", value=setpoint, unit="sccm"),
+            Reading(key=f"{p}.temp", value=temp, unit="C"),
+            Reading(key=f"{p}.full_scale", value=self.full_scale_sccm, unit="sccm"),
+        ]
+        if self.full_scale_sccm:
             out.append(Reading(key=f"{p}.flow_pct",
                                value=100.0 * flow / self.full_scale_sccm, unit="%"))
         return out

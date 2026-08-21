@@ -61,6 +61,11 @@ def _iso(ep: float) -> str:
     return datetime.fromtimestamp(ep).isoformat(timespec="milliseconds")
 
 
+#: Newline, as a name: this file's literals travel through tooling that
+#: mangles a bare backslash-n.
+LF = chr(10)
+
+
 async def main() -> int:
     c = Checker("test_ellipsometer_merge")
 
@@ -120,26 +125,80 @@ async def main() -> int:
     run = parse_reactor_run(RUN)
     resC = merge(dyn, cleanside, run)
     c.check("mode is combined", resC.mode == "combined", resC.mode)
-    c.check("paused sample dropped (6 -> 5 rows)", resC.n_points == 5, f"{resC.n_points}")
-    c.check("warns it dropped a paused sample",
-            any("paused" in w for w in resC.warnings), str(resC.warnings))
+    # UNION of instants: 5 kept reactor samples (1 of 6 paused, dropped) plus
+    # the ellipsometry points that land inside the cycling window on a
+    # non-paused instant. Of the 5 FS-1 points (BASE+0.5 .. +4.5): +1.5 is
+    # nearest the paused sample, and +3.5/+4.5 are past the run's last sample
+    # (BASE+3.0) - so 2 survive.
+    reactor_rows = [r for r in resC.rows if r["source"] == "reactor"]
+    ell_rows = [r for r in resC.rows if r["source"] == "ellipsometer"]
+    c.check("paused reactor sample dropped (6 -> 5)", len(reactor_rows) == 5,
+            f"{len(reactor_rows)}")
+    c.check("ellipsometry points kept as their own rows", len(ell_rows) == 2,
+            f"{len(ell_rows)}")
+    c.check("total rows are the union", resC.n_points == 7, f"{resC.n_points}")
+    c.check("warns it dropped a frozen sample",
+            any("reignite" in w or "pause" in w for w in resC.warnings),
+            str(resC.warnings))
+    c.check("warns it dropped out-of-window ellipsometry",
+            any("ellipsometry point" in w for w in resC.warnings), str(resC.warnings))
     c.check("header keyed by cycle_number", resC.header[0] == "cycle_number", str(resC.header[:4]))
-    for col in ("cycle_number", "Thick(A).1", "pressure", "inst_ammeter", "recipe_step"):
+    for col in ("cycle_number", "source", "Thick(A).1", "pressure", "inst_ammeter",
+                "recipe_step"):
         c.check(f"header has {col}", col in resC.header)
     cyc = [float(r["cycle_number"]) for r in resC.rows]
-    c.check("cycle numbers are the non-paused ones", cyc == [0.10, 0.30, 0.60, 1.10, 1.40], f"{cyc}")
-    c.check("cycle_number monotonic", all(cyc[i] <= cyc[i + 1] for i in range(4)))
-    c.check("thickness at first row == 2.0",
-            abs(float(resC.rows[0]["Thick(A).1"]) - 2.0) < 1e-6, resC.rows[0]["Thick(A).1"])
-    c.check("thickness interpolated at +1.0s == 3.0",
-            abs(float(resC.rows[1]["Thick(A).1"]) - 3.0) < 1e-6, resC.rows[1]["Thick(A).1"])
+    c.check("cycle numbers interleave both sources in time order",
+            cyc == [0.10, 0.10, 0.30, 0.60, 1.10, 1.10, 1.40], f"{cyc}")
+    c.check("cycle_number monotonic", all(cyc[i] <= cyc[i + 1] for i in range(len(cyc) - 1)))
+    # Nothing is resampled: a reactor row carries no thickness and an
+    # ellipsometry row carries no reactor channel. Blank means "not measured
+    # here", which is the whole point of the union.
+    c.check("reactor rows have blank thickness",
+            all(r["Thick(A).1"] == "" for r in reactor_rows),
+            str([r["Thick(A).1"] for r in reactor_rows]))
+    c.check("ellipsometry rows have blank reactor channels",
+            all(r["pressure"] == "" and r["inst_ammeter"] == "" for r in ell_rows))
+    c.check("ellipsometry row carries its own measured thickness (2.0 at +0.5s)",
+            abs(float(ell_rows[0]["Thick(A).1"]) - 2.0) < 1e-6, ell_rows[0]["Thick(A).1"])
     c.check("reactor channel carried (pressure)",
-            abs(float(resC.rows[0]["pressure"]) - 0.01) < 1e-6, resC.rows[0]["pressure"])
+            abs(float(reactor_rows[0]["pressure"]) - 0.01) < 1e-6, reactor_rows[0]["pressure"])
 
     # -- merge_text combined end-to-end ------------------------------------ #
+    c.section("merge: the same run in both export formats merges identically")
+    # Since 2026-08-21 the run export has no `paused` column - a reignite or an
+    # operator pause names itself in `recipe_step` instead. Files written before
+    # that still have the column, so the parser honours BOTH and must reach the
+    # same answer either way, or older runs stop merging correctly.
+    RUN_NEW = LF.join([
+        "elapsed_s,iso_time,pressure,inst_ammeter,recipe_cycle,cycle_number,recipe_step",
+        f"0.0,{_iso(BASE+0.5)},0.010,0.0005,1,0.10,dose",
+        f"0.5,{_iso(BASE+1.0)},0.020,0.0005,1,0.30,wait",
+        f"1.0,{_iso(BASE+1.5)},0.020,0.0000,1,0.30,reignite",       # was paused=1
+        f"1.5,{_iso(BASE+2.0)},0.030,0.0005,1,0.60,electron_beam",
+        f"2.0,{_iso(BASE+2.5)},0.030,0.0005,2,1.10,dose",
+        f"2.5,{_iso(BASE+3.0)},0.020,0.0005,2,1.40,wait",
+    ])
+    run_new = parse_reactor_run(RUN_NEW)
+    c.check("new format flags the same rows frozen", run_new.paused == run.paused,
+            f"{run_new.paused}")
+    c.check("no 'paused' column, so it is not mistaken for a data channel",
+            "paused" not in run_new.channels, str(run_new.channels))
+    c.check("same data channels either way", run_new.channels == run.channels,
+            str(run_new.channels))
+    resN = merge(dyn, cleanside, run_new)
+    c.check("merged row count matches the old format",
+            resN.n_points == resC.n_points, f"{resN.n_points} vs {resC.n_points}")
+    c.check("merged cycle numbers match the old format",
+            [r["cycle_number"] for r in resN.rows]
+            == [r["cycle_number"] for r in resC.rows])
+    # An operator pause is the other label, and must drop the same way.
+    RUN_HELD = RUN_NEW.replace(",reignite", ",pause")
+    c.check("an operator 'pause' row is dropped too",
+            sum(parse_reactor_run(RUN_HELD).paused) == 1)
+
     c.section("merge_text convenience wrapper (combined)")
     res3 = merge_text(DYN, CLEANSIDE, RUN)
-    c.check("combined via merge_text", res3.mode == "combined" and res3.n_points == 5,
+    c.check("combined via merge_text", res3.mode == "combined" and res3.n_points == 7,
             f"{res3.mode}, {res3.n_points}")
     c.check("csv first col is cycle_number",
             res3.to_csv().splitlines()[0].startswith("cycle_number"))

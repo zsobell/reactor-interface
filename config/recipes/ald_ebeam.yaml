@@ -2,6 +2,14 @@ name: "ALD + e-beam (precursor 1)"
 notes: >
   Electron-beam ALD-style run on precursor 1.
 
+  NOTE: this file predates the Run tab and is NOT what the UI uses. Pressing
+  Start run builds the recipe from the UI parameters instead
+  (control/recipe.py: build_ald_recipe), which is the path that has actually
+  been run and tuned on hardware, and the only one with gas scheduling. This
+  file is kept as a worked example of the YAML recipe format and as a way to
+  run a fixed sequence without the UI. Its numbers below are ORIGINAL
+  placeholders, deliberately left alone - they are not the tuned values.
+
   Every value here is meant to be tuned - these are starting numbers, not
   process settings. Change durations, the dose pressure, and the cycle count
   freely; they are just YAML.
@@ -22,10 +30,13 @@ notes: >
       "flag" is raised in the event log - it does NOT stop the run.
 
   >>> CHECK BEFORE RUNNING <<<
-    * fill valve rpm_top is the "top" valve of the precursor-1 (right) manifold;
-      switch to rpm_bottom if that turns out reversed.
     * target_torr (dose pressure), all durations, cycles, and min_current
-      (500 uA here) are placeholders to set for your process.
+      (500 uA here) are placeholders to set for your process. The reignite
+      pulse/settle below (0.5/1.0 s) are the original guesses; the UI path
+      was since tuned to 0.10/0.15 s.
+    * The hardware here is confirmed, not assumed: rpm_top fills the
+      precursor-1 full volume and gauge.prec1_dose (ai1) is its Baratron,
+      both confirmed by Zach 2026-08-06 (docs/HARDWARE.md).
 
 # runs once, in the background, for the whole run
 setup:

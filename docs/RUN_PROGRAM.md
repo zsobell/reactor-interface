@@ -3,9 +3,12 @@
 The electron-beam run modes, the recipe engine underneath them, and the GUI
 around them. First built 2026-08-01 as a single ALD-only workflow; the run
 panel now supports two modes and a pre-start sequence, added 2026-08-05.
-Control logic is verified with fake-DAQ / fake-supervisor harnesses in the
-scratchpad on every change, and **EE-ALD has now been run and tuned on real
-hardware** (`reactor-alz`, `reactor-2z1`, confirmed 2026-08-06).
+Control logic is verified on every change by `python -m tests.run_all`, which
+runs the real `Supervisor` and recipe engine against the fake devices in
+`reactor/testing/virtual_reactor.py` (see [tests/README.md](../tests/README.md)
+for what that proves and what it flatly cannot), and **EE-ALD has now been run
+and tuned on real hardware** (`reactor-alz`, `reactor-2z1`, confirmed
+2026-08-06).
 
 ## Two run modes, one panel
 
@@ -226,17 +229,128 @@ wheel-zoom — it would hijack page scroll.
   press. Requires the browser to stay open through the run.
 - **Server-side run export** (`DataLogger.start_run_export` /
   `write_run_sample` / `stop_run_export`, in `reactor/datalog.py`): opens
-  `data/<started-at-stamp>_<recipe-name>_run.csv` the instant *any* recipe
+  `data/<run>/<stem>_run.csv` the instant *any* recipe
   starts (`Supervisor.start_recipe`, so this covers file recipes too, not
   just EE-ALD/EE-CVD), and appends one row per telemetry tick (5 Hz
   default) straight from the same sample dict the trend buffer uses — no
   extra device I/O. Columns are the same sample dict, dynamically
-  discovered, plus `recipe_cycle`/`recipe_step`, so it's a *richer* trace
-  than the client's fixed six columns. Closed in `Supervisor.finish_run()`,
-  which the recipe runner calls however the run ends — done, aborted, or
-  crashed — so a closed browser no longer loses anything. Independent of
-  the operator's own Data Logging toggle; no button to press. Status
-  (active / path / row count) is in `state().logging.run_export`.
+  discovered, plus `recipe_cycle`/`cycle_number`/`recipe_step`, so it's a
+  *richer* trace than the client's fixed six columns.
+
+  **This is the raw file** — every telemetry tick, nothing dropped, including
+  the samples taken while the clock was frozen. `_bycycle.csv` and the merged
+  file are the filtered views of it.
+
+  `recipe_step` says what was happening, and that includes the two things that
+  are *not* recipe steps:
+
+  | `recipe_step` | meaning |
+  |---|---|
+  | `reignite` | the plasma was out and being restruck |
+  | `pause` | the operator had the run paused |
+  | anything else | the step's own description, e.g. `electron beam 10 s` |
+
+  So narrowing a raw run file down to just the deposition is
+  `recipe_step not in ("reignite", "pause")`, and that is exactly the filter
+  `_bycycle.csv` already applies.
+
+  There used to be a separate `paused` 0/1 column beside the step, so a reignite
+  logged as *the electron-beam step, flagged paused*. A reignite is an event in
+  its own right, not part of the step it interrupts (operator request,
+  2026-08-21) — one descriptive column instead of two. `RecipeProgress.log_step`
+  produces the label; `RecipeRunner.pause_reason` says which freeze is active,
+  operator winning over reignite when both are. The merge reads **both** forms,
+  so run files written before the change still merge correctly.
+
+  **A cell is filled only on the rows where that channel was actually
+  read.** The three poll loops run at different rates — DAQ `site.loop_hz`
+  (~2 Hz, which also carries the HV supply), instruments `site.current_hz`
+  (~5 Hz, and the row cadence), MFCs `site.mfc_hz` (~1 Hz) — so most rows
+  carry a fresh ammeter reading and a blank pressure, flow or HV value. That
+  is deliberate: repeating the last value would claim measurements that never
+  happened. Blank means *not sampled here*, not zero. Commanded state
+  (`dosing`, `beam_on`) is never blanked. The live UI is unaffected — it keeps
+  showing the last known value.
+
+  The **Glassman HV supply** contributes `hv_<id>_voltage` (V),
+  `hv_<id>_current` (mA) and `hv_<id>_arcs` (count) — `hv_hv_*` with the
+  current config. The program logs what the supply reports; the only thing it
+  ever commands is HV off at the end of the run. Column names carry no units
+  on purpose, so the analysis page's saved plot layout keeps matching them.
+  See [GLASSMAN_FL.md](GLASSMAN_FL.md).
+
+  (MFCs used to be polled inside the instrument loop, where a 0.45–0.9 s
+  HTTP read throttled every sample and the export logged at 2.1 Hz rather
+  than 5. See `Supervisor._mfc_loop`.)
+
+  Closed in
+  `Supervisor.finish_run()`, which the recipe runner calls however the run
+  ends — done, aborted, or crashed — so a closed browser no longer loses
+  anything. Independent of the operator's own Data Logging toggle; no button
+  to press. Status (active / path / row count) is in
+  `state().logging.run_export`.
+
+Two more files are written automatically alongside it, same stem:
+
+- `<stem>_bycycle.csv` — the same channels keyed by **fractional cycle
+  number** instead of time, with paused (reignite / operator-pause) samples
+  left out, so a property-vs-cycle plot is clean with no post-processing. See
+  `RecipeRunner.cycle_fraction`.
+- `<stem>_run_params.txt` — a one-time report of the exact parameters the
+  run was launched with: header block (run, recipe, mode, cycles, cycle
+  length, nominal run time), the plain-English summary of the cycle
+  architecture and gas timeline, every UI parameter, and every setup / cycle /
+  teardown step. Written for EE-CVD too.
+
+  **Plain text, not JSON** (changed 2026-08-21). It was a JSON dump under a
+  stem of its own, `<stamp>_ald_run_params.json`, timestamped at the moment it
+  ran so it could land a second off the rest of the set. Zach could not open
+  it ("I dont know how to open them"), which is fair — `.json` has no default
+  handler on this machine. It is written UTF-8 **with BOM** so Notepad renders
+  the em-dash in the summary. `DataLogger.format_run_params` builds it and is
+  importable on its own, which is how the old `.json` files on disk were
+  re-rendered as `.txt`.
+
+### One folder per run
+
+Every file a run writes goes into `data/<run name>/` — `data/Mo-015/` — so a
+run is one thing to open, copy or send:
+
+```
+data/Mo-015/
+    Mo-015_260821_131320_run.csv              trace, by time
+    Mo-015_260821_131320_bycycle.csv          trace, by fractional cycle
+    Mo-015_260821_131320_run_params.txt       the settings, readable
+    Mo-015_260821_131256_ellipsometer.csv     FS-1 sidecar for this run
+    Mo-015_260821_131320_reactor_synced.csv   the post-run merge, once made
+```
+
+Requested 2026-08-21, when a flat `data/` holding five files per run stopped
+being navigable. Details that matter:
+
+- The folder is named for the **run**, not for a run's filename stem, so
+  repeated attempts at Mo-015 collect together and are told apart by the
+  timestamp already in each filename. An **unnamed** run falls back to the bare
+  timestamp, `data/260821_131320/` (not the full stem, which would drag the
+  recipe slug into the folder name).
+- `DataLogger.run_dir` is set by `start_run_export` — the first moment both the
+  run name and the run's start stamp are known — and cleared by
+  `stop_run_export`. Outside a run, files fall back to `data/` itself.
+- The **ellipsometer sidecar** is the awkward one: the FS-1 streams
+  continuously, so its acquisition almost always opens *before* Start run, when
+  neither the run name nor the folder exists. It therefore starts loose in
+  `data/`, and `_adopt_open_sidecar` renames and moves it into the run folder
+  when the run begins. Windows will not rename a file with an open handle, so
+  that closes, moves, and reopens in append mode; nothing already captured is
+  lost. A sidecar opened *during* a run goes straight into the folder.
+- The **merged file** is written next to the reactor run it was built from
+  (`/api/ellipsometer/merge`), not loose in `data/`.
+- `/api/data/files` recurses (`rglob`) and reports each name **relative to the
+  data dir** — `Mo-015/Mo-015_..._run.csv` — which is what the analysis page's
+  pickers show and what `/api/data/file?name=` resolves. It sorts by mtime, not
+  by name: with folders in play, path order is not chronological.
+- Files written before this change still work; the listing finds them at either
+  level. The ones on disk were moved into folders by hand at the same time.
 
 ### Hardware tab
 
@@ -250,10 +364,90 @@ default.
 ### Diagnostics tab
 
 Valve-identification sweep, data logging controls, the connections table,
-and the event log. A pinned header chip surfaces the newest
-error/trip/safety/flag event for two minutes regardless of which tab is
+**ellipsometer sync**, and the event log. A pinned header chip surfaces the
+newest `error` or `flag` event for two minutes regardless of which tab is
 open, so a fill-pressure flag during a run on the Run tab isn't missed just
 because the log itself lives elsewhere.
+
+**Ellipsometer sync** closes the loop on the FS-1: during a run the reactor
+subscribes to the instrument's live broadcast and writes a per-acquisition
+sidecar of `(fs_time -> reactor_clock)` pairs. Afterwards you refit the run in
+the FS-1 software, download that file, drop it in here with this run's sidecar
+and run export, and get back one plot-ready CSV, keyed by fractional cycle
+number with reignite-paused samples dropped.
+
+The output is a **union of instants, not a resampling**: every reactor sample
+keeps its own row (ellipsometry columns blank) and every FS-1 measurement gets
+its own row at its true time (reactor columns blank), told apart by a `source`
+column. Nothing is interpolated onto anything else, so every number in the file
+is one that was actually measured. The single exception is `cycle_number` on an
+ellipsometry row, which is interpolated from the reactor's own recorded
+time→cycle curve — the cycle number is a function of the clock, not a
+measurement, and without it those rows could not be plotted against cycle at
+all. An FS-1 point taken while the run was paused, or outside the cycling
+window, is dropped rather than given a position the tool was never at.
+
+The join fits a line through the sidecar
+pairs rather than matching row-for-row, so a missed live sample doesn't break
+it. The live thickness the stream carries is the instrument's uncalibrated
+fit and is never treated as the answer. Code:
+`reactor/analysis/ellipsometer_merge.py`, `POST /api/ellipsometer/merge`.
+
+## The Analysis page (`/analysis`) — post-run plotting
+
+**Prototype** (`reactor-6hd`). A separate page, not a fourth tab, and
+deliberately so: it reads finished CSVs and can touch no hardware, so it stays
+out of the control UI entirely and can be opened alongside a live run. Linked
+from the header of the main interface and from the Ellipsometer sync card.
+
+It plots any CSV the reactor writes, picked from the data folder (read-only,
+via `GET /api/data/files` and `/api/data/file`) or dropped in from disk:
+
+| File | What it is |
+|---|---|
+| `*_bycycle.csv` | channels vs fractional cycle number, reignite-paused samples already dropped — the usual one |
+| `*_reactor_synced.csv` | the above unioned with the measured ellipsometry rows, from Ellipsometer sync |
+| `*_run.csv` | the raw per-time run export |
+
+A **grid of plot cells** (1–4 columns, adjustable height). Each cell picks its
+own **Y1**, an optional **Y2** on a second right-hand axis, and an **X**
+column — defaulting to `cycle_number` when the file has one, which is the
+point of the by-cycle export. Every axis takes an explicit **min/max** (blank
+= auto-fit) and Y axes have a **log** toggle, since chamber pressure spans
+decades. Hovering gives a crosshair and a value readout; each plot exports to
+**PNG** or **CSV**, both named after the source file and the plot itself.
+
+A 0/1 column — `beam_on`, `dosing`, `paused` — is detected automatically and
+drawn as a **step**, because it is a state, not a measurement: interpolating
+between samples would draw a valve as half open.
+
+**The layout persists in `localStorage` and is re-applied by column name**, so
+the intended workflow is: run → refit in the FS-1 software → Ellipsometer sync
+(which now also saves the merged CSV into the data folder) → open Analysis,
+and the same grid of plots repopulates against the new file. A column the new
+file does not have keeps its selection, and the plot says so in amber rather
+than silently blanking. `Export layout` / `Import layout` move a grid between
+machines.
+
+### Auger (AES) spectra
+
+A drop box under Ellipsometer sync takes the AES tool's text export — a header
+line (`Element ; Region 1 of 1; … ; AES;`) over `kinetic energy (eV)` and
+intensity columns — and puts the file straight into its own plot at the top of
+the grid: autoscaled on both axes, the same min/max boxes as every other plot,
+no second Y axis.
+
+A spectrum is its own **dataset**, held apart from the loaded run CSV, because
+it shares no x axis with a deposition (kinetic energy, not cycle number).
+Nothing is merged: loading a new run file repopulates the CSV plots and leaves
+the Auger ones alone. A file holding several element windows gets one plot per
+window. Spectra are stored beside the layout in `localStorage` so they come
+back on a reload; re-dropping a file refreshes the plot it already has instead
+of stacking up a second one, and removing a spectrum's last plot drops the
+spectrum too.
+
+Not yet exercised on a real refit file end to end — that waits on
+`reactor-nde`.
 
 ## To actually run it in the lab
 
@@ -272,5 +466,12 @@ because the log itself lives elsewhere.
 
 ## Likely next iterations
 
+- Audit EE-CVD cycle timing the way EE-ALD was audited — `reactor-2ou`. The
+  EE-ALD clock is now pinned to 0.1 s by `tests/test_run_timing.py`; EE-CVD's
+  cycle clock (`_lit_s` / `_cycle_clock`, driven by the 0.2 s watchdog tick) has
+  not had the same treatment.
+- Validate the FS-1 ellipsometer sync across a real deposition — `reactor-nde`.
+- Decide whether stopping the server should ground the beam during a pre-start
+  — `reactor-4h9`.
 - Identify the NI 9265 current outputs — `reactor-5u2` (low priority, not
   needed for normal operation).

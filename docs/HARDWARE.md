@@ -31,14 +31,29 @@ NI-DAQmx driver 22.5.0. None of these are simulated devices.
 
 ### Serial ports
 
-Four Prolific USB-to-serial adapters: `COM3`, `COM4`, `COM5`, `COM6`.
-Purpose unknown — candidates are the gauge controller, a pump controller, or the
-MFCs if they are serial rather than Ethernet.
+Four Prolific USB-to-serial adapters: `COM3`, `COM4`, `COM5`, `COM6`. Purpose
+still unknown, and nothing in this program uses them. (Not the MFCs — those are
+Ethernet, confirmed below. Candidates are the gauge controller or a pump
+controller.) One data point since: **`COM4` asserts DSR and CD**, so something
+powered is attached to it, but it is silent and unidentified. The other three
+show no sign of anything connected.
+
+Plus one that *is* in use: **`COM8`, a TI TUSB3410 bridge — the Glassman HV
+supply's USB port.** See [Glassman FL supply](#glassman-fl-high-voltage-supply)
+below. Its COM number is not stable; a driver reinstall moved it from COM7.
 
 ### Other
 
-- **Keithley DMM6500** on USB. Not yet enumerated over VISA from this program;
-  the resource string still needs capturing.
+- **Keithley DMM6500** on USB — enumerated and in use; resource string and
+  identity under [Keithley DMM6500](#keithley-dmm6500) below.
+- **Film Sense FS-1 in-situ ellipsometer** — see
+  [FS-1 ellipsometer](#film-sense-fs-1-ellipsometer) below.
+- **XP Glassman FL1.5F1.0 high-voltage plasma supply** on USB (`COM8`) — see
+  [Glassman FL supply](#glassman-fl-high-voltage-supply) below.
+- **ACCES USB-AO16-8A** — 8-channel analog output board, plugged in and healthy
+  on the CyUSB driver since 2026-08-20. **Purpose not established.** It appeared
+  the same day as the Glassman and would suit analog programming of it via J1,
+  but nothing in this program uses it and Zach has not said what it is for.
 - LabVIEW 22.3.1 is installed and was running during discovery.
 
 ---
@@ -126,7 +141,12 @@ web server. Verified from the devices themselves:
 
 All calibrated on N2. All valves normally closed.
 
-#### Readings come over HTTP, not Modbus
+#### Full scale comes over HTTP, not Modbus
+
+Flow, temperature and setpoint are read over Modbus (see the register map
+below). **Full scale is not in the Modbus map and must come over HTTP.**
+`0xC006` is called `Opt_FullScale` and is *not* it — it reads 100.0 on all three
+units, whose real full scales are 29 / 10 / 50 sccm.
 
 Each device serves `iobuf.js`, `deviceid.js`, `device_html.js` and `mfc.js` —
 plain `name = value;` files behind the web UI. Fetching them is a GET, so it is
@@ -145,18 +165,43 @@ deviceid.conn_list                who is currently connected
 the selected gas — 29 / 10 / 50 sccm across these three — so a hardcoded value
 would silently mis-scale every flow number the moment a gas was changed.
 
-#### Why not Modbus for reading — a wrong answer that looked right
+#### The Modbus register map — from the device itself
 
-A read-only register sweep found only pages `0xA000`–`0xD000`, with `0xA000`
-(setpoint), `0xC000`, `0xC002` and `0xC006`. `0x4000` and `0x4004` — the addresses
-in the generic MKS documentation — return exception 2, illegal data address. Not
-this family's map.
+**Each MFC serves its own register table at `http://<host>/modbus.html`.** That
+page is the source for every address below (confirmed 2026-08-17):
 
-It was tempting to call `0xC000` "flow": it read 0.1 while idle, which looks like
-a zero offset. Then the Ar unit was set to 5 sccm and actually flowed 5 sccm —
-and `0xC000` and `0xC002` both *stayed* at 0.1. **Neither is flow.** Reading alone
-never found the flow register, and a plausible-looking assignment would have
-shipped as a wrong number labelled "flow".
+| I/O | FC (write) | FC (read) | Register | Regs | Unit | Type |
+|---|---|---|---|---|---|---|
+| Flow | — | **4** | `0x4000` | 2 | sccm | float |
+| Temperature | — | 4 | `0x4002` | 2 | degC | float |
+| Valve Position | — | 4 | `0x4004` | 2 | 0–100 % | float |
+| Flow Hours | — | 4 | `0x4008` | 2 | hrs | int |
+| Flow Totalizer | — | 4 | `0x400A` | 2 | sccm | int |
+| Flow Set Point | 16 | **3** | `0xA000` | 2 | sccm | float |
+| Ramp Rate | 16 | 3 | `0xA002` | 2 | msec | long |
+| Unit Type | 16 | 3 | `0xA004` | 2 | — | int |
+| Full Modbus Control | 16 | 3 | `0xA006` | 2 | — | int |
+| Reset / Open / Close / Flow Zero / En_Opt_in | 5 | 1 | `0xE000`–`0xE004` | 1 | — | int |
+| Opt_Kp / Opt_Ki / Opt_Kd / Opt_FullScale | 16 | 3 | `0xC000`/`2`/`4`/`6` | 2 | — | float |
+
+Measured values are **input registers (FC 4)**; settable ones are **holding
+registers (FC 3)**.
+
+##### The earlier wrong answer, and why it was wrong
+
+An earlier sweep concluded flow was unreachable over Modbus. Two mistakes, both
+instructive:
+
+- It swept with **FC 3 only**. `0x4000` answered "illegal data address" and was
+  written off as belonging to another family's map. It is the right address on
+  the *wrong function code* — it is an input register.
+- It nearly labelled `0xC000` "flow" because that register sat at 0.1 while idle,
+  which looks like a zero offset. `0xC000` is **`Opt_Kp`, a PID gain** — which is
+  exactly why it stayed at 0.1 while the Ar unit really flowed 5 sccm.
+
+Verified on all three units: FC 4 `0x4000` tracks `iobuf.flow_sensor` to four
+decimal places, including sign. Reading is also ~**600× faster** — ~1 ms versus
+450–900 ms for one `iobuf.js` GET.
 
 #### Setpoint units — an ambiguity worth knowing about
 
@@ -169,15 +214,16 @@ would be numerically identical and no reading could have told them apart. Code
 assuming percent would have worked by accident on a 100 sccm device and been
 wrong on every other one.
 
-#### Still to do
+#### Writing — confirmed since
 
-Writes remain **locked** (`register_map.confirmed: false`). Reading is fully
-verified; no setpoint write has been round-tripped on this hardware yet.
+Setpoint writes are verified on this hardware: `set_setpoint_sccm` writes
+`0xA000` and reads it straight back, and flow follows. There is no write lock —
+an early `register_map.confirmed` gate was removed along with every other
+software limit (see [CONTROL_MODEL.md](CONTROL_MODEL.md)).
 
-The safe way to confirm it: write an MFC's **current** setpoint back to itself.
-That is a no-op in process terms but exercises the whole write-and-verify path.
-It still needs a deliberate go-ahead, because it is a write to a live gas
-controller.
+**The one operational catch:** an MKS G50 zeros its setpoint when its Modbus
+master disconnects, so commanded flow only holds while this program stays
+connected. Stopping the server stops the gas.
 
 ### Keithley DMM6500
 
@@ -185,11 +231,60 @@ controller.
 `KEITHLEY INSTRUMENTS,MODEL DMM6500,04429995,1.0.04b`. In SCPI mode, accepts the
 configured setup, and reads ~1.8 µA DC.
 
+### Film Sense FS-1 ellipsometer
+
+In-situ, **read-only**, over a direct link-local Ethernet link —
+`169.254.1.1:4001`, confirmed on the wire 2026-08-06. The instrument broadcasts
+every dynamic-mode measurement unsolicited on that port at ~1 Hz; this program
+subscribes, timestamps each point with the reactor clock, and writes a
+per-acquisition sidecar. It **never writes to the instrument** — the trigger
+sockets on 4000 and 4010 (how the old LabVIEW program triggered measurements)
+are deliberately untouched.
+
+The stream's live thickness is the instrument's uncalibrated fit and is **not**
+treated as truth. The point of the sidecar is to put a *refit* file, downloaded
+from the FS-1 after a run, back onto the reactor clock — see
+[RUN_PROGRAM.md](RUN_PROGRAM.md) and `reactor/analysis/ellipsometer_merge.py`.
+Wire format and framing are documented in `reactor/devices/ellipsometer.py`.
+
+Not yet validated across a real deposition (`reactor-nde`).
+
+### Glassman FL high-voltage supply
+
+The plasma supply. **XP Glassman FL1.5F1.0**, rated **1500 V / 1.0 A**, on USB
+into its rear-panel **J3**. Firmware revision 02. **Read-only** — the reactor
+polls its voltage/current/arc-count monitors at 2 Hz and logs them, and never
+commands it; Zach sets levels by hand on the front panel.
+
+Confirmed on the wire 2026-08-21:
+
+```
+COM8, 19200 baud, 8N1, address 1
+```
+
+**None of that is the documented default and none of it can be read off the DIP
+switches** — the manual says 9600 / address 0, every DIP switch on the unit
+reads "down", and it answers only at 19200 / address 1. The COM number is not
+stable either; a TUSB3410 driver reinstall moved it from COM7 to COM8. If it
+goes quiet, sweep the full cross-product of baud rate against address with
+`python -m tools.probe_glassman` before suspecting hardware — that exact hole in
+a sweep cost a day of misdiagnosis.
+
+Rear panel: **J1** DB-25 analog (interlock jumpered 13 → 25), **J2** RJ45
+RS-232/RS-485 (unused, and *not* an Ethernet port despite the socket), **J3**
+USB (in use), **J4** empty Ethernet-option mount.
+
+Protocol, scaling, the read-only decision, and the full bring-up account are in
+**[GLASSMAN_FL.md](GLASSMAN_FL.md)**. One warning worth repeating here: the
+sister-series EJ/ET/EY/FJ/FR manual (102002-177) describes a *different*
+product — different connector numbering, different interlock pins, 10-bit
+monitors instead of 12-bit, no address byte. Use **102002-168 Rev H**.
+
 ### End-to-end read verified
 
-Running `python -m reactor` against the live chamber: pressure, both
-thermocouples and the DMM all read, at 2 Hz, and both log files write correctly.
-Only the MFC fails to connect (placeholder IP).
+Running `python -m reactor` against the live chamber: pressure, all three
+thermocouples, the Baratrons, the DMM and all three MFCs read, and the log files
+write correctly.
 
 Note the NI 9201 is 12-bit over ±10 V — about 4.9 mV per count, which on a log
 gauge is roughly 1% pressure resolution. Visible as small steps in the log.
@@ -230,6 +325,16 @@ exactly.
   precursor-1 micro-pulse dose valve; `rpm_top` fills the precursor-1 full
   volume — **confirmed by Zach 2026-08-06**; `plasma_ground` (cDAQ1Mod3 line9)
   is the e-beam relay (off = beam on).
+
+  **The relay's resting state is DE-ENERGISED, i.e. `plasma_ground` OFF, i.e.
+  the "beam on" sense** — confirmed by Zach 2026-08-21. The relay box is powered
+  by a **9 V battery that only drains while the relay is energised**, so leaving
+  it energised when the tool is not in use flattens the battery. This is why a
+  completed run parks the beam relay off, and why `abort_prestart` de-energises
+  it rather than leaving it grounded. It is not a contradiction of "beam off is
+  safe": with the HV supply off there is nothing for an un-grounded relay to do,
+  which is why both of those paths command HV off in the same breath. Do not
+  "fix" this to leave the relay energised at rest.
 - **3 Baratrons** (all cDAQ2Mod1, 10 Torr heads, 1 V = 1 Torr): `ai0` = Ar
   Baratron (confirmed rising to 2.72 Torr under 5 sccm Ar); `ai1` = Precursor 1
   dose pressure, `ai2` = Precursor 2 dose pressure — lower reading is
@@ -255,9 +360,12 @@ exactly.
 
 The **NI 9265** provides four 0–20 mA analog outputs. With no heater control on
 this tool, what these drive is an open question — possibly nothing any more,
-possibly an analog setpoint on something.
+possibly an analog setpoint on something (`reactor-5u2`, deferred).
 
-Worth noting for whenever it is identified: the code's analog-output path calls
-`add_ao_voltage_chan`, which is wrong for a 9265. A current-output module needs
-`add_ao_current_chan`. Nothing configures an analog output today, so this is a
-note rather than a bug — but it needs fixing before the 9265 is ever used.
+**There is no analog-output path in the code, on purpose.** There used to be an
+unreachable one, and it called `add_ao_voltage_chan` — simply wrong for a
+current-output module, and a convincing-looking trap for whoever eventually
+identifies the 9265. It was removed rather than left to be found. If these
+outputs are ever needed, write the path fresh against `add_ao_current_chan`,
+add the channels to `config/reactor.yaml`, and populate them in
+`Supervisor._build_plan`.

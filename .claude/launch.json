@@ -6,6 +6,13 @@
       "runtimeExecutable": ".venv\\Scripts\\python.exe",
       "runtimeArgs": ["-m", "reactor", "--port", "8000"],
       "port": 8000
+    },
+    {
+      "//": "Second instance on a spare port, for checking a UI change while the real one keeps running on 8000. DAQmx is exclusive, so this one reports the analog inputs as 'resource reserved' - that is expected and not a fault.",
+      "name": "reactor-verify",
+      "runtimeExecutable": ".venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "reactor", "--port", "8001"],
+      "port": 8001
     }
   ]
 }

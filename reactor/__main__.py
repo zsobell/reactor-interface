@@ -20,7 +20,9 @@ from pathlib import Path
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="reactor", description=__doc__)
     ap.add_argument("-c", "--config", type=Path, default=None)
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="bind address; 0.0.0.0 (default) exposes on all "
+                         "interfaces incl. Tailscale/LAN, 127.0.0.1 is localhost-only")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--open", action="store_true", help="open a browser on start")
     ap.add_argument("--check", action="store_true",
@@ -45,15 +47,21 @@ def main(argv: list[str] | None = None) -> int:
     gauge = cfg.pressure.scaling
     curve = gauge.preset or f"{gauge.type} gain={gauge.gain} offset={gauge.offset}"
 
+    ell = cfg.ellipsometer
+
     print(f"  site        : {cfg.site.name}")
-    print(f"  loop rate   : {cfg.site.loop_hz} Hz")
+    print(f"  loop rate   : {cfg.site.loop_hz} Hz DAQ / {cfg.site.current_hz} Hz "
+          f"current + MFC")
     print(f"  pressure    : {cfg.pressure.channel}  curve={curve}")
     print(f"  stage TC    : {cfg.stage_temp.channel or '(disabled)'}"
           f"  type {cfg.stage_temp.tc_type}")
     print(f"  aux inputs  : {', '.join(a.id for a in cfg.aux_inputs) or 'none'}")
+    print(f"  gauges      : {', '.join(g.id for g in cfg.gauges) or 'none'}")
     print(f"  valves      : {', '.join(v.id for v in cfg.valves) or 'none'}")
     print(f"  MFCs        : {', '.join(m.id for m in cfg.mfcs) or 'none'}")
     print(f"  instruments : {', '.join(i.id for i in cfg.instruments if i.enabled) or 'none'}")
+    print(f"  HV supplies : {', '.join(f'{p.id}@{p.port} {p.baud}/8N1 addr {p.address} (monitor + HV off)' for p in cfg.power_supplies if p.enabled) or 'none'}")
+    print(f"  ellipsometer: {f'{ell.host}:{ell.port} (read-only)' if ell.enabled and ell.host else 'disabled'}")
     print(f"  data dir    : {Path(cfg.site.data_dir).resolve()}")
 
     if args.check:
@@ -61,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     url = f"http://{args.host}:{args.port}/"
-    print(f"\n  Connecting read-only. Nothing is commanded until you act in the UI.")
+    print("\n  Connecting read-only. Nothing is commanded until you act in the UI.")
     print(f"  interface   : {url}\n")
 
     import uvicorn

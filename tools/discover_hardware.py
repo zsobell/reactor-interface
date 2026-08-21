@@ -103,7 +103,7 @@ def discover_daqmx() -> None:
 def discover_visa() -> None:
     print()
     print("=" * 74)
-    print(" VISA resources (ammeter, QCM controller, anything on GPIB/serial/LAN)")
+    print(" VISA resources (the DMM6500, anything else on GPIB/serial/LAN)")
     print("=" * 74)
     try:
         import pyvisa
@@ -197,8 +197,10 @@ def probe_modbus(cidr: str, port: int = 502, timeout: float = 0.25) -> None:
     if not found:
         print("  nothing listening. Check the subnet and that the MFCs are powered.")
     else:
-        print("\n  Put these in config/reactor.yaml under mfcs.devices[].host")
-        print("  You still need each unit_id and full_scale_sccm (on the MFC label).")
+        print("\n  Put these in config/reactor.yaml under mfcs[].host, with each")
+        print("  unit_id. Full scale is NOT configured - it is read live from the")
+        print("  device every poll, because it moves with the selected gas.")
+        print("  Confirm each one with:  --identify-mfc <host>")
 
 
 def read_digital_inputs() -> None:

@@ -48,9 +48,14 @@ async def main() -> int:
         beam_writes = [w for w in vr.daq.do_writes[beam_writes_before:]
                        if w[1] == "plasma_ground"]
         beam_on_writes = [w for w in beam_writes if w[2] is False]
-        c.check("beam turned on once per cycle (2 cycles)", len(beam_on_writes) == 2,
-                str(len(beam_on_writes)))
-        c.check("beam ends grounded", vr.daq.do_state["plasma_ground"] is True)
+        # One strike per cycle, plus one more from the end-of-run sequence: a
+        # completed run is deliberately parked in beam-ON mode (plasma ground
+        # OFF) at the operator's request. An ABORT still ends grounded - the
+        # teardown that parks the beam is skipped - which section 3 pins down.
+        c.check("beam struck once per cycle + end-of-run park (2 cycles)",
+                len(beam_on_writes) == 3, str(len(beam_on_writes)))
+        c.check("completed run parks in beam-ON mode",
+                vr.daq.do_state["plasma_ground"] is False)
         c.check("MFCs zeroed at run end",
                 vr.mfcs["h2"].commanded_sccm == 0.0 and vr.mfcs["n2"].commanded_sccm == 0.0)
 
@@ -93,7 +98,8 @@ async def main() -> int:
         c.check("run still completed (not stuck/errored)",
                 vr.sup.recipes.progress.state in ("done", "idle"),
                 vr.sup.recipes.progress.state)
-        c.check("beam ends grounded after a reignite", vr.daq.do_state["plasma_ground"] is True)
+        c.check("run parks in beam-ON mode after a reignite",
+                vr.daq.do_state["plasma_ground"] is False)
 
         c.section("3. abort mid-dose: dose valve still closes, beam grounded")
         vr.instruments["ammeter"].value = 1.0e-3

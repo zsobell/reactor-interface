@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, ".")
 
 from reactor.testing.virtual_reactor import VirtualReactor
-from tests._support import Checker, autotick
+from tests._support import Checker, autotick, wait_for
 
 PARAMS = dict(ar_sccm=4.0, valve_delay_s=0.1, hold_s=0.4, min_current_a=5.0e-4,
               reignite_pulse_s=0.05, reignite_settle_s=0.05,
@@ -79,9 +79,20 @@ async def main() -> int:
         ammeter = vr.instruments["ammeter"]
 
         async def flicker():
-            await asyncio.sleep(0.35)      # partway through the 0.4s hold
+            """Drop the plasma once the hold has actually begun, and keep it
+            down until the sequence has actually noticed.
+
+            Both waits poll for the real condition rather than guessing an
+            offset, and they have to. _run_prestart samples current every
+            0.2 s, so the previous version - sleep 0.35 s, drop for exactly
+            0.2 s - could put the entire dropout between two samples: the
+            hold then completed uninterrupted and the test failed on a race
+            it had created itself, not on anything the code did wrong."""
+            if not await wait_for(lambda: (vr.sup.prestart.get("held_s") or 0) > 0):
+                return                      # never got into the hold; let the
+            strikes0 = vr.sup.prestart.get("strikes", 0)   # checks below report
             ammeter.value = 0.0
-            await asyncio.sleep(0.2)
+            await wait_for(lambda: vr.sup.prestart.get("strikes", 0) > strikes0)
             ammeter.value = 1.0e-3
 
         events_before = len(vr.sup.events)
