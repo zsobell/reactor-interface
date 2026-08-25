@@ -154,7 +154,7 @@ docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWA
   **19200 8N1 address 1** - none of which is the documented default or readable
   off its DIP switches; the COM number moved once already. Polled at 2 Hz for
   voltage/current/arc count. **The only command this program sends it is HV OFF**
-  (run end or abort, requested 2026-08-21); there is no way to set a level or
+  (run end or abort, requested 2026-08-21; confirmed on hardware 2026-08-25); there is no way to set a level or
   turn HV on. Zach sets it by hand on the front panel. Note any Set command
   leaves the supply in REMOTE until LOC/REM is pressed.
   `python -m tools.probe_glassman` if it ever goes quiet.
@@ -245,8 +245,8 @@ live fit + fit residual) is on the **Hardware** tab; its connection row is in
 the Diagnostics connections table with every other device; and the post-run
 sync — merging a refit FS-1 file back onto the reactor clock, keyed by cycle
 number — lives on the **Analysis page** next to the plots it feeds. Nothing
-ellipsometer-related is on the Diagnostics tab any more. Not yet validated
-across a real deposition (`reactor-nde`).
+ellipsometer-related is on the Diagnostics tab any more. **Confirmed working
+across a real deposition, 2026-08-25.**
 
 The **Analysis page** (`/analysis`, prototype) plots the merged file: a
 persistent grid of property-vs-cycle plots, layout remembered in localStorage
@@ -276,8 +276,8 @@ minutes. The event log is the history.
 The **four Keithley 2260B DC supplies** (stage bias, steering, grid,
 collimating) are in as of 2026-08-25: voltage and current logged for all four,
 monitor cards on the Hardware tab, and their **outputs switched on at pre-start
-and off at run end/abort**. They stay on for the whole run and are never cycled
-by plasma events. The **sample bias** is the conditional one - a new run field
+and off at run end/abort** — confirmed on hardware 2026-08-25. They stay on for
+the whole run and are never cycled by plasma events. The **sample bias** is the conditional one - a new run field
 for both EE-ALD and EE-CVD, with a +/- toggle that records lead orientation and
 signs the logged voltage (the supply is single-quadrant, so the sign never
 reaches the instrument). Its output comes on only for a non-zero value. *Min

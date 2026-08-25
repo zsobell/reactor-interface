@@ -276,9 +276,8 @@ its parameters, and every valve/MFC/gauge display name.
   has the detail and the conversion.
 - EE-CVD cycle timing has not been audited the way EE-ALD was (`reactor-2ou`).
 - Remote *setpoint* control of the Glassman is deliberately not built; only
-  HV-off is wired (`reactor-tp1`, and docs/CONTROL_MODEL.md).
-- The FS-1 ellipsometer sync is not yet validated across a real deposition
-  (`reactor-nde`).
+  HV-off is wired (see docs/CONTROL_MODEL.md). HV-off at run end is confirmed
+  working on hardware.
 - Whether stopping the server should ground the beam during a pre-start is
   undecided (`reactor-4h9`).
 - The NI 9265 current-output module's purpose is unknown, deferred

@@ -186,6 +186,9 @@ is ever added, confirm this on the bench before relying on it.
 
 ---
 
+**Confirmed on real hardware 2026-08-25**: the supply's voltage is killed at
+the end of a run, as intended. That was the one command this program sends it.
+
 ## What this program commands, and why
 
 `reactor/devices/glassman_fl.py` implements the full protocol, including

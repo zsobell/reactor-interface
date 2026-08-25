@@ -124,6 +124,11 @@ Zach's reason, worth preserving because it is not obvious from the code: the
 collimating coil is what keeps the plasma stable when the beam dump is grounded.
 Cycling it with the beam would be actively harmful, not merely wasteful.
 
+**Confirmed on real hardware 2026-08-25**: the outputs switch on at pre-start
+and off at run end, the sample bias energises only for a non-zero value, and the
+Hardware-tab controls work. Until then the actuation path had only ever run
+against the virtual reactor.
+
 ### When each trigger fires
 
 | Trigger | Effect |

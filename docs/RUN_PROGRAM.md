@@ -528,8 +528,7 @@ back on a reload; re-dropping a file refreshes the plot it already has instead
 of stacking up a second one, and removing a spectrum's last plot drops the
 spectrum too.
 
-Not yet exercised on a real refit file end to end — that waits on
-`reactor-nde`.
+**Confirmed on a real refit file end to end, 2026-08-25.**
 
 ## To actually run it in the lab
 
@@ -552,7 +551,6 @@ Not yet exercised on a real refit file end to end — that waits on
   EE-ALD clock is now pinned to 0.1 s by `tests/test_run_timing.py`; EE-CVD's
   cycle clock (`_lit_s` / `_cycle_clock`, driven by the 0.2 s watchdog tick) has
   not had the same treatment.
-- Validate the FS-1 ellipsometer sync across a real deposition — `reactor-nde`.
 - Decide whether stopping the server should ground the beam during a pre-start
   — `reactor-4h9`.
 - Identify the NI 9265 current outputs — `reactor-5u2` (low priority, not

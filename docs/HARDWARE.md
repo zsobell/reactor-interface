@@ -250,7 +250,8 @@ from the FS-1 after a run, back onto the reactor clock — see
 [RUN_PROGRAM.md](RUN_PROGRAM.md) and `reactor/analysis/ellipsometer_merge.py`.
 Wire format and framing are documented in `reactor/devices/ellipsometer.py`.
 
-Not yet validated across a real deposition (`reactor-nde`).
+**Confirmed working across a real deposition, 2026-08-25** — the live sidecar,
+the post-run merge onto the reactor clock, and the merged file end to end.
 
 ### Glassman FL high-voltage supply
 
