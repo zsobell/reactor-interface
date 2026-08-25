@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import logging
 import os
 import secrets
@@ -108,6 +109,50 @@ def merged_name(reactor_run: str, sidecar: str, filename: str) -> str:
         if stem:
             return f"{stem}_reactor_synced.csv"
     return f"{Path(filename).stem or 'refit'}_reactor_synced.csv"
+
+
+#: Run-tab parameters, shared by every browser that connects. See the
+#: /api/run_params endpoints for why this is server-side.
+RUN_PARAMS_PATH = (Path(__file__).resolve().parent.parent.parent
+                   / "config" / "run_params.json")
+
+
+def _kill_other_reactor_servers() -> list[int]:
+    """Terminate every OTHER `python -m reactor` process. Returns the PIDs hit.
+
+    Blocking (shells out to PowerShell); call it off the event loop. This
+    program's own PID and its parent are skipped: the parent is the venv
+    launcher shim that spawned us, and killing it before our own teardown would
+    take the console down early.
+    """
+    import subprocess
+
+    me, parent = os.getpid(), os.getppid()
+    ps = ("Get-CimInstance Win32_Process | Where-Object { "
+          "$_.CommandLine -like '*-m reactor*' -and $_.Name -match '^python' "
+          "} | ForEach-Object { $_.ProcessId }")
+    try:
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=25).stdout
+    except Exception as exc:
+        log.warning("could not enumerate reactor processes: %s", exc)
+        return []
+
+    killed: list[int] = []
+    for tok in out.split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid in (me, parent):
+            continue
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=15)
+            killed.append(pid)
+        except Exception as exc:
+            log.warning("could not kill reactor PID %s: %s", pid, exc)
+    return killed
 
 
 def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
@@ -233,6 +278,17 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
     async def get_state() -> dict[str, Any]:
         return sup.state()
 
+    @app.get("/api/events")
+    async def get_events(limit: int = 20000) -> dict[str, Any]:
+        """The full event scrollback.
+
+        The live telemetry frame carries only the last 200 - see Supervisor's
+        state() for why - so the browser seeds its log from here once and then
+        appends. Every event is also in server.log permanently; this is the
+        in-memory copy, and it starts empty after a restart.
+        """
+        return {"events": list(sup.events)[-limit:]}
+
     @app.get("/api/trend")
     async def get_trend(limit: int = 1800) -> dict[str, Any]:
         return {"samples": sup.trend(limit)}
@@ -323,6 +379,110 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
     async def set_mfc(mfc_id: str, sccm: float = Body(..., embed=True)) -> dict[str, Any]:
         value = await sup.set_mfc_setpoint(mfc_id, sccm)
         return {"id": mfc_id, "setpoint_sccm": value}
+
+    # -- run parameters, owned by the server ------------------------------- #
+    #
+    # These used to live only in each browser's localStorage, so every machine
+    # had its own copy: opening the UI over Tailscale from a laptop showed
+    # default cycles/dose/bias rather than what the reactor PC had set
+    # (reported 2026-08-25). One reactor should present one set of parameters,
+    # so the server holds them - the same reasoning that already makes the run
+    # NAME server-owned (see RUN_NAME_PATH in supervisor.py).
+    #
+    # The browser still keeps a localStorage copy as a cache, so the fields are
+    # populated instantly on load and survive the server being unreachable.
+    # Last write wins if two browsers edit at once; this is a single-operator
+    # tool and that is fine.
+
+    @app.get("/api/run_params")
+    async def get_run_params() -> dict[str, Any]:
+        try:
+            return {"params": json.loads(
+                RUN_PARAMS_PATH.read_text(encoding="utf-8"))}
+        except Exception:
+            # No file yet, or it is unreadable - the UI falls back to its own
+            # cache and then to the field defaults.
+            return {"params": {}}
+
+    @app.post("/api/run_params")
+    async def set_run_params(params: dict = Body(default={})) -> dict[str, Any]:
+        RUN_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RUN_PARAMS_PATH.write_text(
+            json.dumps(params, indent=2, sort_keys=True), encoding="utf-8")
+        return {"params": params}
+
+    # -- server shutdown --------------------------------------------------- #
+
+    @app.post("/api/server/shutdown")
+    async def shutdown_server() -> dict[str, Any]:
+        """Stop this server, and any other reactor server still running.
+
+        Replaces the Restart button (2026-08-25). Restarting re-exec'd the
+        process, and on 2026-08-25 the OLD instance survived it: two servers
+        were then up at once, the newer one holding port 8000 while the older
+        one still held COM8-COM12, so the devices looked unreachable. Zach's
+        call: "just a button that kills all servers in use", then start it again
+        from the shortcut.
+
+        Order matters. Other instances are terminated FIRST, then this one shuts
+        down gracefully through the normal lifespan teardown - so the server you
+        are talking to releases its devices properly, and any orphan holding a
+        serial port is gone by the time you restart.
+
+        Same consequences as any stop: a running recipe is aborted with its full
+        teardown, and gas stops because the MFCs zero their own setpoints when
+        this program disconnects. The caller is expected to have confirmed that.
+        """
+        request_shutdown = getattr(app.state, "request_shutdown", None)
+        if request_shutdown is None:
+            raise HTTPException(
+                status_code=501,
+                detail="This server was not started with `python -m reactor`, "
+                       "so it cannot shut itself down. Stop it by hand.")
+
+        killed = await asyncio.to_thread(_kill_other_reactor_servers)
+        busy = sup.recipes.busy
+        sup._event("command",
+                   "server shutdown requested from the UI"
+                   + (" DURING A RUN - the run will be aborted" if busy else "")
+                   + (f"; also killed {len(killed)} other instance(s): {killed}"
+                      if killed else ""))
+        log.warning("shutdown requested from the UI (run active: %s, "
+                    "other instances killed: %s)", busy, killed or "none")
+
+        async def _go() -> None:
+            # Let this response reach the browser before the socket closes.
+            await asyncio.sleep(0.25)
+            request_shutdown()
+
+        asyncio.create_task(_go())
+        return {"stopping": True, "run_was_active": busy, "also_killed": killed}
+
+    # -- power supplies -------------------------------------------------- #
+    #
+    # Operator-requested 2026-08-25: voltage/current fields and an output
+    # toggle per supply on the Hardware tab. These are the ONLY paths from the
+    # browser to a supply output, and they exist for the Keithley 2260B DC
+    # supplies. The Glassman has no route here at all - it has no set path in
+    # its driver beyond hv_off, by design (docs/CONTROL_MODEL.md).
+
+    @app.post("/api/supply/{supply_id}/voltage")
+    async def set_supply_voltage(
+        supply_id: str, volts: float = Body(..., embed=True)
+    ) -> dict[str, Any]:
+        return await sup.set_supply_voltage(supply_id, volts)
+
+    @app.post("/api/supply/{supply_id}/current")
+    async def set_supply_current(
+        supply_id: str, amps: float = Body(..., embed=True)
+    ) -> dict[str, Any]:
+        return await sup.set_supply_current(supply_id, amps)
+
+    @app.post("/api/supply/{supply_id}/output")
+    async def set_supply_output(
+        supply_id: str, on: bool = Body(..., embed=True)
+    ) -> dict[str, Any]:
+        return await sup.set_supply_output(supply_id, on)
 
     # -- fill regulation (standalone, e.g. to charge precursor before a run) -- #
 

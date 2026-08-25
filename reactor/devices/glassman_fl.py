@@ -278,6 +278,11 @@ def parse_version_response(raw: bytes) -> str:
 class GlassmanFL(Device):
     """One FL-series supply on a serial (or USB virtual-COM) port."""
 
+    #: Snapshot/column namespace: keys are "hv.<id>.*", columns "hv_<id>_*".
+    #: The Keithley DC supplies use "psu" instead. Kept distinct because these
+    #: names are baked into saved analysis-page plot layouts.
+    key_prefix = "hv"
+
     def __init__(self, cfg: PowerSupplyCfg) -> None:
         super().__init__(cfg.id, cfg.label or cfg.id)
         self.cfg = cfg
@@ -287,6 +292,11 @@ class GlassmanFL(Device):
         # One serial exchange at a time. Only the poll loop uses the port today,
         # but reset_input_buffer() in one exchange would eat another's reply.
         self._lock = asyncio.Lock()
+
+    def log_channels(self) -> dict[str, str]:
+        """{run-export column suffix: snapshot key suffix}."""
+        return {"voltage": "voltage", "current": "current",
+                "arcs": "arc_count"}
 
     # -- lifecycle ---------------------------------------------------------- #
 

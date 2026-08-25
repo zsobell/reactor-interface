@@ -18,3 +18,5 @@ __pycache__/
 # not belong in the control software's history. One params file from the very
 # first commit was tracked by accident and is dropped here; it stays on disk.
 data/
+server.log
+config/run_params.json

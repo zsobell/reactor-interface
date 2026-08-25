@@ -3,7 +3,7 @@
   "lpm_top": false,
   "rpm_bottom": false,
   "rpm_top": false,
-  "ar_pneumatic": true,
+  "ar_pneumatic": false,
   "prec1": false,
   "prec2": false,
   "loadlock_foreline": false,

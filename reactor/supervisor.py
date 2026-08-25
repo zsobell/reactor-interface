@@ -27,6 +27,7 @@ from .datalog import DataLogger
 from .devices.base import Device, Reading
 from .devices.ellipsometer import EllipsometerClient, EllipsometerPoint
 from .devices.glassman_fl import GlassmanFL
+from .devices.keithley_2260b import Keithley2260B
 from .devices.instrument import ScpiInstrument
 from .devices.mks_mfc import MfcRegisters, MksMfc
 from .devices.nidaq import AiSpec, DaqPlan, DoSpec, NiDaqBackend
@@ -76,7 +77,12 @@ class Supervisor:
         self.snapshot: dict[str, Any] = {}
         self.readings: dict[str, Reading] = {}
         self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY_SAMPLES)
-        self.events: deque[dict[str, Any]] = deque(maxlen=250)
+        #: A long scrollback, because 250 was nowhere near enough: one run emits
+        #: roughly ten events a cycle, so a 150-cycle run pushed the whole
+        #: pre-start out of the buffer before anyone could read it. This is only
+        #: the in-memory copy the UI scrolls; every event is ALSO written to
+        #: server.log by _event(), which rotates and is the permanent record.
+        self.events: deque[dict[str, Any]] = deque(maxlen=20000)
 
         self.daq: NiDaqBackend | None = None
         self.mfcs: dict[str, Device] = {}
@@ -279,20 +285,34 @@ class Supervisor:
         for ps in cfg.power_supplies:
             if not ps.enabled:
                 continue
-            # Only one driver exists; the config's Literal already rejects
-            # anything else, so this is a lookup rather than a branch.
-            dev = GlassmanFL(ps)
+            # The config's Literal already restricts `driver`, so an unknown
+            # value cannot reach here.
+            dev = (GlassmanFL(ps) if ps.driver == "glassman_fl"
+                   else Keithley2260B(ps))
             self.supplies[ps.id] = dev
             try:
                 await dev.connect()
+            except Exception as exc:
+                dev.last_error = f"{type(exc).__name__}: {exc}"
+                self._event("error", f"power supply {ps.id}: {dev.last_error}")
+                continue
+            if ps.driver == "glassman_fl":
                 self._event("startup",
                             f"power supply {ps.id}: {ps.model or ps.driver} on "
                             f"{ps.port} @{ps.baud} addr {ps.address}, "
                             f"firmware {dev.firmware or '?'} "
                             f"(monitor only; HV off at run end)")
-            except Exception as exc:
-                dev.last_error = f"{type(exc).__name__}: {exc}"
-                self._event("error", f"power supply {ps.id}: {dev.last_error}")
+            else:
+                # The port is REPORTED, not configured - it is resolved from the
+                # USB serial - so this line is the record of where it landed.
+                rated = (f", max {dev.max_voltage:g} V / {dev.max_current:g} A"
+                         if dev.max_voltage is not None
+                         and dev.max_current is not None else "")
+                role = "  [SAMPLE BIAS]" if ps.sample_bias else ""
+                self._event("startup",
+                            f"power supply {ps.id}: {dev.model or ps.model} "
+                            f"serial {dev.serial_number} on {dev.port}"
+                            f"{rated}{role}")
 
         self._running = True
         self._loop_task = asyncio.create_task(self._control_loop(), name="control-loop")
@@ -584,9 +604,12 @@ class Supervisor:
             # Glassman) and are deliberately NOT baked into the column names:
             # the analysis page keys its saved plot layout on column name, so
             # these have to stay stable. See docs/GLASSMAN_FL.md.
-            **{f"hv_{p}_voltage": f"hv.{p}.voltage" for p in self.supplies},
-            **{f"hv_{p}_current": f"hv.{p}.current" for p in self.supplies},
-            **{f"hv_{p}_arcs": f"hv.{p}.arc_count" for p in self.supplies},
+            # Each supply declares its own namespace and channels, so the
+            # Glassman keeps its established hv_hv_* columns while the Keithley
+            # DC supplies get psu_<id>_*.
+            **{f"{d.key_prefix}_{pid}_{col}": f"{d.key_prefix}.{pid}.{key}"
+               for pid, d in self.supplies.items()
+               for col, key in d.log_channels().items()},
         }
         sample = {
             "t": self._last_cycle,
@@ -978,17 +1001,21 @@ class Supervisor:
                       self.set_valve(g("plasma_switch", "plasma_ground"), False,
                                      reason="pre-start abort - relay at rest"))
         await attempt("HV off", self.hv_off(reason="pre-start abort"))
+        await attempt("DC supply outputs",
+                      self.supplies_output_off(reason="pre-start abort"))
 
         # The tool is no longer primed, so the UI must stop offering the abort
         # (and stop claiming pre-start is complete).
         self.prestart["running"] = False
         self.prestart["done"] = False
-        self.prestart["phase"] = "aborted - Ar and fill off, relay at rest, HV off"
+        self.prestart["phase"] = ("aborted - Ar and fill off, relay at rest, "
+                                  "HV off, DC supplies off")
         if errors:
             self._event("error", "pre-start abort: " + "; ".join(errors))
         else:
             self._event("recipe", "pre-start aborted: Ar off, fill off, "
-                                  "beam relay de-energised, HV off")
+                                  "beam relay de-energised, HV off, "
+                                  "DC supply outputs off")
 
     async def hv_off(self, *, reason: str = "") -> None:
         """Command every HV supply's output OFF.
@@ -1016,6 +1043,160 @@ class Supervisor:
                 tail = f" ({reason})" if reason else ""
                 self._event("recipe", f"HV commanded off: {ps_id}{tail}")
 
+    # -- operator control of a single supply -------------------------------- #
+    #
+    # Requested 2026-08-25: voltage/current fields and an output toggle per
+    # supply on the Hardware tab. These are manual, one supply at a time, and
+    # entirely separate from the automatic pre-start/run-end switching below.
+    # Nothing calls them except the HTTP API.
+    #
+    # They raise on a bad request rather than swallowing it, unlike the
+    # teardown helpers: an operator who presses a button is waiting for an
+    # answer, and a silent no-op there is worse than an error toast.
+
+    def _supply(self, supply_id: str):
+        dev = self.supplies.get(supply_id)
+        if dev is None:
+            raise KeyError(f"no such power supply: {supply_id!r}")
+        if not dev.connected:
+            raise RuntimeError(f"{supply_id} is not connected")
+        return dev
+
+    async def set_supply_voltage(self, supply_id: str, volts: float) -> dict[str, Any]:
+        dev = self._supply(supply_id)
+        setter = getattr(dev, "set_voltage", None)
+        if setter is None:
+            raise RuntimeError(
+                f"{supply_id} has no voltage control in this program")
+        await setter(volts)
+        self._event("command", f"{supply_id}: voltage set to {float(volts):g} V")
+        return {"id": supply_id, "voltage": float(volts)}
+
+    async def set_supply_current(self, supply_id: str, amps: float) -> dict[str, Any]:
+        dev = self._supply(supply_id)
+        setter = getattr(dev, "set_current", None)
+        if setter is None:
+            raise RuntimeError(
+                f"{supply_id} has no current control in this program")
+        await setter(amps)
+        self._event("command", f"{supply_id}: current limit set to {float(amps):g} A")
+        return {"id": supply_id, "current": float(amps)}
+
+    async def set_supply_output(self, supply_id: str, on: bool) -> dict[str, Any]:
+        dev = self._supply(supply_id)
+        setter = getattr(dev, "set_output", None)
+        if setter is None:
+            raise RuntimeError(
+                f"{supply_id} has no output control in this program")
+        await setter(bool(on))
+        self._event("command",
+                    f"{supply_id}: output {'ON' if on else 'OFF'} (operator)")
+        return {"id": supply_id, "output_on": bool(on)}
+
+    async def supplies_output_on(self, *, sample_bias_v: float = 0.0,
+                                 polarity: int = 1, reason: str = "") -> None:
+        """Switch ON every supply configured with `prestart_output`.
+
+        Called from pre-start (operator request, 2026-08-21): Zach wants the
+        steering, grid and collimating supplies live before a run starts so he
+        can see how the tool is behaving. They then stay on for the whole run -
+        they are deliberately NOT tied to plasma events, because the collimating
+        coil is what keeps the plasma stable when the beam dump is grounded, so
+        cycling it with the beam would be actively harmful.
+
+        The SAMPLE BIAS supply is the exception, and the reason this is not a
+        plain loop: its output comes on only when the run's Sample bias field is
+        non-zero, and its voltage is set from that field first. `polarity` is
+        lead-orientation bookkeeping (+1/-1) - the 2260B is single-quadrant and
+        cannot source a negative voltage, so the sign is applied to the LOGGED
+        value, never to what is commanded.
+
+        Current limits are never touched: those are set by hand on each front
+        panel and are Zach's.
+
+        Failures are reported as events, never raised - this runs inside the
+        pre-start sequence and one dead supply must not abort the rest.
+        """
+        magnitude = abs(float(sample_bias_v or 0.0))
+        for ps_id, dev in self.supplies.items():
+            cfg = getattr(dev, "cfg", None)
+            if cfg is None or not getattr(cfg, "prestart_output", False):
+                continue
+            set_output = getattr(dev, "set_output", None)
+            if set_output is None:
+                continue
+            try:
+                if getattr(cfg, "sample_bias", False):
+                    dev.polarity = -1 if polarity < 0 else 1
+                    if magnitude <= 0.0:
+                        # No bias wanted for this run. Leave it OFF - and say
+                        # so, because "the bias supply is dark" should never be
+                        # something the operator has to infer.
+                        await set_output(False)
+                        self._event("recipe",
+                                    f"{ps_id}: sample bias is 0 V, output left off")
+                        continue
+                    await dev.set_voltage(magnitude)
+                    await set_output(True)
+                    sign = "-" if dev.polarity < 0 else "+"
+                    # Read it back rather than trusting the write. This is the
+                    # one supply that puts a potential on the sample, so
+                    # "commanded" and "actually on" being conflated is not
+                    # acceptable - and a silent no-op here is precisely what
+                    # was reported on 2026-08-25.
+                    confirmed = None
+                    try:
+                        await dev.read()
+                        confirmed = getattr(dev, "output_on", None)
+                    except Exception:
+                        pass
+                    if confirmed is False:
+                        self._event("error",
+                                    f"{ps_id}: commanded sample bias "
+                                    f"{sign}{magnitude:g} V ON but the supply "
+                                    f"still reports its output OFF - check the "
+                                    f"front panel (protection tripped? output "
+                                    f"key?)")
+                    else:
+                        self._event("recipe",
+                                    f"{ps_id}: sample bias {sign}{magnitude:g} V, "
+                                    f"output ON")
+                else:
+                    await set_output(True)
+                    self._event("recipe", f"{ps_id}: output ON")
+            except Exception as exc:
+                self._event("error",
+                            f"{ps_id}: output on failed: "
+                            f"{type(exc).__name__}: {exc}")
+
+    async def supplies_output_off(self, *, reason: str = "") -> None:
+        """Switch OFF every supply configured with `prestart_output`.
+
+        Called from `finish_run` - which the recipe runner invokes however a run
+        ends, including a crash - and from the pre-start abort. Deliberately NOT
+        called from `stop_prestart`: that only ends the *sequence* and hands the
+        tool over primed for Start run, the same way it leaves Ar flowing and
+        the fill pulsing.
+
+        Never raises: this is teardown.
+        """
+        tail = f" ({reason})" if reason else ""
+        for ps_id, dev in self.supplies.items():
+            cfg = getattr(dev, "cfg", None)
+            if cfg is None or not getattr(cfg, "prestart_output", False):
+                continue
+            set_output = getattr(dev, "set_output", None)
+            if set_output is None:
+                continue
+            try:
+                await set_output(False)
+            except Exception as exc:
+                self._event("error",
+                            f"{ps_id}: output off failed: "
+                            f"{type(exc).__name__}: {exc}")
+            else:
+                self._event("recipe", f"{ps_id}: output OFF{tail}")
+
     async def _run_prestart(self, p: dict) -> None:
         g = lambda k, d: p.get(k, d)  # noqa: E731
         ar_valve = g("ar_valve", "ar_pneumatic")
@@ -1042,6 +1223,16 @@ class Supervisor:
         struck = False
         try:
             self.prestart["hold_target_s"] = hold_s
+
+            # First, before any gas: the operator wants the DC supplies live
+            # early so he can see how the tool is behaving before a run starts.
+            # These stay on for the whole run and are never cycled with the
+            # beam - see supplies_output_on.
+            phase("switching on DC supplies")
+            await self.supplies_output_on(
+                sample_bias_v=float(g("sample_bias_v", 0.0)),
+                polarity=int(g("sample_bias_polarity", 1)),
+                reason="pre-start")
 
             phase("opening Ar isolation valve")
             await self.set_valve(ar_valve, True, reason="pre-start")
@@ -1224,9 +1415,10 @@ class Supervisor:
             await self.stop_fill_regulation()
         with contextlib.suppress(Exception):
             self.logger.stop_run_export()
-        # Above the ALD/CVD gate below on purpose: HV off applies to EVERY run
+        # Above the ALD/CVD gate below on purpose: these apply to EVERY run
         # ending, file recipes included.
         await self.hv_off(reason="run end")
+        await self.supplies_output_off(reason="run end")
 
         if not self._run_end_cleanup:
             return
@@ -1449,7 +1641,14 @@ class Supervisor:
             "recipe": self._recipe_state(),
             "logging": self.logger.status(),
             "ellipsometer": self._ellipsometer_state(),
-            "events": list(self.events)[-40:],
+            # Deliberately only the live TAIL, not the whole buffer. This
+            # payload goes out on every telemetry frame (5 Hz), so shipping
+            # thousands of events would be ~1 MB/s of pure repetition - painful
+            # over Tailscale, which is exactly where the UI is used remotely.
+            # The browser seeds its scrollback once from /api/events and then
+            # appends whatever is new here. 200 is far more than one frame's
+            # worth, so nothing can slip through the gap.
+            "events": list(self.events)[-200:],
         }
 
     def trend(self, limit: int = 1800) -> list[dict[str, Any]]:

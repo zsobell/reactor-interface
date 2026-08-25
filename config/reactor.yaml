@@ -410,6 +410,74 @@ power_supplies:
     unit_i: "mA"
     timeout_s: 1.0
 
+  # -------------------------------------------------------------------------
+  #  Keithley 2260B DC supplies - stage bias, steering, grid, collimating
+  # -------------------------------------------------------------------------
+  #  Identified 2026-08-21 by plugging them in ONE AT A TIME and watching USB
+  #  enumeration. Full record in docs/KEITHLEY_2260B.md.
+  #
+  #  *** MATCHED BY usb_serial, NOT BY COM PORT. *** Four near-identical
+  #  supplies share one rack and Windows renumbers COM ports freely. The USB
+  #  serial is in the device descriptor, so it is the only stable handle; the
+  #  driver resolves the port from it at connect AND refuses a device whose
+  #  *IDN? serial disagrees. Do not "helpfully" pin a port here - getting these
+  #  swapped means biasing the sample from the 800 V grid supply.
+  #
+  #  These are NOT USBTMC like the DMM6500. Each is a USB CDC virtual COM port
+  #  (VID_05E6&PID_2260, "USB Serial Device"), bound by the in-box Windows
+  #  driver. SCPI over serial.
+  #
+  #  prestart_output: true means the output is switched ON during pre-start and
+  #  OFF when a run ends, aborts, or is stopped. It is NOT touched by plasma
+  #  events - it stays on across reignites and for the whole run. Zach's reason
+  #  (2026-08-21): the collimating coil is what holds the plasma stable when the
+  #  beam dump is grounded, so cycling it with the beam would be harmful.
+  #
+  #  Voltage and current LIMITS are set by hand on each front panel and this
+  #  program never touches them. The one exception is the sample-bias unit's
+  #  VOLTAGE, which comes from the run's "Sample bias" field; its current limit
+  #  is still Zach's. As found 2026-08-21: 20 V/0.5 A, 30.07 V/3.7 A,
+  #  100 V/0.2 A, 150 V/2.5 A, all outputs off.
+  #
+  #  Rated maxima are NOT listed here - the driver asks each supply for its own
+  #  (:SOUR:VOLT? MAX). The model suffix is not the current rating ("-4" is
+  #  4.5 A, "-1" is 1.44 A) and the supplies report 105% of nameplate.
+
+  - id: "stage_bias"
+    label: "Stage Bias"
+    enabled: true
+    driver: "keithley_2260b"
+    model: "2260B-250-4"          # 250 V / 4.5 A, 360 W
+    usb_serial: "1412016"
+    prestart_output: true
+    # The one supply whose voltage this program sets, from the run's Sample
+    # bias field - and its output comes on ONLY when that field is non-zero.
+    sample_bias: true
+
+  - id: "steering"
+    label: "Steering Coils"
+    enabled: true
+    driver: "keithley_2260b"
+    model: "2260B-80-13"          # 80 V / 13.5 A, 360 W
+    usb_serial: "1408023"
+    prestart_output: true
+
+  - id: "grid_bias"
+    label: "Grid Bias"
+    enabled: true
+    driver: "keithley_2260b"
+    model: "2260B-800-1"          # 800 V / 1.44 A, 360 W
+    usb_serial: "1407084"
+    prestart_output: true
+
+  - id: "collimating"
+    label: "Collimating Coils"
+    enabled: true
+    driver: "keithley_2260b"
+    model: "2260B-250-9"          # 250 V / 9 A, 720 W
+    usb_serial: "1405224"
+    prestart_output: true
+
 # ---------------------------------------------------------------------------
 #  In-situ ellipsometer (Film Sense FS-1)
 # ---------------------------------------------------------------------------
@@ -450,5 +518,15 @@ logging:
     "HV V": "hv.hv.voltage"
     "HV mA": "hv.hv.current"
     "HV arcs": "hv.hv.arc_count"
+    # Keithley 2260B supplies. Stage-bias voltage is SIGNED by the run's
+    # polarity toggle - see docs/KEITHLEY_2260B.md.
+    "Bias V": "psu.stage_bias.voltage"
+    "Bias A": "psu.stage_bias.current"
+    "Steering V": "psu.steering.voltage"
+    "Steering A": "psu.steering.current"
+    "Grid V": "psu.grid_bias.voltage"
+    "Grid A": "psu.grid_bias.current"
+    "Collim V": "psu.collimating.voltage"
+    "Collim A": "psu.collimating.current"
   # Richer parallel CSV: every channel plus recipe position.
   extended_log: true

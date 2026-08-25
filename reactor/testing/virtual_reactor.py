@@ -1,17 +1,19 @@
 """A "no physics" virtual reactor: fake devices, real everything else.
 
-The fakes replace exactly the four classes Supervisor.start() constructs -
-NiDaqBackend, MksMfc, ScpiInstrument, GlassmanFL - and nothing else.
-Supervisor itself, RecipeRunner, and every control-logic method (set_valve,
-set_mfc_setpoint, start_fill_regulation, start_prestart, the recipe engine's
-whole state machine) run completely unmodified, exactly as they would against
-the real reactor. Only the boundary where bytes would otherwise cross onto a
-wire - DAQmx, Modbus, VISA, the HV supply's serial port - is replaced with an
-in-memory stand-in a test can pose and inspect.
+The fakes replace exactly the five classes Supervisor.start() constructs -
+NiDaqBackend, MksMfc, ScpiInstrument, GlassmanFL, Keithley2260B - and nothing
+else. Supervisor itself, RecipeRunner, and every control-logic method
+(set_valve, set_mfc_setpoint, start_fill_regulation, start_prestart,
+supplies_output_on/off, the recipe engine's whole state machine) run completely
+unmodified, exactly as they would against the real reactor. Only the boundary
+where bytes would otherwise cross onto a wire - DAQmx, Modbus, VISA, the
+supplies' serial ports - is replaced with an in-memory stand-in a test can pose
+and inspect.
 
-Keeping FakeSupply in step matters for a second reason: the real GlassmanFL
-opens a COM port at construction time, so a harness that let Supervisor build
-the real one would have tests talking to the actual 1.5 kV supply.
+Keeping the supply fakes in step matters for a second reason: the real drivers
+open a COM port at connect, so a harness that let Supervisor build the real
+ones would have tests talking to the actual 1.5 kV plasma supply and switching
+on the four DC supplies that bias the stage and drive the coils.
 
 "No physics" is deliberate: the fakes do not model solenoid response time,
 MFC settling curves, or plasma strike probability. A written value is
@@ -221,6 +223,12 @@ class FakeSupply(Device):
     way to set a level or turn HV *on*, because there is none in the program.
     """
 
+    key_prefix = "hv"
+
+    def log_channels(self) -> dict[str, str]:
+        return {"voltage": "voltage", "current": "current",
+                "arcs": "arc_count"}
+
     def __init__(self, cfg) -> None:
         super().__init__(cfg.id, cfg.label or cfg.id)
         self.cfg = cfg
@@ -288,6 +296,137 @@ class FakeSupply(Device):
             "current_trip_enabled": self.current_trip_enabled,
             "faulted": bool(self.faults),
             "faults": list(self.faults),
+        }
+
+
+class FakeKeithley(Device):
+    """Stands in for Keithley2260B (the four DC supplies).
+
+    Set `.voltage` / `.current` to control what the next read() reports and
+    `.ok = False` to simulate the supply powered off. Unlike the Glassman fake
+    this one IS commanded: the program switches its output on at pre-start and
+    off at run end, and sets the voltage of whichever unit is the sample bias.
+
+        vr.supplies["steering"].output_on          # -> True after pre-start
+        vr.supplies["stage_bias"].voltage_calls    # -> [12.0]
+        vr.supplies["stage_bias"].polarity         # -> -1
+
+    `output_calls` records every :OUTP transition so a test can catch a supply
+    being cycled when it should have been left alone - the collimating coil
+    must NOT follow the beam.
+    """
+
+    key_prefix = "psu"
+
+    def log_channels(self) -> dict[str, str]:
+        return {"voltage": "voltage", "current": "current"}
+
+    def __init__(self, cfg) -> None:
+        super().__init__(cfg.id, cfg.label or cfg.id)
+        self.cfg = cfg
+        self.model = cfg.model or "VIRTUAL-2260B"
+        self.serial_number = cfg.usb_serial or "0"
+        self.port = f"virtual:{cfg.id}"
+        self.identity = f"Keithley Instruments Inc.,Model {self.model},{self.serial_number},virtual"
+        self.max_voltage = 250.0
+        self.max_current = 4.725
+        self.ok = True
+        self.voltage: float | None = 0.0
+        self.current: float | None = 0.0
+        self.output_on: bool | None = False
+        self.polarity = 1
+        self.questionable = 0
+        #: Every set_output(...) value, in order. A test asserts on the SHAPE of
+        #: the sequence, not just the final state.
+        self.output_calls: list[bool] = []
+        #: Every set_voltage(...) magnitude, in order.
+        self.voltage_calls: list[float] = []
+        #: Every set_current(...) magnitude, in order. Nothing sets a current
+        #: automatically - only the operator's Hardware-tab field does - so a
+        #: non-empty list after a run is a bug.
+        self.current_calls: list[float] = []
+        self.voltage_setpoint: float | None = 0.0
+        self.current_setpoint: float | None = 0.0
+
+    def mode_label(self) -> str | None:
+        """Same derivation as Keithley2260B: whichever limit the output has
+        reached. Set .voltage/.current against .voltage_setpoint/
+        .current_setpoint to pose a CV or CC supply in a test."""
+        if not self.output_on:
+            return None
+        v, i = self.voltage, self.current
+        v_set, i_set = self.voltage_setpoint, self.current_setpoint
+        if v is None or i is None or v_set is None or i_set is None:
+            return None
+
+        def reached(meas, setpoint):
+            if setpoint is None or setpoint <= 1e-9:
+                return None
+            return (setpoint - abs(meas)) / setpoint
+
+        dv, di = reached(v, v_set), reached(i, i_set)
+        at_v = dv is not None and dv <= 0.01
+        at_i = di is not None and di <= 0.01
+        if at_v and at_i:
+            return "CV" if dv <= di else "CC"
+        if at_v:
+            return "CV"
+        if at_i:
+            return "CC"
+        return None
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    async def disconnect(self) -> None:
+        """Closes the link only - deliberately does NOT switch the output off,
+        mirroring Keithley2260B.disconnect."""
+        self.connected = False
+
+    async def set_output(self, on: bool) -> None:
+        self.output_calls.append(bool(on))
+        self.output_on = bool(on)
+
+    async def set_voltage(self, volts: float) -> None:
+        # Magnitude only, like the real driver: the supply is single-quadrant.
+        self.voltage_calls.append(abs(float(volts)))
+        self.voltage_setpoint = abs(float(volts))
+
+    async def set_current(self, amps: float) -> None:
+        self.current_calls.append(abs(float(amps)))
+        self.current_setpoint = abs(float(amps))
+
+    async def read(self) -> list[Reading]:
+        vkey = f"psu.{self.id}.voltage"
+        ikey = f"psu.{self.id}.current"
+        if not self.ok or self.voltage is None or self.current is None:
+            return [self._bad(vkey, "V", "virtual: not ok"),
+                    self._bad(ikey, "A", "virtual: not ok")]
+        volts = self.voltage * (-1 if self.polarity < 0 else 1)
+        return [Reading(key=vkey, value=volts, unit="V"),
+                Reading(key=ikey, value=self.current, unit="A")]
+
+    def status(self) -> dict:
+        return {
+            **super().status(),
+            "driver": self.cfg.driver,
+            "kind": "keithley_2260b",
+            "model": self.model,
+            "port": self.port,
+            "usb_serial": self.serial_number,
+            "identity": self.identity,
+            "max_voltage": self.max_voltage,
+            "max_current": self.max_current,
+            "voltage": self.voltage,
+            "current": self.current,
+            "voltage_setpoint": self.voltage_setpoint,
+            "current_setpoint": self.current_setpoint,
+            "output_on": self.output_on,
+            "mode": self.mode_label(),
+            "polarity": self.polarity,
+            "is_sample_bias": self.cfg.sample_bias,
+            "prestart_output": self.cfg.prestart_output,
+            "questionable": self.questionable,
         }
 
 
@@ -366,7 +505,8 @@ class VirtualReactor:
         for ps in cfg.power_supplies:
             if not ps.enabled:
                 continue
-            dev = FakeSupply(ps)
+            dev = (FakeSupply(ps) if ps.driver == "glassman_fl"
+                   else FakeKeithley(ps))
             await dev.connect()
             sup.supplies[ps.id] = dev
             self.supplies[ps.id] = dev

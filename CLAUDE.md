@@ -39,6 +39,11 @@ Related standing conventions:
 Windows 10. Python 3.12 in `.venv/` (deps already installed). Shell is PowerShell;
 a Bash tool (Git Bash) is also available. No `npm`/`go`/`bash` on PATH.
 
+Normal launch is the Desktop shortcut **Reactor Interface** (pinnable):
+`pythonw.exe -m reactor --port 8000 --open`, no console window, output to
+`server.log`. Under pythonw `sys.stdout`/`sys.stderr` are None, so `__main__`
+redirects them to that file - without it uvicorn dies on startup with no trace.
+
 ```bash
 python -m reactor            # serve the interface at http://127.0.0.1:8000
 python -m reactor --check    # validate config + print the I/O summary, no serving
@@ -78,6 +83,8 @@ really the precursor-1 Baratron or that a valve physically opens.
 config/reactor.yaml     the ONLY hardware map (channels, gauge curves, valves, MFCs). Errors name the key.
 config/recipes/*.yaml   file recipes; EE-ALD/EE-CVD are built from UI params instead (build_ald_recipe/build_cvd_recipe)
 config/labels.json      operator display-name overrides (valves/MFCs/gauges), persisted from the UI
+config/run_params.json  Run-tab parameters, SERVER-owned so every browser (incl. over Tailscale)
+                        sees the same values; each browser's localStorage is only a cache
 config/valve_state.json last-commanded valve state, restored (not hardware-read) into the model at startup
 reactor/
   config.py             pydantic validation of the YAML
@@ -92,6 +99,10 @@ reactor/
   devices/glassman_fl.py     XP Glassman FL HV plasma supply over serial. Polls V/I/arc-count;
                         the ONE command sent is hv_off() at run end / abort. No setpoints,
                         no HV-on, ever (docs/GLASSMAN_FL.md)
+  devices/keithley_2260b.py  4 Keithley 2260B DC supplies (stage bias / steering / grid /
+                        collimating). Logs V+I; switches OUTPUTS on at pre-start, off at run
+                        end; sets voltage on the sample-bias unit only. Ports resolved by USB
+                        SERIAL, never by COM number (docs/KEITHLEY_2260B.md)
   devices/ellipsometer.py    FS-1 live TCP stream: read-only subscriber + record decoder
   analysis/ellipsometer_merge.py   post-run join of a refit FS-1 file onto the reactor clock
   testing/virtual_reactor.py fake DAQ/MFC/instrument, real Supervisor above them (see tests/README.md)
@@ -148,6 +159,19 @@ docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWA
   leaves the supply in REMOTE until LOC/REM is pressed.
   `python -m tools.probe_glassman` if it ever goes quiet.
   Full protocol + bring-up account in **[docs/GLASSMAN_FL.md](docs/GLASSMAN_FL.md)**.
+- **4 Keithley 2260B DC supplies** on USB, SCPI over a **CDC virtual COM port**
+  (NOT USBTMC like the DMM6500): `stage_bias` 2260B-250-4 #1412016,
+  `steering` 2260B-80-13 #1408023, `grid_bias` 2260B-800-1 #1407084,
+  `collimating` 2260B-250-9 #1405224. **Matched by USB serial, never by COM
+  number** - four near-identical supplies on one rack and Windows renumbers
+  ports freely; the driver refuses a unit whose *IDN? serial disagrees. Outputs
+  are switched ON at pre-start and OFF at run end/abort, and are deliberately
+  NOT cycled with the beam (the collimating coil stabilises the plasma when the
+  beam dump is grounded). Only the sample-bias unit's VOLTAGE is ever set, from
+  the run's Sample bias field, and only when it is non-zero. Since 2026-08-25 the
+  Hardware tab also carries per-supply voltage/current fields, an output toggle
+  and a CV/CC light, so all four can be driven by hand; nothing sets a current
+  AUTOMATICALLY. **[docs/KEITHLEY_2260B.md](docs/KEITHLEY_2260B.md)**.
 - **NI 9265** current outputs: purpose unknown, deferred (`reactor-5u2`).
 - **ACCES USB-AO16-8A** 8-channel analog output board: present and healthy,
   purpose not established, unused by this program.
@@ -248,6 +272,34 @@ The header **alert chip** shows only conditions that are true right now (fill
 pressure off setpoint, plasma out, a disconnected or faulted device) and
 clears itself when they clear; it used to pin the newest error event for two
 minutes. The event log is the history.
+
+The **four Keithley 2260B DC supplies** (stage bias, steering, grid,
+collimating) are in as of 2026-08-25: voltage and current logged for all four,
+monitor cards on the Hardware tab, and their **outputs switched on at pre-start
+and off at run end/abort**. They stay on for the whole run and are never cycled
+by plasma events. The **sample bias** is the conditional one - a new run field
+for both EE-ALD and EE-CVD, with a +/- toggle that records lead orientation and
+signs the logged voltage (the supply is single-quadrant, so the sign never
+reaches the instrument). Its output comes on only for a non-zero value. *Min
+current (µA)* moved into the Advanced timing collapsible to make room. Current
+limits are set on the front panels and never touched by this program.
+
+The **event log** holds 20 000 entries server-side and the browser scrolls
+all of them, seeded once from `/api/events` and appended from the live frame
+(which carries only the last 200 - sending the whole buffer at 5 Hz would be
+~1 MB/s over Tailscale). `server.log` is the permanent record; the in-memory
+buffer starts empty after a restart.
+
+Diagnostics has a **Shut down server** button (2026-08-25): it stops this
+server AND kills any other reactor server still running, then you restart from
+the shortcut. It replaced a Restart button that re-exec'd the process - that
+lasted a few hours, because an old instance survived the restart and sat holding
+COM8-COM12 while the new one owned port 8000, leaving every device unreachable.
+Shutdown kills siblings first, then tears itself down normally and calls
+`os._exit(0)` (falling out of `main()` does NOT end the process - a non-daemon
+thread keeps it alive, which is how that orphan survived). It aborts a running
+recipe and stops gas either way, so the confirm dialog spells that out; there is
+no guard beyond the dialog.
 
 Full history — everything shipped and everything still open — is in the
 **bd** issue tracker (`bd list --status=closed`, `bd ready`), not just this

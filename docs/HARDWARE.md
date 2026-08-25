@@ -50,6 +50,9 @@ below. Its COM number is not stable; a driver reinstall moved it from COM7.
   [FS-1 ellipsometer](#film-sense-fs-1-ellipsometer) below.
 - **XP Glassman FL1.5F1.0 high-voltage plasma supply** on USB (`COM8`) — see
   [Glassman FL supply](#glassman-fl-high-voltage-supply) below.
+- **4 × Keithley 2260B DC power supplies** on USB (`COM9`–`COM12` as of
+  2026-08-21) — stage bias, steering coils, grid bias, collimating coils. See
+  [Keithley 2260B supplies](#keithley-2260b-dc-supplies) below.
 - **ACCES USB-AO16-8A** — 8-channel analog output board, plugged in and healthy
   on the CyUSB driver since 2026-08-20. **Purpose not established.** It appeared
   the same day as the Glassman and would suit analog programming of it via J1,
@@ -279,6 +282,43 @@ Protocol, scaling, the read-only decision, and the full bring-up account are in
 sister-series EJ/ET/EY/FJ/FR manual (102002-177) describes a *different*
 product — different connector numbering, different interlock pins, 10-bit
 monitors instead of 12-bit, no address byte. Use **102002-168 Rev H**.
+
+### Keithley 2260B DC supplies
+
+Four programmable DC supplies drive the beam column and the sample stage.
+Identified 2026-08-21 by plugging them in one at a time and watching USB
+enumeration.
+
+| Role | Model | Serial | Port | Rated (from the instrument) |
+|---|---|---|---|---|
+| Stage Bias | 2260B-250-4 | `1412016` | COM9 | 262.5 V / 4.725 A |
+| Steering Coils | 2260B-80-13 | `1408023` | COM10 | 84.0 V / 14.175 A |
+| Grid Bias | 2260B-800-1 | `1407084` | COM11 | 840.0 V / 1.512 A |
+| Collimating Coils | 2260B-250-9 | `1405224` | COM12 | 262.5 V / 9.450 A |
+
+Maxima are read from each supply (`:SOUR:VOLT? MAX`), not derived from the model
+name — the suffix is **not** the current rating (`-4` is 4.5 A, `-1` is 1.44 A),
+and each reports 105% of nameplate. They are also **auto-ranging**: max volts
+and max amps cannot be drawn together, which is why 800 V × 1.44 A lands on the
+360 W figure.
+
+**Not USBTMC.** Each is a USB **CDC virtual COM port**
+(`USB\VID_05E6&PID_2260`, "USB Serial Device"), bound by the in-box Windows
+driver — so `ASRL<n>::INSTR`, not `USB0::…::INSTR`. SCPI over serial.
+
+**Matched by USB serial, never by COM port.** Four near-identical supplies share
+one rack and Windows renumbers ports freely; the serial is in the device
+descriptor, so the driver resolves the port from it and refuses any unit whose
+`*IDN?` serial disagrees.
+
+Firmware is not uniform: the stage bias runs `01.84.20190904`, the other three
+`01.72.20150702`.
+
+As found 2026-08-21, all outputs off, with Zach's working setpoints dialled in
+— 20 V/0.5 A, 30.07 V/3.7 A, 100 V/0.2 A, 150 V/2.5 A. This program logs their
+voltage and current, switches their outputs on at pre-start and off at run end,
+and sets the sample-bias voltage only. Current limits are never touched. Full
+account in **[KEITHLEY_2260B.md](KEITHLEY_2260B.md)**.
 
 ### End-to-end read verified
 

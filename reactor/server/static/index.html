@@ -136,6 +136,14 @@
         border:1px solid var(--line);color:var(--dim);white-space:nowrap}
   .chip.on{border-color:var(--ok);color:var(--ok)}
   .chip.hot{border-color:var(--bad);color:var(--bad);font-weight:600}
+  /* CV/CC indicator: blank (and invisible) while the output is off. */
+  .mode{font-size:11px;font-weight:700;padding:1px 6px;border-radius:4px;
+        letter-spacing:.5px}
+  .mode.cv{background:#10331a;color:var(--ok);border:1px solid var(--ok)}
+  .mode.cc{background:#3a2a08;color:var(--warn);border:1px solid var(--warn)}
+  /* An output that is live reads as live on its own button. */
+  button.danger{border-color:var(--bad);color:var(--bad)}
+  button.danger:hover:not(:disabled){background:#2a0f10}
   .tile{border:1px solid var(--line);border-radius:8px;padding:10px 11px;
         background:#0d1117;min-width:0}
   .tile.trip{border-color:var(--bad);background:#2a0f10}
@@ -357,8 +365,18 @@
             <label>Pump A (s)<input type="number" id="p_pump_a_s" step="0.1" value="10"></label>
             <label data-mode="ald">Beam exposure (s)<input type="number" id="p_beam_s" step="0.1" value="5"></label>
             <label data-mode="ald">Pump B (s)<input type="number" id="p_pump_b_s" step="0.1" value="10"></label>
-            <label>Min current (µA)<input type="number" id="p_min_current_ua" step="1" value="500"></label>
+            <label>Sample bias (V)<input type="number" id="p_sample_bias_v" step="1" min="0" value="0"></label>
+            <label>Bias polarity<select id="p_sample_bias_polarity">
+              <option value="1">+ positive to stage</option>
+              <option value="-1">&minus; negative to stage</option>
+            </select></label>
           </div>
+          <div class="hint">Sample bias comes on at pre-start only when it is
+            non-zero, and stays on for the whole run. Enter a magnitude — the
+            supply cannot source a negative voltage, so the polarity toggle
+            records which way you ran the leads onto the stage and signs the
+            <em>logged</em> voltage. Its current limit stays whatever you set on
+            the supply's front panel.</div>
         </div>
 
         <details class="sub" id="gasSchedSection" open>
@@ -422,6 +440,7 @@
               <label class="adv">Fill pulse on (s)<input type="number" id="p_fill_pulse_on_s" step="0.01" value="0.10"></label>
               <label class="adv">Fill pulse off (s)<input type="number" id="p_fill_pulse_off_s" step="0.01" value="0.30"></label>
               <label class="adv">Flag tolerance (%)<input type="number" id="p_tolerance_pct" step="1" value="20"></label>
+              <label class="adv">Min current (µA)<input type="number" id="p_min_current_ua" step="1" value="500"></label>
               <label class="adv">Reignite pulse (s)<input type="number" id="p_reignite_pulse_s" step="0.01" min="0" value="0.10"></label>
               <label class="adv">Reignite settle (s)<input type="number" id="p_reignite_settle_s" step="0.01" min="0" value="0.15"></label>
               <label class="adv">Ar close delay (s)<input type="number" id="p_ar_close_delay_s" step="1" min="0" value="10"></label>
@@ -729,6 +748,14 @@
             </tr></thead>
             <tbody id="conns"></tbody>
           </table>
+          <!-- Restarting picks up changed code. It is a graceful shutdown +
+               re-exec, not a kill, so Supervisor.stop() runs normally. The
+               consequences are spelled out in the confirm dialog rather than
+               here, because that is where they get read. -->
+          <div class="row" style="margin-top:12px">
+            <button id="shutdownBtn" class="danger">Shut down server</button>
+            <span class="hint" id="shutdownHint" style="flex:1"></span>
+          </div>
         </div>
       </section>
     </div>
@@ -816,10 +843,62 @@ function reconcile(container, items, key, buildHtml){
   }
 }
 
+/* Fill the charts from the server's own history before the first frame arrives.
+   Without this, a browser that connects mid-session starts with empty plots and
+   has to accumulate an hour of samples to catch up - which is what every
+   Tailscale client saw. The server already keeps ~1 h of trend; ask for it.
+
+   The two sides name some channels differently: the server's history rows are
+   the run-export shape (inst_ammeter, gauge_prec1_dose, aux_bubbler) while the
+   chart wants the render() shape (current, prec_pressure, bubbler_temp). Map
+   them rather than renaming either - the server names are baked into saved
+   analysis-page layouts, and the client names are used throughout drawChart. */
+async function seedTrend(){
+  try{
+    const r = await fetch("/api/trend?limit=18000");
+    if(!r.ok) return;
+    const rows = (await r.json()).samples || [];
+    const seeded = [];
+    for(const s of rows){
+      const o = {
+        t: s.t,
+        pressure: s.pressure,
+        current: s.inst_ammeter,
+        prec_pressure: s.gauge_prec1_dose,
+        stage_temp: s.stage_temp,
+        bubbler_temp: s.aux_bubbler,
+        dosing: s.dosing ? 1 : 0,
+        beam_on: s.beam_on ? 1 : 0,
+      };
+      // mfc_* already share a name on both sides.
+      for(const k in s) if(k.startsWith("mfc_")) o[k] = s[k];
+      seeded.push(o);
+    }
+    if(seeded.length){
+      trend.splice(0, trend.length, ...seeded);
+      drawAllCharts();
+    }
+  }catch(_){ /* no history is survivable - the charts just start empty */ }
+}
+
 // ---------------------------------------------------------------- transport
+const SHUTDOWN_HINT = "Stops this server and any other reactor server still "
+  + "running, then start it again from the shortcut. Aborts a running recipe, "
+  + "and gas stops either way — read the prompt.";
+
 function connect(){
   const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen  = () => setLink("live", "live");
+  ws.onopen  = () => {
+    setLink("live", "live");
+    // If we are talking to a server again, no shutdown is in progress - so
+    // whatever disabled the button (a shutdown that failed, or a server that
+    // came back some other way) should not leave the control dead.
+    const sb = $("shutdownBtn"), sh = $("shutdownHint");
+    if(sb && sb.disabled){
+      sb.disabled = false;
+      if(sh) sh.textContent = SHUTDOWN_HINT;
+    }
+  };
   ws.onclose = () => { setLink("disconnected", "bad"); setTimeout(connect, 1500); };
   ws.onerror = () => setLink("error", "bad");
   ws.onmessage = ev => render(JSON.parse(ev.data));
@@ -1018,7 +1097,45 @@ function instruments(s){
 function supplies(s){
   const box = $("supplies");
   const list = s.power_supplies || [];
-  reconcile(box, list, p => p.id, p => `
+  const isK = p => p.driver === "keithley_2260b";
+  /* Two shapes on one card grid. The Glassman is monitor-only and reports arc
+     count / HV status / fault flags; the Keithley DC supplies report measured
+     V and I and an output state this program switches. Neither has a setpoint
+     input: the Glassman is set by hand, and the Keithleys take only their
+     output enable plus (bias unit only) a voltage from the run parameters. */
+  reconcile(box, list, p => p.id, p => isK(p) ? `
+    <div class="tile psu" data-id="${esc(p.id)}">
+      <div class="top">
+        <span class="name">${esc(p.label || p.id)}</span>
+        <span class="mode" data-f="mode" title="constant-voltage / constant-current"></span>
+        <div style="flex:1"></div>
+        <span class="read"><span data-f="v">—</span><span class="unit">V</span></span>
+      </div>
+      <div class="kv"><span>Current</span><span><span data-f="i">—</span> A</span></div>
+      <div class="row" style="margin-top:6px">
+        <input type="number" step="0.1" min="0" placeholder="V"
+               id="psuv_${esc(p.id)}" data-f="vin" style="flex:1;min-width:64px">
+        <input type="number" step="0.01" min="0" placeholder="A"
+               id="psui_${esc(p.id)}" data-f="iin" style="flex:1;min-width:64px">
+        <button data-act="psuset" data-id="${esc(p.id)}">Set</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button data-act="psuout" data-id="${esc(p.id)}" data-f="outbtn"
+                style="flex:1">Output</button>
+      </div>
+      <div class="kv" style="margin-top:6px"><span>Setpoint (device)</span>
+        <span data-f="sp">—</span></div>
+      <div class="chips">
+        <span class="chip" data-f="chipOut">output</span>
+        <span class="chip" data-f="chipRole"></span>
+        <span class="chip" data-f="chipQues"></span>
+      </div>
+      <div class="kv"><span>Model</span><span data-f="model">—</span></div>
+      <div class="kv"><span>Rated</span><span data-f="rated">—</span></div>
+      <div class="kv"><span>Link</span><span data-f="link">—</span></div>
+      <div class="note" data-f="err"></div>
+      <div class="hint" data-f="hint"></div>
+    </div>` : `
     <div class="tile" data-id="${esc(p.id)}">
       <div class="top">
         <span class="name">${esc(p.label || p.id)}</span>
@@ -1040,42 +1157,93 @@ function supplies(s){
       <div class="note" data-f="faults"></div>
       <div class="note" data-f="err"></div>
       <div class="hint">Monitor only — set voltage and current on the supply's
-        front panel.</div>
+        front panel. HV is commanded off at the end of a run.</div>
     </div>`);
 
   for(const p of list){
     const el = box.querySelector(`[data-id="${CSS.escape(p.id)}"]`);
     if(!el) continue;
-    const rd = s.readings["hv."+p.id+".voltage"];
+    const pre = isK(p) ? "psu." : "hv.";
+    const rd = s.readings[pre+p.id+".voltage"];
     const bad = !!(rd && !rd.ok);
-    /* Red border for a dead link OR an asserted fault: both mean "the number
-       above is not what you think it is". */
-    cls(el, "trip", !p.connected || !!p.faulted);
-
-    const v = put(el, "v", sci(s.snapshot["hv."+p.id+".voltage"], 4));
-    if(v) cls(v, "stale", bad);
-    put(el, "i", sci(s.snapshot["hv."+p.id+".current"], 4));
-    const arcs = s.snapshot["hv."+p.id+".arc_count"];
-    put(el, "arcs", (arcs === null || arcs === undefined) ? "—" : String(arcs));
-
     const chip = (field, text, on, hot) => {
       const c = put(el, field, text);
       if(c){ cls(c, "on", !!on && !hot); cls(c, "hot", !!hot); }
     };
-    chip("chipHv",   p.hv_on ? "HV ON" : "HV off", p.hv_on, p.hv_on);
-    chip("chipMode", p.voltage_mode === null || p.voltage_mode === undefined
-                       ? "mode —"
-                       : (p.voltage_mode ? "V mode" : "I mode"), false, false);
-    chip("chipRem",  p.remote ? "remote" : "local", false, false);
-    chip("chipTrip", p.current_trip_enabled ? "I-trip on" : "I-trip off",
-                     p.current_trip_enabled, false);
 
+    const v = put(el, "v", sci(s.snapshot[pre+p.id+".voltage"], 4));
+    if(v) cls(v, "stale", bad);
+    put(el, "i", sci(s.snapshot[pre+p.id+".current"], 4));
     put(el, "model", p.model || p.driver || "—");
-    put(el, "link", `${p.port || "?"} · ${p.baud || "?"} 8N1 · addr ${p.address}`
-                    + (p.firmware ? ` · fw ${p.firmware}` : ""));
-    put(el, "faults", (p.faults && p.faults.length)
-      ? "FAULT: " + p.faults.join(", ") : "");
     put(el, "err", bad ? rd.detail : (p.error || ""));
+
+    if(isK(p)){
+      /* Red border for a dead link only. An energised output is normal here —
+         these run for the whole deposition — so it is flagged green, not red,
+         and the questionable-status chip carries the alarm. */
+      cls(el, "trip", !p.connected);
+      chip("chipOut", p.output_on === null || p.output_on === undefined
+                        ? "output —"
+                        : (p.output_on ? "OUTPUT ON" : "output off"),
+                      p.output_on, false);
+      const sign = p.polarity < 0 ? "−" : "+";
+      chip("chipRole", p.is_sample_bias ? `sample bias  ${sign}` : "", false, false);
+      /* Non-zero questionable-status register: the bit map is not documented
+         in anything we have, so show the raw value rather than inventing a
+         meaning for it. */
+      chip("chipQues", p.questionable ? `status 0x${(p.questionable).toString(16)}` : "",
+                       false, !!p.questionable);
+      put(el, "rated", (p.max_voltage != null && p.max_current != null)
+        ? `${(+p.max_voltage).toFixed(1)} V · ${(+p.max_current).toFixed(3)} A max`
+        : "—");
+      /* Port is REPORTED, not configured — resolved from the USB serial. */
+      put(el, "link", `${p.port || "?"} · USB serial ${p.usb_serial || "?"}`);
+      put(el, "sp", (p.voltage_setpoint != null && p.current_setpoint != null)
+        ? `${(+p.voltage_setpoint).toFixed(3)} V · ${(+p.current_setpoint).toFixed(3)} A`
+        : "—");
+
+      /* CV/CC light. Blank while the output is off - the mode has no meaning
+         then, and the raw-value decoding is provisional (see OUTPUT_MODES in
+         the driver), so not claiming anything is the honest default. */
+      const md = put(el, "mode", p.mode || "");
+      if(md){ cls(md, "cv", p.mode === "CV"); cls(md, "cc", p.mode === "CC"); }
+
+      const ob = el.querySelector('[data-f="outbtn"]');
+      if(ob){
+        ob.textContent = p.output_on ? "Output ON — click to turn off"
+                                     : "Output off — click to turn on";
+        cls(ob, "danger", !!p.output_on);
+        ob.dataset.state = p.output_on ? "1" : "0";
+        ob.disabled = !p.connected;
+      }
+      for(const f of ["vin", "iin"]){
+        const inp = el.querySelector(`[data-f="${f}"]`);
+        if(inp) inp.disabled = !p.connected;
+      }
+      const sb = el.querySelector('[data-act="psuset"]');
+      if(sb) sb.disabled = !p.connected;
+
+      put(el, "hint", p.is_sample_bias
+        ? "Pre-start sets this from the run's Sample bias field and switches it "
+          + "on only when that is non-zero. Fields above override it by hand."
+        : "Output switched on at pre-start, off at run end. Fields above set it "
+          + "by hand.");
+    } else {
+      cls(el, "trip", !p.connected || !!p.faulted);
+      const arcs = s.snapshot["hv."+p.id+".arc_count"];
+      put(el, "arcs", (arcs === null || arcs === undefined) ? "—" : String(arcs));
+      chip("chipHv",   p.hv_on ? "HV ON" : "HV off", p.hv_on, p.hv_on);
+      chip("chipMode", p.voltage_mode === null || p.voltage_mode === undefined
+                         ? "mode —"
+                         : (p.voltage_mode ? "V mode" : "I mode"), false, false);
+      chip("chipRem",  p.remote ? "remote" : "local", false, false);
+      chip("chipTrip", p.current_trip_enabled ? "I-trip on" : "I-trip off",
+                       p.current_trip_enabled, false);
+      put(el, "link", `${p.port || "?"} · ${p.baud || "?"} 8N1 · addr ${p.address}`
+                      + (p.firmware ? ` · fw ${p.firmware}` : ""));
+      put(el, "faults", (p.faults && p.faults.length)
+        ? "FAULT: " + p.faults.join(", ") : "");
+    }
   }
 }
 
@@ -1403,6 +1571,10 @@ function updateEta(r, running){
 // ------------------------------------------------ run recording + auto-download
 let runData = null;     // {startT, rows:[...]} while a run is active
 let lastRunState = "idle";
+/* Set when THIS browser presses Start (or Start CVD). Only that browser saves
+   the client-side CSV at run end - see recordRun. Remote viewers over Tailscale
+   were all getting a save dialog for runs they had nothing to do with. */
+let iStartedThisRun = false;
 function recordRun(s, sample){
   const r = s.recipe;
   const running = ["running","paused","aborting"].includes(r.state);
@@ -1419,7 +1591,14 @@ function recordRun(s, sample){
   // on transition out of a running state into done/idle/error, export
   if(runData && !running && ["done","idle","error"].includes(r.state)
      && lastRunState !== r.state){
-    if(runData.rows.length) downloadRun(runData);
+    /* Only the browser that STARTED the run saves a copy.
+       Every connected client used to fire this, so every laptop tailscaled
+       into the server got a save dialog when a run ended - including ones
+       just watching. The server-side export (data/<run>/..._run.csv) is the
+       authoritative copy and is richer than this one anyway; this is a
+       convenience for whoever pressed Start. */
+    if(runData.rows.length && iStartedThisRun) downloadRun(runData);
+    iStartedThisRun = false;
     runData = null;
   }
   lastRunState = r.state;
@@ -1465,12 +1644,25 @@ function conns(s){
   for(const i of s.instruments)
     rows.push(tr(i.label || i.id, "SCPI · VISA", i.resource,
       i.connected ? "OK" : "FAIL", i.error || i.identity || ""));
-  for(const p of (s.power_supplies || []))
-    rows.push(tr(p.label || p.id, "Glassman ASCII · serial · monitor + HV off",
-      `${p.port || "?"} ${p.baud || "?"} addr ${p.address}`,
-      p.connected ? "OK" : "FAIL",
-      p.error || ((p.faults && p.faults.length) ? "FAULT: " + p.faults.join(", ")
-                  : (p.firmware ? "firmware " + p.firmware : ""))));
+  for(const p of (s.power_supplies || [])){
+    if(p.driver === "keithley_2260b"){
+      // Address column shows the USB serial, not just the port: the port is
+      // resolved FROM the serial and can move, the serial cannot.
+      rows.push(tr(p.label || p.id, "Keithley 2260B · SCPI over USB serial",
+        `${p.port || "?"} · serial ${p.usb_serial || "?"}`,
+        p.connected ? "OK" : "FAIL",
+        p.error
+          || (p.questionable
+                ? `questionable status 0x${(p.questionable).toString(16)}`
+                : (p.output_on ? "output ON" : "output off"))));
+    } else {
+      rows.push(tr(p.label || p.id, "Glassman ASCII · serial · monitor + HV off",
+        `${p.port || "?"} ${p.baud || "?"} addr ${p.address}`,
+        p.connected ? "OK" : "FAIL",
+        p.error || ((p.faults && p.faults.length) ? "FAULT: " + p.faults.join(", ")
+                    : (p.firmware ? "firmware " + p.firmware : ""))));
+    }
+  }
   const e = s.ellipsometer;
   if(e && e.enabled)
     rows.push(tr(e.label || "FS-1 Ellipsometer", "TCP stream · read-only",
@@ -1569,11 +1761,49 @@ function liveAlerts(s){
   out.sort((a, b) => (b.bad ? 1 : 0) - (a.bad ? 1 : 0));   // errors first
   return out;
 }
+/* The event log the panel renders. Seeded once from /api/events (the server
+   keeps 20000) and then appended from each telemetry frame, which carries only
+   the last 200 - shipping the whole buffer 5x a second would be about a MB/s of
+   repetition, which is precisely the wrong thing to do over Tailscale.
+
+   Keyed by timestamp+message to drop the overlap between the seed and the first
+   few frames. Two genuinely identical events in the same millisecond would
+   collapse into one; that is a fair trade for not double-printing every reload. */
+let EVENTS = [];
+let EVENT_SEEN = new Set();
+
+function pushEvents(list){
+  let added = 0;
+  for(const e of list || []){
+    const key = `${e.t}|${e.message}`;
+    if(EVENT_SEEN.has(key)) continue;
+    EVENT_SEEN.add(key);
+    EVENTS.push(e);
+    added++;
+  }
+  if(EVENTS.length > 20000){
+    EVENTS = EVENTS.slice(-20000);
+    EVENT_SEEN = new Set(EVENTS.map(e => `${e.t}|${e.message}`));
+  }
+  return added;
+}
+
+async function seedEvents(){
+  try{
+    const r = await fetch("/api/events");
+    if(!r.ok) return;
+    pushEvents((await r.json()).events || []);
+  }catch(_){ /* the live tail alone still works */ }
+}
+
 function events(s){
-  const list = s.events || [];
-  setHtml($("events"), list.slice().reverse().map(e =>
-    `<div><span class="t">${clock(e.t)}</span>
-     <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
+  // Only re-render when something actually arrived - this runs at 5 Hz and the
+  // log can be twenty thousand rows.
+  if(pushEvents(s.events)){
+    setHtml($("events"), EVENTS.slice().reverse().map(e =>
+      `<div><span class="t">${clock(e.t)}</span>
+       <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
+  }
 
   const live = liveAlerts(s);
   const chip = $("alertChip");
@@ -2044,6 +2274,40 @@ document.addEventListener("click", async ev => {
       if(v === null) return;
       const res = await post(`/api/mfc/${id}/setpoint`, {sccm: v});
       toast(`${id} setpoint set to ${res.setpoint_sccm} sccm`, true);
+    } else if(b.dataset.act === "psuset"){
+      /* Either field on its own is a valid edit - blank means "leave it".
+         Voltage first, so raising both never briefly runs at the old (lower)
+         current limit against the new voltage. */
+      const vEl = document.querySelector(`#psuv_${CSS.escape(id)}`);
+      const iEl = document.querySelector(`#psui_${CSS.escape(id)}`);
+      const vRaw = (vEl && vEl.value.trim()) || "";
+      const iRaw = (iEl && iEl.value.trim()) || "";
+      if(!vRaw && !iRaw){ toast(`Enter a voltage or a current for ${id} first.`); return; }
+      const done = [];
+      if(vRaw){
+        const v = readNum(`#psuv_${CSS.escape(id)}`, `${id} voltage`);
+        if(v === null) return;
+        await post(`/api/supply/${id}/voltage`, {volts: v});
+        done.push(`${v} V`);
+      }
+      if(iRaw){
+        const a = readNum(`#psui_${CSS.escape(id)}`, `${id} current`);
+        if(a === null) return;
+        await post(`/api/supply/${id}/current`, {amps: a});
+        done.push(`${a} A`);
+      }
+      toast(`${id} set to ${done.join(" · ")}`, true);
+    } else if(b.dataset.act === "psuout"){
+      /* Turning an output ON is the one click here that energises something,
+         so it asks first. Turning off never does. */
+      const on = b.dataset.state !== "1";
+      if(on && !confirm(`Turn ON the ${id} output?
+
+`
+          + `It will source at whatever this supply's setpoints currently are.`))
+        return;
+      await post(`/api/supply/${id}/output`, {on});
+      toast(`${id} output ${on ? "ON" : "off"}`, true);
     }
   }catch(_){ /* toast already shown */ }
 });
@@ -2078,7 +2342,8 @@ document.addEventListener("click", async ev => {
 // preferences that sit alongside them. What actually gets sent to the server is
 // runParams(), not this list.
 const ALD_KEYS = ["cycles","dose_pressure_torr","dose_s","pump_a_s","beam_s",
-  "pump_b_s","min_current_ua","fill_pulse_on_s","fill_pulse_off_s","tolerance_pct",
+  "pump_b_s","min_current_ua","sample_bias_v","sample_bias_polarity",
+  "fill_pulse_on_s","fill_pulse_off_s","tolerance_pct",
   "reignite_pulse_s","reignite_settle_s","ar_close_delay_s",
   "pre_ar_sccm","pre_valve_delay_s","pre_hold_s",
   "gas_overlap_s","smooth_on","smooth_n",
@@ -2116,18 +2381,48 @@ function paramSet(k, v){
   if(!el) return;
   if(el.type === "checkbox") el.checked = !!v; else el.value = v;
 }
-function loadParams(){
+/* Run parameters are owned by the SERVER, with localStorage as a per-browser
+   cache. They used to be localStorage-only, so every machine had its own set
+   and a Tailscale view showed defaults instead of what the reactor PC had
+   configured. One reactor, one set of parameters.
+
+   Load order: local cache first (instant, and works if the server is
+   unreachable), then the server's copy on top of it. */
+async function loadParams(){
   try{
     const p = JSON.parse(localStorage.getItem("aldParams")||"{}");
     for(const k of ALD_KEYS) if(p[k]!=null) paramSet(k, p[k]);
   }catch(_){}
+  try{
+    const r = await fetch("/api/run_params");
+    if(r.ok){
+      const p = (await r.json()).params || {};
+      for(const k of ALD_KEYS) if(p[k]!=null) paramSet(k, p[k]);
+      // Mirror the server's copy locally so the next load starts from it.
+      if(Object.keys(p).length) localStorage.setItem("aldParams", JSON.stringify(p));
+    }
+  }catch(_){ /* server copy unavailable - the cache above already applied */ }
   updateReigniteHint();
   updateGasSchedHint();
   updateSmoothHint();
 }
+
+let saveParamsTimer = null;
 function saveParams(){
   const p={}; for(const k of ALD_KEYS) p[k]=paramGet(k);
   localStorage.setItem("aldParams", JSON.stringify(p));
+  /* Debounced: saveParams() fires on every keystroke in the params grid, and
+     one POST per character would be silly. Fire-and-forget - a failed save
+     leaves the local cache correct and is not worth interrupting the operator
+     over. */
+  clearTimeout(saveParamsTimer);
+  saveParamsTimer = setTimeout(() => {
+    fetch("/api/run_params", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(p)
+    }).catch(() => {});
+  }, 800);
 }
 
 /* Run name. Deliberately NOT persisted in localStorage with the other params:
@@ -2236,6 +2531,11 @@ function runParams(){
     dose_pressure_torr: P("dose_pressure_torr"),
     dose_s: P("dose_s"), pump_a_s: P("pump_a_s"),
     min_current_a: (P("min_current_ua")||500)*1e-6,
+    // Magnitude and lead orientation. The supply is single-quadrant, so the
+    // sign only ever reaches the LOG, never the instrument - see
+    // Supervisor.supplies_output_on.
+    sample_bias_v: Math.abs(P("sample_bias_v") || 0),
+    sample_bias_polarity: parseInt($("p_sample_bias_polarity").value, 10) || 1,
     fill_pulse_on_s: P("fill_pulse_on_s"), fill_pulse_off_s: P("fill_pulse_off_s"),
     tolerance_frac: (P("tolerance_pct")||20)/100,
     reignite_pulse_s: P("reignite_pulse_s"), reignite_settle_s: P("reignite_settle_s"),
@@ -2267,6 +2567,7 @@ $("aldStart").onclick = async () => {
     + `\n\n${what}`)) return;
   try{
     await post(cvd ? "/api/run/cvd" : "/api/run/ald", params);
+    iStartedThisRun = true;       // so only this browser saves the CSV at the end
     await refreshRunName(true);   // this name is now used; offer the next one
   }catch(_){}
 };
@@ -2276,11 +2577,21 @@ $("aldStart").onclick = async () => {
 // commands hardware that cannot respond.
 $("preStartBtn").onclick = async () => {
   saveParams();
+  // The bias is the one output here that energises the sample, so the dialog
+  // states it explicitly rather than leaving the operator to remember what is
+  // in the field.
+  const biasV = Math.abs(parseFloat($("p_sample_bias_v").value) || 0);
+  const biasSign = parseInt($("p_sample_bias_polarity").value, 10) < 0 ? "−" : "+";
+  const biasLine = biasV > 0
+    ? `Sample bias: ${biasSign}${biasV} V — the stage WILL be energised.`
+    : "Sample bias: 0 V — stage bias stays off.";
   if(!confirm("Set Ar Pneumatic, Plasma Ground, and Precursor Fill to Remote.\n"
-    + "Turn on output for power supplies.\n\n"
-    + "Pre-start will open the Ar pneumatic, flow Ar, start the precursor fill "
-    + "pulse, then strike the plasma and hold it. It retries the strike until "
-    + "you press Stop pre-start.")) return;
+    + "Turn on HV at the Glassman front panel if you want plasma.\n\n"
+    + "Pre-start will switch ON the steering, grid and collimating supply "
+    + "outputs — they stay on for the whole run — then open the Ar pneumatic, "
+    + "flow Ar, start the precursor fill pulse, and strike the plasma and hold "
+    + "it. It retries the strike until you press Stop pre-start.\n\n"
+    + biasLine)) return;
   const P = k => parseFloat($("p_"+k).value);
   const p = runParams();
   try{
@@ -2293,10 +2604,66 @@ $("preStartBtn").onclick = async () => {
       tolerance_frac: p.tolerance_frac,
       min_current_a: p.min_current_a,
       reignite_pulse_s: p.reignite_pulse_s, reignite_settle_s: p.reignite_settle_s,
+      sample_bias_v: p.sample_bias_v,
+      sample_bias_polarity: p.sample_bias_polarity,
     });
     $("preSection").open = true;
   }catch(_){}
 };
+/* Restart the server so it picks up changed code (requested 2026-08-25, after
+   a pre-start silently did nothing against a four-day-old process).
+
+   The dialog is most of the feature: a restart is not a neutral act on this
+   tool. The WebSocket already retries every 1.5 s, so the page reconnects on
+   its own once the new process is listening - all this has to do is say so and
+   stop the button being pressed twice. */
+$("shutdownBtn").onclick = async () => {
+  // lastRunState is maintained by recordRun() on every frame.
+  const running = ["running", "paused", "aborting"].includes(lastRunState);
+  const lines = [
+    "Shut down the reactor server?",
+    "",
+    "This stops THIS server and kills any other reactor server still running, "
+      + "so nothing is left holding the DAQ or the serial ports.",
+    "",
+    running
+      ? "*** A RUN IS ACTIVE AND WILL BE ABORTED. *** Its end-of-run teardown "
+        + "runs: MFCs zeroed, fill valve closed, HV commanded off, DC supply "
+        + "outputs switched off."
+      : "No run is active.",
+    "",
+    "Either way:",
+    "  • Gas stops — the MFCs zero their own setpoints when this "
+      + "program disconnects.",
+    "  • Valves are not commanded; last-commanded state is restored on "
+      + "startup.",
+    // null = omit this line. NOT "" — the empty strings above are deliberate
+    // blank separators, so filtering on falsiness would flatten the dialog.
+    running ? null : "  • HV and the DC supply outputs are NOT switched off "
+      + "— neither driver commands anything on disconnect. They stay as "
+      + "they are.",
+    "",
+    "The interface will go offline. Start it again from the Reactor Interface "
+      + "shortcut.",
+  ].filter(l => l !== null);
+  if(!confirm(lines.join("\n"))) return;
+
+  const btn = $("shutdownBtn");
+  btn.disabled = true;
+  $("shutdownHint").textContent = "Shutting down… this page will go offline. "
+    + "Start the server again from the Reactor Interface shortcut.";
+  try{
+    const r = await post("/api/server/shutdown");
+    setLink("shutting down", "warn");
+    if(r && r.also_killed && r.also_killed.length)
+      toast(`Also killed ${r.also_killed.length} other server instance(s)`, true);
+  }catch(_){
+    // A 501 means this server cannot stop itself; post() already toasted.
+    btn.disabled = false;
+    $("shutdownHint").textContent = "Shutdown is not available for this server.";
+  }
+};
+
 $("preStopBtn").onclick = () => post("/api/prestart/stop");
 $("preAbortBtn").onclick = () => post("/api/prestart/abort");
 
@@ -2326,9 +2693,12 @@ $("logStop").onclick   = () => post("/api/log/stop");
 (async () => {
   try{ CFG = await (await fetch("/api/config")).json(); }catch(_){ CFG = {}; }
   $("modeSel").value = localStorage.getItem("runMode") || "ald";
-  loadParams();
+  await loadParams();
   applyMode();
   refreshRunName(false);
+  $("shutdownHint").textContent = SHUTDOWN_HINT;
+  await seedTrend();
+  await seedEvents();
   connect();
 })();
 </script>

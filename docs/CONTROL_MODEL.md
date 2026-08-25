@@ -42,6 +42,97 @@ are narrow — a flag that never stops anything, and a single valve/MFC pairing
 that refuses one specific invalid combination rather than gating anything
 reactor-wide. Neither is a precedent for adding more without asking first.
 
+## The DC supply outputs (requested 2026-08-21)
+
+The four Keithley 2260B supplies — stage bias, steering coils, grid bias,
+collimating coils — are the one place this program switches a power supply
+output on and off by itself. Zach asked for it directly:
+
+> "set the outputs of the steering, collimating, and grid bias to all turn on
+> on prestart and turn off on abort/stop/end of run"
+
+and, on when the sample bias should come up:
+
+> "steering/grid/collimating/bias can stay on all run. No need to actuate for
+> plasma on/off events. Collimating in particular is important for plasma
+> stability when the beam dump is grounded. Start at prestart so I can see how
+> things are working before the run starts."
+
+What that means in code (`Supervisor.supplies_output_on` / `_off`, driven by
+`prestart_output` in `config/reactor.yaml`):
+
+| Trigger | Effect |
+|---|---|
+| Pre-start begins | outputs **ON**, before any gas |
+| Reignite / pause / beam on-off | **nothing** |
+| Run ends, aborts, or crashes | outputs **OFF** |
+| **Stop** pre-start | **nothing** (hands over primed, like Ar and the fill) |
+| **Abort** pre-start | outputs **OFF** |
+
+Three properties of this are deliberate and should not be "tidied":
+
+- **They are not tied to the beam.** A reignite does not touch them. Cycling
+  the collimating coil with the plasma would destabilise the very thing it is
+  there to stabilise. `tests/test_keithley_supplies.py` asserts that a reignite
+  produces no output transition at all.
+- **`stop_prestart` does not switch them off**, only `abort_prestart` does —
+  matching how Ar and the fill regulation are already treated.
+- **`disconnect()` never switches an output off.** Losing a serial handle, or
+  restarting the server, must not drop the collimating coil out from under a
+  running plasma.
+
+### Manual control from the Hardware tab (requested 2026-08-25)
+
+Each 2260B card also carries a **voltage field, a current field and an output
+toggle**, so all four supplies can be driven by hand. `POST
+/api/supply/{id}/{voltage,current,output}` are the only routes from the browser
+to a supply output, and they exist for the Keithleys alone — the Glassman has no
+set path in its driver beyond `hv_off`, and asking for one returns an error
+rather than silently doing nothing.
+
+Three details:
+
+- **Blank means "leave it".** Either field can be submitted on its own.
+- **Voltage is sent before current** when both are given, so raising both never
+  briefly runs the new voltage against the old, lower current limit.
+- **Turning an output on asks for confirmation**; turning it off never does.
+
+This changed a previous rule rather than overlooking it. Until 2026-08-25 the
+driver deliberately never touched a **current limit** — the supplies were found
+with Zach's working setpoints dialled in and those were his alone to set. He
+asked for current fields, so `set_current` now exists. **Nothing sets a current
+automatically**; only the operator's field reaches it, and the test suite
+asserts that a full pre-start-plus-run produces zero current writes.
+
+The **CV/CC indicator** on each card is derived from measurement versus
+setpoint — whichever limit the output has actually reached — and shows nothing
+when neither has been. It is not read from a status register: `:OUTP:MODE?`
+returns 0 regardless of state on these units, which had everything reading CV.
+See [KEITHLEY_2260B.md](KEITHLEY_2260B.md).
+
+### The sample bias
+
+The stage/sample bias supply is the conditional one, and the only supply whose
+**voltage** this program sets. Its output comes on at pre-start **only when the
+run's Sample bias field is non-zero**; at zero it is explicitly commanded off
+and an event says so, rather than leaving the operator to infer it.
+
+Only the voltage is set. **Pre-start never sets a current limit** on any of the
+four — that stays wherever the front panel or the Hardware-tab current field
+last put it.
+
+The `+`/`−` polarity toggle is **bookkeeping, not control**. A 2260B is
+single-quadrant and cannot source a negative voltage, so the sign never reaches
+the instrument: it records which way the leads were run onto the stage and is
+applied to the *logged* voltage. There is no software limit on the bias
+magnitude beyond the supply's own rating.
+
+Because this is the one output that puts a potential on the sample, the
+pre-start confirmation dialog states it explicitly — magnitude, sign, and
+whether the stage will be energised at all.
+
+Details in [KEITHLEY_2260B.md](KEITHLEY_2260B.md).
+
 ## Devices this program reads but (almost) never commands
 
 Some hardware is deliberately monitor-only. Connecting to it is read-only, and
@@ -105,6 +196,45 @@ The relay ending de-energised is deliberate, not an oversight: the relay box
 runs off a 9 V battery that drains only while the relay is energised (see
 [HARDWARE.md](HARDWARE.md)), so at rest it belongs off. HV is commanded off in
 the same call, so there is nothing for an un-grounded relay to do.
+
+## The Shut down server button (requested 2026-08-25)
+
+Diagnostics has a **Shut down server** button. It stops this server *and kills
+any other reactor server still running*, so nothing is left holding the DAQ or
+the serial ports. You then start it again from the shortcut.
+
+It replaced a Restart button that re-exec'd the process. That was removed the
+same day it shipped: on 2026-08-25 an old instance survived the restart, so two
+servers were up at once - the newer one holding port 8000 while the older one
+still held COM8-COM12 - and every device looked unreachable. Zach's call was
+"just a button that kills all servers in use", and stopping cleanly is both
+simpler and easier to see than a restart that half-worked.
+
+Mechanics: other instances are terminated first, then this one shuts down
+through the normal lifespan teardown - so the server you are talking to releases
+its devices properly, and any orphan holding a serial port is gone before you
+restart. It then calls `os._exit(0)` rather than falling out of `main()`,
+because something in the stack keeps a non-daemon thread alive; that is exactly
+how the orphan survived.
+
+**A shutdown is not a neutral act on this tool.** The confirm dialog spells out
+what follows and changes wording depending on whether a run is live:
+
+- **A running recipe is ABORTED**, with the full end-of-run teardown: MFCs
+  zeroed, fill valve closed, HV commanded off, DC supply outputs switched off.
+- **Gas stops either way.** The MKS G50s zero their own setpoints when the
+  Modbus master disconnects. Device behaviour, not something this program does.
+- **Valve lines are not commanded.** Last-commanded state is persisted and
+  restored at startup.
+- **With no run active, HV and the DC supply outputs stay as they are** -
+  neither driver commands anything on `disconnect()`. So a shutdown outside a
+  run stops the gas while leaving the supplies energised.
+
+There is **no guard**: it will stop the server during a run if you confirm it.
+The dialog informs, it does not refuse.
+
+If the server was started some other way (not `python -m reactor`), there is no
+shutdown hook and the endpoint returns 501 rather than pretending.
 
 ## What still protects the hardware (not this program)
 

@@ -29,11 +29,34 @@ the hardware (not by trusting the old VI, which is full of dead code):
 - **XP Glassman FL1.5F1.0 high-voltage plasma supply** (1500 V / 1.0 A) on USB,
   monitor-only apart from a commanded **HV off** at the end of a run or on an
   abort — its voltage, current and arc count are logged; it is set by hand
+- **4 Keithley 2260B DC supplies** — stage bias, steering coils, grid bias,
+  collimating coils. Logged, and their outputs switched on at pre-start
 - **Pneumatic valves** across two control boxes, incl. precursor manifolds, a
   micro-pulse dose valve, forelines, a gate valve, and a plasma-ground relay
 - **NI CompactDAQ** (two cDAQ-9174 chassis) for all analog/digital I/O
 
 Full channel-by-channel map: **[docs/HARDWARE.md](docs/HARDWARE.md)**.
+
+## Starting it
+
+Desktop shortcut **Reactor Interface** — pinnable to the taskbar. It launches
+`pythonw.exe -m reactor --port 8000 --open`, so there is **no console window**,
+and opens the UI in the browser.
+
+Because there is no console, everything the console would have printed goes to
+`server.log` in the project root instead — startup, device connections, and any
+reason the server failed to come up. That file is the only record a windowless
+launch has; check it first if clicking the shortcut appears to do nothing.
+
+To watch it live instead, run it with a console:
+
+```bash
+.venv\Scripts\python.exe -m reactor --port 8000
+```
+
+To pick up a code change, use **Diagnostics → Shut down server** (it also kills
+any other reactor server still running, so nothing is left holding the DAQ or
+the serial ports) and start it again from the shortcut.
 
 ---
 
@@ -187,6 +210,9 @@ reactor/
     glassman_fl.py          XP Glassman FL HV plasma supply, serial. Polls V/I/arc count; the ONE
                             command sent is hv_off() at run end / abort. No setpoints, no HV on
                             (docs/GLASSMAN_FL.md)
+    keithley_2260b.py       4 Keithley 2260B DC supplies: logs V+I, switches outputs on at
+                            pre-start / off at run end, sets the sample-bias voltage only.
+                            Ports resolved by USB serial, never by COM number
     ellipsometer.py         Film Sense FS-1 live stream: read-only TCP subscriber + record decoder
   control/
     recipe.py               recipe engine + step types (dose/wait/electron_beam/beam_start/
@@ -209,7 +235,7 @@ tools/
   pulse_line.py             drive ONE digital output line (valve identification), with confirmation
 tests/                      control-logic tests against the virtual reactor; python -m tests.run_all
 docs/                       HARDWARE.md, RUN_PROGRAM.md, CONTROL_MODEL.md, IDENTIFYING_HARDWARE.md,
-                            LABVIEW_ANALYSIS.md, GLASSMAN_FL.md
+                            LABVIEW_ANALYSIS.md, GLASSMAN_FL.md, KEITHLEY_2260B.md
 ```
 
 The shape that matters: **`Supervisor` is the only thing that can move hardware.**

@@ -10,12 +10,80 @@ for what that proves and what it flatly cannot), and **EE-ALD has now been run
 and tuned on real hardware** (`reactor-alz`, `reactor-2z1`, confirmed
 2026-08-06).
 
+## The event log
+
+The server keeps **20,000 events** in memory and the browser scrolls all of
+them. That is not gratuitous: a run emits roughly ten events a cycle, so a
+150-cycle run is ~1,500 on its own, and the old 250-event buffer pushed a whole
+pre-start out of view before anyone could read it — which is what stalled the
+stage-bias diagnosis on 2026-08-25.
+
+How it gets there matters, because the naive version is expensive. The live
+telemetry frame carries only the **last 200** events; shipping the whole buffer
+at 5 Hz would be roughly a megabyte a second of pure repetition, which is the
+last thing you want over Tailscale. The browser instead seeds its log once from
+`GET /api/events` and appends whatever is new from each frame, de-duplicated on
+timestamp + message.
+
+The in-memory buffer starts empty after a restart. **The permanent record is
+`server.log`** — `Supervisor._event()` writes every event to the Python logger
+as well, and that file rotates rather than being trimmed.
+
+## Where the run parameters live
+
+**The server owns them.** They are stored in `config/run_params.json` and served
+by `GET`/`POST /api/run_params`; each browser keeps a `localStorage` copy purely
+as a cache, so the fields populate instantly on load and still work if the
+server is unreachable.
+
+This changed on 2026-08-25. They used to be localStorage-only, which meant every
+machine had its own set: opening the UI over Tailscale from a laptop showed
+default cycles/dose/bias rather than what the reactor PC was actually
+configured with. One reactor should present one set of parameters — the same
+reasoning that already made the run *name* server-owned.
+
+Saves are debounced ~800 ms (the fields save on every keystroke) and are
+fire-and-forget: a failed save leaves the local cache correct. Last write wins
+if two browsers edit at once, which is fine for a single-operator tool.
+
+The **run name** is separate and already server-owned (`config/last_run.json`),
+so the suggested next name follows real runs rather than whichever browser you
+happen to be sitting at.
+
+## Sample bias
+
+**Sample bias (V)** sits in the main parameter grid for both modes, where *Min
+current (µA)* used to be — min current moved into **Advanced timing**, since it
+is a reignite-detection threshold rather than something set per run.
+
+It drives the `stage_bias` Keithley 2260B (2260B-250-4, 250 V / 4.5 A):
+
+- **Enter a magnitude.** Zero means the stage bias output stays **off** for that
+  run, and an event says so rather than leaving you to infer it from a dark
+  supply.
+- Non-zero sets that voltage and switches the output **on at pre-start**, where
+  it stays for the whole run. It is not cycled with the beam.
+- The **`+`/`−` toggle records which way the leads were run onto the stage.**
+  The supply is single-quadrant and cannot source a negative voltage, so the
+  sign never reaches the instrument — it is applied to the **logged** voltage, so
+  `psu_stage_bias_voltage` reads negative when the leads are reversed.
+- The **current limit is not touched by pre-start**: it stays wherever the front
+  panel or the Hardware tab's current field last put it.
+
+The pre-start confirmation dialog states the bias explicitly — magnitude, sign,
+and whether the stage will be energised at all — because it is the one output in
+the set that puts a potential on the sample.
+
+The other three supplies (steering, grid, collimating) have no run parameter:
+their outputs simply come on at pre-start and go off at run end. See
+[KEITHLEY_2260B.md](KEITHLEY_2260B.md).
+
 ## Two run modes, one panel
 
 The **Run** tab's run panel has a mode selector: **EE-ALD** or **EE-CVD**.
-Both share cycles, dose pressure, dose time, pump A, min current, the
-fill-pulse/tolerance/reignite advanced-timing fields, and gas scheduling.
-They differ in what happens to the electron beam.
+Both share cycles, dose pressure, dose time, pump A, **sample bias**, the
+fill-pulse/tolerance/reignite/min-current advanced-timing fields, and gas
+scheduling. They differ in what happens to the electron beam.
 
 ### EE-ALD — pulsed beam, one exposure per cycle
 
@@ -97,7 +165,10 @@ A separate button and sequence (`Supervisor.start_prestart`), not part of
 either run mode, for getting the tool ready before pressing Start:
 
 1. Confirmation dialog: *"Set Ar Pneumatic, Plasma Ground, and Precursor Fill
-   to Remote. Turn on output for power supplies."*
+   to Remote. Turn on HV at the Glassman front panel if you want plasma."* It
+   also states the sample bias explicitly — magnitude, sign, and whether the
+   stage will be energised at all. (The DC supply outputs are no longer a manual
+   step: pre-start switches them on itself, see below.)
 2. Open the Ar pneumatic isolation valve.
 3. Wait (editable, default 1 s).
 4. Set Ar flow (editable, default 4 sccm).
@@ -172,7 +243,9 @@ other is active (409); the UI greys out the buttons accordingly.
 | Pump A (s) | `pump_a_s` | 10 | EE-ALD: wall clock. EE-CVD: lit-time gated |
 | Beam exposure (s) | `beam_s` | 5 | EE-ALD only; counted only while current present |
 | Pump B (s) | `pump_b_s` | 10 | EE-ALD only |
-| Min current (µA) | `min_current_ua` | 500 | UI takes µA, sends amps |
+| Sample bias (V) | `sample_bias_v` | 0 | magnitude; 0 leaves the stage bias supply off |
+| Bias polarity | `sample_bias_polarity` | +1 | lead orientation; signs the LOGGED voltage only |
+| Min current (µA) | `min_current_ua` | 500 | UI takes µA, sends amps. **Advanced timing** since 2026-08-25 |
 | Overlap (s) | `gas_overlap_s` | 0.5 | single handoff time shared by both gas transitions |
 | Fill pulse on/off (s) | `fill_pulse_on_s` / `fill_pulse_off_s` | 0.10 / 0.30 | fill valve pulse timing |
 | Flag tolerance (%) | `tolerance_frac` | 20% | UI takes %, sends fraction |
@@ -278,6 +351,15 @@ wheel-zoom — it would hijack page scroll.
   ever commands is HV off at the end of the run. Column names carry no units
   on purpose, so the analysis page's saved plot layout keeps matching them.
   See [GLASSMAN_FL.md](GLASSMAN_FL.md).
+
+  The **four Keithley 2260B DC supplies** contribute `psu_<id>_voltage` (V) and
+  `psu_<id>_current` (A) — `psu_stage_bias_*`, `psu_steering_*`,
+  `psu_grid_bias_*`, `psu_collimating_*`. They share the Glassman's 2 Hz slow
+  loop, so their cells fill on roughly every other row like pressure does.
+  **`psu_stage_bias_voltage` is signed** by the run's bias-polarity toggle. The
+  separate `psu` namespace is deliberate: each device declares its own prefix,
+  which is what lets the Glassman keep its established `hv_hv_*` column names
+  and not break saved plot layouts. See [KEITHLEY_2260B.md](KEITHLEY_2260B.md).
 
   (MFCs used to be polled inside the instrument loop, where a 0.45–0.9 s
   HTTP read throttled every sample and the export logged at 2.1 Hz rather

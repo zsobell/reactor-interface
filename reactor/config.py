@@ -253,11 +253,18 @@ class InstrumentCfg(BaseModel):
 class PowerSupplyCfg(BaseModel):
     """A programmable power supply on a serial (or USB virtual-COM) port.
 
-    Today this means the XP Glassman FL-series high-voltage plasma supply.
-    Monitor-only apart from one command: the reactor polls its voltage/current
-    monitors and logs them, and commands HV OFF at the end of a run or on an
-    abort. There is no way to set a level or turn HV on.
-    See reactor/devices/glassman_fl.py.
+    Two drivers today, with very different scopes:
+
+    * ``glassman_fl`` - the XP Glassman FL high-voltage plasma supply. Monitor
+      only, apart from one command: the reactor polls its voltage/current
+      monitors and logs them, and commands HV OFF at the end of a run or on an
+      abort. There is no way to set a level or turn HV on.
+      See reactor/devices/glassman_fl.py.
+    * ``keithley_2260b`` - the four DC supplies driving the stage bias,
+      steering coils, grid bias and collimating coils. Their voltage and current
+      are logged, their outputs are switched on at pre-start and off at run end,
+      and the sample-bias unit alone has its voltage set from a run parameter.
+      Current limits are never touched. See reactor/devices/keithley_2260b.py.
 
     `baud` and `address` are NOT guessable and must not be assumed from the
     supply's DIP switches - this reactor's FL answers at 19200/address 1 while
@@ -268,23 +275,47 @@ class PowerSupplyCfg(BaseModel):
     id: str
     label: str = ""
     enabled: bool = False
-    driver: Literal["glassman_fl"] = "glassman_fl"
+    driver: Literal["glassman_fl", "keithley_2260b"] = "glassman_fl"
     #: Free text, for the UI and the record - e.g. "FL1.5F1.0". Not parsed.
     model: str = ""
-    #: Windows COM port name, e.g. "COM8". The FL's USB port presents a virtual
-    #: COM port via a TI TUSB3410 bridge; RS-232 would look the same here.
+    #: Windows COM port name, e.g. "COM8".
+    #:
+    #: For the GLASSMAN this is required - its TUSB3410 bridge exposes no
+    #: usable serial number, so the port is the only handle we have.
+    #: For a KEITHLEY 2260B leave it EMPTY and set `usb_serial` instead: the
+    #: port is then resolved from the USB descriptor at connect, which survives
+    #: Windows renumbering the ports. Setting `port` here overrides that.
     port: str = ""
-    #: 2400, 4800, 9600 or 19200 are the only rates the FL supports.
+    #: USB serial number, Keithley 2260B only. Four near-identical supplies sit
+    #: on one rack, so this - not the COM number - is what identifies which one
+    #: is the sample bias and which is the grid. The driver refuses to use a
+    #: device whose *IDN? serial does not match.
+    usb_serial: str = ""
+    #: Glassman: 2400, 4800, 9600 or 19200 are the only rates the FL supports.
+    #: Keithley: a USB CDC port ignores the rate, but pyserial wants a number.
     baud: int = Field(default=9600, gt=0)
-    #: FL address byte, 0-7. Every command carries it.
+    #: FL address byte, 0-7. Every command carries it. Unused by the Keithleys.
     address: int = Field(default=0, ge=0, le=7)
-    #: Rated output, used to scale the 12-bit monitor counts into real units.
-    #: Read them off the nameplate; they are per-model.
+    #: GLASSMAN ONLY. Rated output, used to scale its 12-bit monitor counts into
+    #: real units. Read them off the nameplate; they are per-model. The
+    #: Keithleys report their own maxima over SCPI, so they do not need these.
     full_scale_v: float = Field(default=0.0, ge=0)
     full_scale_i: float = Field(default=0.0, ge=0)
     unit_v: str = "V"
     unit_i: str = "mA"
     timeout_s: float = Field(default=1.0, gt=0)
+
+    #: Turn this supply's output ON during pre-start, and OFF when a run ends,
+    #: aborts or is stopped. Operator-requested 2026-08-21 for the steering,
+    #: grid and collimating supplies (and the sample bias, conditionally - see
+    #: `sample_bias`). The output is NOT touched by plasma events: it stays on
+    #: across reignites and for the whole run, because the collimating coil is
+    #: what keeps the plasma stable when the beam dump is grounded.
+    prestart_output: bool = False
+    #: Marks the sample/stage bias supply. Its voltage comes from the run's
+    #: "Sample bias" field, and its output is switched on at pre-start ONLY
+    #: when that field is non-zero. At most one supply may set this.
+    sample_bias: bool = False
 
 
 class EllipsometerCfg(BaseModel):
@@ -369,21 +400,45 @@ class ReactorConfig(BaseModel):
             if dupes:
                 raise ValueError(f"{label}: duplicate id(s) {sorted(dupes)}")
 
-        # An enabled supply with no port, or with a zero full scale, would poll
-        # into the void or scale every reading to 0.0 and look plausible doing
-        # it. Catch both at load, where the message can name the key.
+        # Supply misconfigurations that would otherwise look plausible at
+        # runtime: a supply polling into the void, a Glassman scaling every
+        # reading to 0.0, or - the dangerous one - an ambiguous sample bias.
+        # Catch them at load, where the message can name the key.
+        biases = [ps.id for ps in self.power_supplies
+                  if ps.enabled and ps.sample_bias]
+        if len(biases) > 1:
+            raise ValueError(
+                f"power_supplies: more than one supply has sample_bias: true "
+                f"({sorted(biases)}). Exactly one supply takes the run's "
+                f"Sample bias field; two would both be energised by it.")
+
         for ps in self.power_supplies:
             if not ps.enabled:
                 continue
-            if not ps.port:
-                raise ValueError(
-                    f"power_supplies['{ps.id}']: enabled but no 'port' set")
-            if ps.full_scale_v <= 0 or ps.full_scale_i <= 0:
-                raise ValueError(
-                    f"power_supplies['{ps.id}']: full_scale_v and full_scale_i "
-                    f"must both be > 0 (they scale the supply's 12-bit monitor "
-                    f"counts into real units); got {ps.full_scale_v} / "
-                    f"{ps.full_scale_i}. Read them off the nameplate.")
+
+            if ps.driver == "glassman_fl":
+                if not ps.port:
+                    raise ValueError(
+                        f"power_supplies['{ps.id}']: enabled but no 'port' set")
+                if ps.full_scale_v <= 0 or ps.full_scale_i <= 0:
+                    raise ValueError(
+                        f"power_supplies['{ps.id}']: full_scale_v and "
+                        f"full_scale_i must both be > 0 (they scale the "
+                        f"supply's 12-bit monitor counts into real units); got "
+                        f"{ps.full_scale_v} / {ps.full_scale_i}. Read them off "
+                        f"the nameplate.")
+                if ps.sample_bias:
+                    raise ValueError(
+                        f"power_supplies['{ps.id}']: sample_bias is for a "
+                        f"Keithley 2260B. This program cannot set a voltage on "
+                        f"the Glassman at all.")
+
+            elif ps.driver == "keithley_2260b":
+                if not ps.usb_serial and not ps.port:
+                    raise ValueError(
+                        f"power_supplies['{ps.id}']: a keithley_2260b needs "
+                        f"'usb_serial' (preferred - it survives Windows "
+                        f"renumbering the COM ports) or an explicit 'port'.")
 
         # A valve pointing at a bank that does not exist is a typo worth catching.
         banks = {b.id for b in self.valve_banks}
