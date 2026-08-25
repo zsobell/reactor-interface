@@ -477,7 +477,7 @@ fit and is never treated as the answer. Code:
 
 ## The Analysis page (`/analysis`) — post-run plotting
 
-**Prototype** (`reactor-6hd`). A separate page, not a fourth tab, and
+A separate page, not a fourth tab, and
 deliberately so: it reads finished CSVs and can touch no hardware, so it stays
 out of the control UI entirely and can be opened alongside a live run. Linked
 from the header of the main interface and from the Ellipsometer sync card.
@@ -551,7 +551,5 @@ spectrum too.
   EE-ALD clock is now pinned to 0.1 s by `tests/test_run_timing.py`; EE-CVD's
   cycle clock (`_lit_s` / `_cycle_clock`, driven by the 0.2 s watchdog tick) has
   not had the same treatment.
-- Decide whether stopping the server should ground the beam during a pre-start
-  — `reactor-4h9`.
 - Identify the NI 9265 current outputs — `reactor-5u2` (low priority, not
   needed for normal operation).

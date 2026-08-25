@@ -217,11 +217,19 @@ restart. It then calls `os._exit(0)` rather than falling out of `main()`,
 because something in the stack keeps a non-daemon thread alive; that is exactly
 how the orphan survived.
 
-**A shutdown is not a neutral act on this tool.** The confirm dialog spells out
-what follows and changes wording depending on whether a run is live:
+**Any shutdown aborts whatever is in progress.** Operator decision,
+2026-08-25: *"any server shutdown should abort the run or prestart. Safety over
+data collection."* The confirm dialog spells out what follows and changes
+wording depending on whether a run is live:
 
 - **A running recipe is ABORTED**, with the full end-of-run teardown: MFCs
   zeroed, fill valve closed, HV commanded off, DC supply outputs switched off.
+- **A pre-start is ABORTED too** — not merely stopped. `Supervisor.stop()` calls
+  `abort_prestart()`, which covers both a sequence still running *and* one that
+  completed and left the tool primed. The primed case matters just as much: a
+  successful pre-start deliberately leaves Ar flowing, the fill valve pulsing,
+  the beam relay set, HV up and the DC supplies on, and a shutdown would
+  otherwise walk away from all of it with nothing left to manage it.
 - **Gas stops either way.** The MKS G50s zero their own setpoints when the
   Modbus master disconnects. Device behaviour, not something this program does.
 - **Valve lines are not commanded.** Last-commanded state is persisted and

@@ -109,7 +109,7 @@ reactor/
   server/app.py         FastAPI HTTP + WebSocket; thin wrapper over Supervisor. Optional HTTP Basic
                         auth over everything incl. the WebSocket, on only if REACTOR_PASSWORD is set
   server/static/index.html   the control GUI (HTML+CSS+vanilla JS, no build step; 3 tabs: Run/Hardware/Diagnostics)
-  server/static/analysis.html   post-run plotting page at /analysis (prototype). Reads finished
+  server/static/analysis.html   post-run plotting page at /analysis. Reads finished
                         files only - no hardware, no telemetry - which is why it is a separate page,
                         not a 4th tab. Persistent grid of property-vs-cycle plots; layout in
                         localStorage. A dropped Auger (AES) spectrum is its own dataset (kinetic
@@ -248,7 +248,7 @@ number — lives on the **Analysis page** next to the plots it feeds. Nothing
 ellipsometer-related is on the Diagnostics tab any more. **Confirmed working
 across a real deposition, 2026-08-25.**
 
-The **Analysis page** (`/analysis`, prototype) plots the merged file: a
+The **Analysis page** (`/analysis`) plots the merged file: a
 persistent grid of property-vs-cycle plots, layout remembered in localStorage
 and re-applied by column name so a newly merged file repopulates it. A column
 counts as numeric on the cells that HAVE a value, not on the row count — in a
@@ -298,8 +298,9 @@ COM8-COM12 while the new one owned port 8000, leaving every device unreachable.
 Shutdown kills siblings first, then tears itself down normally and calls
 `os._exit(0)` (falling out of `main()` does NOT end the process - a non-daemon
 thread keeps it alive, which is how that orphan survived). It aborts a running
-recipe and stops gas either way, so the confirm dialog spells that out; there is
-no guard beyond the dialog.
+recipe AND a pre-start - running or merely primed - because Zach's rule is
+"safety over data collection"; gas stops either way. The confirm dialog spells
+that out; there is no guard beyond the dialog.
 
 Full history — everything shipped and everything still open — is in the
 **bd** issue tracker (`bd list --status=closed`, `bd ready`), not just this

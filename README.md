@@ -120,7 +120,7 @@ Three tabs:
   lives on the Analysis page, next to the plots it feeds.
 
 Plus a separate **[Analysis page](reactor/server/static/analysis.html)** at
-`/analysis` (prototype) for post-run plotting — a persistent grid of
+`/analysis` for post-run plotting — a persistent grid of
 property-vs-cycle plots over the run CSVs and the ellipsometry-merged file,
 and a drop box for **Auger (AES) spectra**, each of which gets its own
 autoscaled plot alongside them.
@@ -278,8 +278,6 @@ its parameters, and every valve/MFC/gauge display name.
 - Remote *setpoint* control of the Glassman is deliberately not built; only
   HV-off is wired (see docs/CONTROL_MODEL.md). HV-off at run end is confirmed
   working on hardware.
-- Whether stopping the server should ground the beam during a pre-start is
-  undecided (`reactor-4h9`).
 - The NI 9265 current-output module's purpose is unknown, deferred
   (`reactor-5u2`, low priority — not needed for normal operation).
 

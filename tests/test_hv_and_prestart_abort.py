@@ -158,6 +158,75 @@ async def main() -> int:
             with contextlib.suppress(asyncio.CancelledError):
                 await tick
 
+    # ------------------------------------------------------------------ #
+    # Server shutdown must abort, not just disconnect. Zach 2026-08-25:
+    # "any server shutdown should abort the run or prestart. Safety over data
+    # collection." Covers a pre-start still running AND one that completed and
+    # left the tool primed.
+    async with VirtualReactor() as vr:
+        c.section("server shutdown aborts a RUNNING pre-start")
+        vr.instruments["ammeter"].value = 0.0        # never strikes, so it stays running
+        tick = await autotick(vr, period=0.05)
+        try:
+            await vr.sup.start_prestart(dict(
+                ar_sccm=4.0, valve_delay_s=0.05, hold_s=0.3,
+                min_current_a=5.0e-4, reignite_pulse_s=0.05,
+                reignite_settle_s=0.05, dose_pressure_torr=0.02,
+                sample_bias_v=8.0, sample_bias_polarity=1))
+            await wait_for(lambda: vr.sup.prestart.get("running"), timeout=3.0)
+            c.check("pre-start is running", bool(vr.sup.prestart.get("running")))
+            await vr.sup.stop()
+        finally:
+            tick.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tick
+
+        c.check("pre-start no longer running",
+                not vr.sup.prestart.get("running"))
+        c.check("Ar flow zeroed", vr.mfcs["ar"].commanded_sccm == 0.0,
+                str(vr.mfcs["ar"].commanded_sccm))
+        c.check("Ar isolation valve closed",
+                vr.daq.do_state.get("ar_pneumatic") is False)
+        c.check("fill regulation stopped",
+                not vr.sup.regulator.get("running"))
+        c.check("DC supply outputs all off",
+                all(d.output_on is False for d in vr.supplies.values()
+                    if hasattr(d, "output_calls")),
+                str({k: getattr(d, "output_on", "n/a")
+                     for k, d in vr.supplies.items()}))
+        hv = vr.supplies.get("hv")
+        if hv is not None:
+            c.check("HV commanded off", hv.hv_off_calls >= 1, str(hv.hv_off_calls))
+
+    async with VirtualReactor() as vr:
+        c.section("server shutdown aborts a COMPLETED (primed) pre-start")
+        vr.instruments["ammeter"].value = 1.0e-3     # strikes immediately
+        tick = await autotick(vr, period=0.05)
+        try:
+            await vr.sup.start_prestart(dict(
+                ar_sccm=4.0, valve_delay_s=0.05, hold_s=0.2,
+                min_current_a=5.0e-4, reignite_pulse_s=0.05,
+                reignite_settle_s=0.05, dose_pressure_torr=0.02,
+                sample_bias_v=0.0, sample_bias_polarity=1))
+            while vr.sup.prestart.get("running"):
+                await asyncio.sleep(0.02)
+            c.check("pre-start completed and primed the tool",
+                    vr.sup.prestart.get("done") is True,
+                    str(vr.sup.prestart.get("phase")))
+            await vr.sup.stop()
+        finally:
+            tick.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tick
+
+        c.check("primed tool torn down: Ar zeroed",
+                vr.mfcs["ar"].commanded_sccm == 0.0)
+        c.check("primed tool torn down: Ar valve closed",
+                vr.daq.do_state.get("ar_pneumatic") is False)
+        c.check("primed tool torn down: DC outputs off",
+                all(d.output_on is False for d in vr.supplies.values()
+                    if hasattr(d, "output_calls")))
+
     return c.summary()
 
 

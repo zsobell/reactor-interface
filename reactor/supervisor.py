@@ -345,6 +345,32 @@ class Supervisor:
 
         with contextlib.suppress(Exception):
             await self.recipes.abort()
+
+        # Pre-start gets the full ABORT, not just a stop. Operator decision,
+        # 2026-08-25 (reactor-4h9), and the reasoning is his: "any server
+        # shutdown should abort the run or prestart. Safety over data
+        # collection."
+        #
+        # This covers a pre-start still RUNNING and one that has COMPLETED but
+        # not yet handed over to a run. The completed case matters just as much:
+        # a successful pre-start deliberately leaves the tool primed - Ar
+        # flowing, fill valve pulsing, beam relay set, HV up, DC supplies on -
+        # and a shutdown would otherwise walk away from all of it with nothing
+        # left running to manage it.
+        #
+        # abort_prestart is the existing one-click undo (Ar off, fill off, relay
+        # at rest, HV off, DC supply outputs off), so shutdown reuses it rather
+        # than growing a second teardown that could drift out of step.
+        #
+        # Deliberately BEFORE the loops are cancelled and the devices are
+        # disconnected below, or none of these commands could reach hardware.
+        if self.prestart.get("running") or self.prestart.get("done"):
+            self._event("recipe",
+                        "server stopping: aborting pre-start "
+                        f"({'in progress' if self.prestart.get('running') else 'primed'})")
+            with contextlib.suppress(Exception):
+                await self.abort_prestart()
+
         with contextlib.suppress(Exception):
             await self.stop_fill_regulation()
         self._sweep_abort.set()
