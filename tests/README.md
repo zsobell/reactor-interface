@@ -41,8 +41,8 @@ low-level enough to skip the exact code path that arms that behavior. See
 `git log` around 2026-08-06 for the fix.)
 
 The right way — what `reactor/testing/virtual_reactor.py` does — is to fake
-only the three classes `Supervisor.start()` actually constructs:
-`NiDaqBackend`, `MksMfc`, `ScpiInstrument`. Everything above that boundary —
+the five device classes `Supervisor.start()` actually constructs:
+`NiDaqBackend`, `MksMfc`, `ScpiInstrument`, `GlassmanFL`, `Keithley2260B`. Everything above that boundary —
 `Supervisor` itself, `RecipeRunner`, every method in `recipe.py` — runs
 completely unmodified, the exact same code path that runs against the real
 reactor. A test doesn't call a look-alike `set_valve`; it calls the real
@@ -194,3 +194,32 @@ The same sweep fixed two flaky tests, both of which had been passing on luck:
 one-second filename stamp — `reactor-cod`) and `test_prestart.py` section 3
 (the poll-interval race described above). A test that fails once in ten runs
 is worse than no test, because it teaches you to ignore a red suite.
+
+## Architecture regression checks (2026-09-06)
+
+All tests run on fake hardware and temporary files. The virtual reactor now
+isolates `last_run.json` as well as labels and commanded valve state; the naming
+test no longer requires a pre-existing repository `data/` directory.
+
+| Module | Behavior checked |
+|---|---|
+| `test_run_admission.py` | Duplicate and competing starts preserve accepted metadata; file recipes respect pre-start; abort cancels file preparation before hardware starts |
+| `test_recording_errors.py` | Failed header/row writes, flushes and closes produce telemetry/events, close sibling handles, and leave control usable |
+| `test_recording_worker.py` | Stalled disk does not block acquisition/commands; queued data is copied; backlog is bounded and overflow visible; accepted rows drain before close |
+| `test_data_routes.py` | HTTP file listing, containment and merging retain their contracts; analysis work does not block concurrent requests |
+| `test_telemetry.py` | Frames are stable snapshots; slow clients receive only the newest four frames |
+| `test_static_assets.py` | Served HTML, CSS, page modules and transitive module imports are reachable without a build |
+
+The optional development command `node tests/js/live-charts.mjs` runs chart
+rendering, label updates, drag zoom, independent chart windows, follow-live and
+keyboard checks against a small canvas/DOM harness. Node is not needed to run
+the reactor or the Python suite. This harness does not prove browser appearance.
+
+Live code submits copied samples through RecordingService. Use
+`await sup.recording.drain()` before inspecting a file while recording is still
+active; completed/aborted runs already drain their export. Standalone DataLogger
+format tests may call its synchronous methods directly when no worker is active.
+
+`node tests/js/control-bootstrap.mjs` also loads the real control page's ES
+modules against its actual HTML element IDs, checks server-setting/history
+bootstrap and chart integration, and verifies the HTTPS WebSocket URL.

@@ -1,0 +1,277 @@
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2a323d;
+    --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --hot:#ff7b39;
+    --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+  h1,h2{margin:0;font-weight:600}
+  button{font:inherit;cursor:pointer;border-radius:6px;border:1px solid var(--line);
+         background:var(--panel2);color:var(--fg);padding:7px 12px}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input,select{font:inherit;background:#0d1117;color:var(--fg);
+               border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  input:disabled,select:disabled{opacity:.45}
+  input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+
+  header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;
+         padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--line);
+         flex-wrap:wrap}
+  .badge{font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+         padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .badge.live{background:#0b2f1a;border-color:#1f7a45;color:#56d364}
+  .badge.bad{background:#3d1113;border-color:#8b2c2f;color:#ffb3b0}
+  .spacer{flex:1}
+  .estop{background:#3d1113;border-color:#8b2c2f;color:#ffb3b0;font-weight:600}
+  .estop:hover{border-color:var(--bad)}
+  .hidden{display:none!important}
+
+  /* ---- tabs ------------------------------------------------------------ */
+  .tabs{display:flex;gap:2px;background:#0d1117;border:1px solid var(--line);
+        border-radius:8px;padding:3px}
+  .tabs button{border:1px solid transparent;background:transparent;color:var(--dim);
+               padding:5px 15px;border-radius:6px;font-weight:500;
+               display:flex;align-items:center;gap:6px}
+  .tabs button.active{background:var(--panel2);color:var(--fg);border-color:var(--line)}
+  .tabs button:hover:not(.active):not(:disabled){color:var(--fg);border-color:transparent}
+  .tabdot{width:7px;height:7px;border-radius:50%;background:transparent}
+  .tabdot.on{background:var(--warn);box-shadow:0 0 6px var(--warn)}
+  /* Latest loud event, pinned in the header: the event log lives on the
+     Diagnostics tab, so without this a fill-pressure flag would be invisible
+     from the Run tab. Display only — it never changes reactor behaviour. */
+  .alertchip{max-width:min(46vw,540px);overflow:hidden;text-overflow:ellipsis;
+             white-space:nowrap;font-size:12px;padding:5px 11px;border-radius:6px;
+             cursor:pointer;background:#332701;border:1px solid var(--warn);color:#f0c674}
+  .alertchip.bad{background:#3d1113;border-color:var(--bad);color:#ffb3b0}
+
+  main{padding:14px 16px 16px}
+  .pane{display:grid;gap:14px;align-content:start}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        overflow:hidden;display:flex;flex-direction:column;min-width:0}
+  .card>h2{padding:9px 14px;font-size:12px;letter-spacing:.09em;text-transform:uppercase;
+           color:var(--dim);border-bottom:1px solid var(--line);background:var(--panel2);
+           display:flex;align-items:center;gap:9px;flex:0 0 auto}
+  .card>.body{padding:13px 14px;flex:1;min-width:0}
+  .grow{flex:1}
+
+  .banner{margin:0 16px 4px;padding:11px 14px;border-radius:8px;font-weight:600;
+          background:#3d1113;border:1px solid var(--bad);color:#ffb3b0}
+  .banner.info{background:#0d2440;border-color:#1f6feb;color:#a6d2ff;font-weight:500}
+  .banner ul{margin:6px 0 0;padding-left:20px;font-weight:400}
+
+  .unit{font-size:13px;color:var(--dim);font-weight:400;margin-left:5px}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px}
+  .kv>span:first-child{color:var(--dim);flex:0 0 auto}
+  .kv>span:last-child{font-family:var(--mono);min-width:0;overflow:hidden;
+                      text-overflow:ellipsis;white-space:nowrap}
+  .stale{color:var(--bad)!important}
+
+  /* ---- hero numeric readouts (Run tab) --------------------------------- */
+  .readouts{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:12px}
+  .ro{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+      padding:9px 13px 8px;display:flex;flex-direction:column;gap:1px;min-width:0}
+  .ro .rol{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  .ro .rov{font-family:var(--mono);font-size:26px;font-weight:600;line-height:1.2;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ro .ros{font-size:11px;color:var(--dim);font-family:var(--mono);min-height:16px;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ro.flag{border-color:var(--warn);background:#241d06}
+  .ro.flag .ros{color:var(--warn);font-weight:600}
+  .ro.beam{border-color:var(--hot);background:#1d1108}
+  .ro.beam .ros{color:var(--hot)}
+
+  /* ---- Run tab: run panel left, plots right ---------------------------- */
+  .runrow{display:grid;grid-template-columns:minmax(430px,1fr) minmax(430px,1.02fr);
+          gap:14px;align-items:stretch}
+  /* The run monitor takes whatever height the (taller) run panel leaves, so the
+     two columns always end level; MFC flow keeps its natural height. */
+  .plotcol{display:grid;grid-template-rows:minmax(0,1fr) auto;gap:14px;min-width:0}
+  #monitorCard{min-height:0}
+  /* The canvas is absolutely positioned inside this wrapper on purpose. A
+     flexing canvas feeds its own bitmap `height` attribute - which drawChart()
+     sets from the measured size - back into the row's max-content height, and
+     the panel grows a little every frame. Out of flow, it can't. */
+  .canvasfill{position:relative;flex:1;min-height:240px}
+  .canvasfill>canvas{position:absolute;inset:0;width:100%;height:100%}
+  @media(max-width:1180px){
+    .runrow{grid-template-columns:1fr}
+    .plotcol{grid-template-rows:auto auto}
+    .canvasfill{flex:none;height:clamp(240px,35vh,560px)}
+  }
+
+  /* ---- Hardware tab ---------------------------------------------------- */
+  /* Rows use the default stretch alignment so every card in a row ends at the
+     same height - ragged card bottoms were the main thing wrong with the old
+     single-column-flow layout. */
+  .hwtop{display:grid;grid-template-columns:minmax(380px,1.12fr) minmax(340px,1fr);
+         gap:14px}
+  .hwbottom{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));
+            gap:14px}
+  @media(max-width:1000px){ .hwtop{grid-template-columns:1fr} }
+
+  /* ---- Diagnostics tab ------------------------------------------------- */
+  .diagtop{display:grid;grid-template-columns:minmax(380px,1.15fr) minmax(330px,1fr);
+           gap:14px}
+  .diagcol{display:grid;gap:14px;align-content:start;min-width:0}
+  @media(max-width:1000px){ .diagtop{grid-template-columns:1fr} }
+
+  /* ---- tiles (instruments / gauges / aux / MFCs / power supplies) ------- */
+  .tilegrid{display:grid;gap:10px}
+  #mfcs{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+  #instruments,#gauges,#aux{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+  #supplies{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+  /* Status chips on a supply tile: neutral by default, coloured when asserted. */
+  .chips{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0 2px}
+  .chip{font-size:11px;padding:1px 7px;border-radius:10px;
+        border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+  .chip.on{border-color:var(--ok);color:var(--ok)}
+  .chip.hot{border-color:var(--bad);color:var(--bad);font-weight:600}
+  /* CV/CC indicator: blank (and invisible) while the output is off. */
+  .mode{font-size:11px;font-weight:700;padding:1px 6px;border-radius:4px;
+        letter-spacing:.5px}
+  .mode.cv{background:#10331a;color:var(--ok);border:1px solid var(--ok)}
+  .mode.cc{background:#3a2a08;color:var(--warn);border:1px solid var(--warn)}
+  /* An output that is live reads as live on its own button. */
+  button.danger{border-color:var(--bad);color:var(--bad)}
+  button.danger:hover:not(:disabled){background:#2a0f10}
+  .tile{border:1px solid var(--line);border-radius:8px;padding:10px 11px;
+        background:#0d1117;min-width:0}
+  .tile.trip{border-color:var(--bad);background:#2a0f10}
+  .tile .top{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}
+  .tile .name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;
+              white-space:nowrap}
+  .tile .read{font-family:var(--mono);font-size:19px;white-space:nowrap}
+  .bar{height:6px;background:#21262d;border-radius:3px;overflow:hidden;margin:7px 0}
+  .bar>i{display:block;height:100%;background:var(--accent);transition:width .25s}
+  .row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  .row input{width:90px}
+  .src{font-size:10px;padding:2px 6px;border-radius:4px;background:#21262d;
+       color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .rename{padding:1px 6px;font-size:12px;line-height:1.3;opacity:.45;margin-left:6px}
+  .rename:hover{opacity:1;border-color:var(--accent)}
+  .valve .rename{margin-left:auto}
+  .note{font-size:12px;color:var(--dim);margin-top:7px;overflow-wrap:anywhere}
+  .note:empty{display:none}
+
+  /* ---- valves ---------------------------------------------------------- */
+  #valves{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:8px}
+  .valve{display:flex;justify-content:space-between;align-items:center;gap:9px;
+         padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+         background:#0d1117;min-width:0}
+  .valve.open{border-color:var(--hot);background:#241206}
+  .valve.unidentified{opacity:.55;border-style:dashed}
+  .valve .lbl{display:flex;flex-direction:column;min-width:0}
+  .valve .lbl>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .valve .sub{font-size:10.5px;color:var(--dim);font-family:var(--mono);
+              overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .valve button[data-act]{flex:0 0 auto;padding:5px 12px}
+  .bankhdr{grid-column:1/-1;margin:11px 0 1px}
+  .bankhdr:first-child{margin-top:0}
+  .bankname{font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+            color:var(--accent);border-bottom:1px solid var(--line);padding-bottom:4px}
+  .banknote{font-size:11px;color:var(--dim);margin-top:4px}
+  .banknote:empty{display:none}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;
+     letter-spacing:.06em}
+
+  #events{max-height:min(46vh,440px);overflow-y:auto;font-family:var(--mono);font-size:12px}
+  #events div{padding:2px 0;border-bottom:1px solid #1b2027}
+  #events .t{color:var(--dim);margin-right:7px}
+  /* one class per event kind the supervisor emits (see Supervisor._event) */
+  .k-error{color:var(--bad)} .k-flag{color:var(--warn);font-weight:600}
+  .k-valve,.k-valve-id{color:var(--hot)}
+  .k-recipe,.k-fill,.k-mfc,.k-ellipsometer{color:var(--accent)}
+
+  /* ---- ALD run panel --------------------------------------------------- */
+  button.primary{background:#193a2a;border-color:#2ea043;color:#7ee787;font-weight:600}
+  button.primary:hover:not(:disabled){border-color:#3fb950}
+  button.mini{padding:3px 8px;font-size:12px}
+  .params{display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:9px}
+  .params label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--dim)}
+  .params label.adv{opacity:.85}
+  .params input{width:100%}
+
+  /* collapsible sub-sections (advanced timing, gas scheduling) */
+  details.sub{border:1px solid var(--line);border-radius:8px;background:#0d1117;
+              margin-top:11px}
+  details.sub>summary{padding:7px 11px;cursor:pointer;user-select:none;font-size:11px;
+                      letter-spacing:.07em;text-transform:uppercase;color:var(--dim);
+                      display:flex;align-items:baseline;gap:9px;list-style:none}
+  /* display:flex drops the native disclosure marker, so draw our own. */
+  details.sub>summary::-webkit-details-marker{display:none}
+  details.sub>summary::before{content:"▸";font-size:10px;letter-spacing:0;
+                              transition:transform .15s}
+  details.sub[open]>summary::before{transform:rotate(90deg)}
+  details.sub>summary:hover{color:var(--fg)}
+  details.sub[open]>summary{border-bottom:1px solid var(--line)}
+  details.sub>summary .stitle{flex:0 0 auto}
+  /* A control living in the summary: stop its clicks from toggling the panel. */
+  details.sub>summary .inlinetoggle{flex:0 0 auto;display:flex;align-items:center;
+                                    gap:4px;cursor:pointer;color:var(--fg)}
+  details.sub>summary .inlinetoggle input{margin:0;cursor:pointer}
+  details.sub>summary .sum{font-size:11.5px;color:var(--dim);flex:1;min-width:0;
+                           text-transform:none;letter-spacing:0;font-family:var(--mono)}
+  details.sub>.dbody{padding:11px}
+
+  /* auto-flow columns, so hiding the EE-ALD-only phases leaves 2 even tracks */
+  .phasestrip{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:8px;margin:12px 0}
+  .phase{border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#0d1117;
+         display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden}
+  .phase .pn{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .phase .pt{font-family:var(--mono);font-size:19px}
+  .phase.active{border-color:var(--accent);background:#0d2440;box-shadow:0 0 0 1px var(--accent) inset}
+  .phase.active.beam{border-color:var(--hot);background:#241206;box-shadow:0 0 0 1px var(--hot) inset}
+  .phase .fill{position:absolute;left:0;bottom:0;height:3px;background:var(--accent);width:0;transition:width .25s linear}
+  .phase.beam .fill{background:var(--hot)}
+  .runstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:1px 16px}
+  .charthint{font-size:11px;color:var(--dim);font-weight:400;text-transform:none;letter-spacing:0}
+
+  /* Plots are sized off viewport height so the Run tab lands on one screen at
+     1080p and simply gets roomier on a taller monitor. */
+  canvas{width:100%;display:block}
+  #chart{cursor:crosshair}
+  #mfcChart{height:clamp(126px,18vh,300px)}
+  #tempChart{height:clamp(160px,22vh,300px)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;padding:8px 14px 11px}
+  .legend i{display:inline-block;width:11px;height:3px;vertical-align:middle;margin-right:5px}
+  .prog{height:6px;background:#21262d;border-radius:4px;overflow:hidden;margin:8px 0}
+  .prog>i{display:block;height:100%;background:var(--accent);transition:width .25s}
+  .progmeta{display:flex;justify-content:space-between;gap:12px;font-size:11.5px;
+            color:var(--dim);margin:-3px 0 8px}
+  .progmeta b{font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:50;
+         padding:11px 16px;border-radius:8px;max-width:min(680px,90vw);
+         box-shadow:0 8px 28px #0009;
+         background:#3d1113;border:1px solid var(--bad);color:#ffb3b0}
+  .toast.ok{background:#0b2f1a;border-color:#1f7a45;color:#7ee787}
+  .hint{font-size:12px;color:var(--dim);margin-top:8px}
+
+  /* ---- valve identification -------------------------------------------- */
+  /* Fixed across the top during a sweep, above the header, so the STOP button
+     is always visible no matter which tab is showing or where the page is
+     scrolled. */
+  .sweepbar{position:fixed;top:0;left:0;right:0;z-index:30;display:flex;
+            align-items:center;gap:16px;padding:12px 18px;background:#3d1113;
+            border-bottom:2px solid var(--bad);box-shadow:0 6px 24px #000b}
+  .sweepbar .info{flex:1;display:flex;flex-direction:column;gap:2px}
+  .sweepbar .line{font-family:var(--mono);font-size:22px;font-weight:700;color:#fff}
+  .sweepbar .sub{font-size:12px;color:#ffb3b0}
+  .bigstop{font-size:20px;font-weight:800;letter-spacing:.05em;padding:14px 34px;
+           background:var(--bad);color:#fff;border:2px solid #fff;border-radius:10px}
+  .bigstop:hover{background:#ff6a63}
+  .idsetup{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));
+           gap:10px;align-items:end}
+  .idsetup label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--dim)}
+  .markbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .markbtns button{border-color:var(--accent)}
+  .marks{margin-top:12px;font-family:var(--mono);font-size:13px}
+  .marks div{padding:3px 0;border-bottom:1px solid #1b2027}
+  .pulsedot{display:inline-block;width:12px;height:12px;border-radius:50%;
+            background:#30363d;margin-left:8px;vertical-align:middle}
+  .pulsedot.on{background:var(--hot);box-shadow:0 0 10px var(--hot)}

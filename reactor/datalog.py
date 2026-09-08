@@ -17,7 +17,8 @@ Logging starts on demand, not at launch, so idle time does not fill the disk.
 
 from __future__ import annotations
 
-import contextlib
+import logging
+from functools import wraps
 import re
 import time
 from datetime import datetime
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ReactorConfig
+from .run_report import format_run_params
 
 #: column value that means "seconds since logging started"
 ELAPSED_KEY = "_elapsed"
@@ -63,172 +65,25 @@ def next_run_name(previous: str) -> str:
     return f"{head}{str(int(digits) + 1).zfill(len(digits))}"
 
 
-def _describe_recipe(recipe) -> str:
-    """Plain-English summary of a built EE-ALD / EE-CVD Recipe - cycle
-    architecture and the gas-schedule timeline, for a human skimming the run
-    snapshot file.
-
-    The gas window is anchored differently per mode, and this mirrors exactly
-    what the runner measures against (see control/recipe.py's GasSchedule):
-    EE-ALD divides up the beam step's exposure, EE-CVD the whole cycle. Both
-    handoffs move the incoming gas earlier by the single Recipe.gas_overlap_s.
-    """
-    lines = [f"{recipe.name} — {recipe.cycles} cycles"]
-    for s in recipe.steps:
-        lines.append(f"  {s.describe()}")
-    if not recipe.gas_schedules:
-        return "\n".join(lines)
-
-    cvd = recipe.mode == "cvd"
-    if cvd:
-        span, anchor = recipe.cycle_seconds(), "cycle"
-    else:
-        beam = next((s for s in recipe.steps if s.op == "electron_beam"), None)
-        span, anchor = ((beam.seconds or 0.0) if beam else 0.0), "beam"
-    if span <= 0:
-        return "\n".join(lines)
-
-    ov = recipe.gas_overlap_s
-    first = next((g for g in recipe.gas_schedules if g.order == "first"), None)
-    second = next((g for g in recipe.gas_schedules if g.order == "second"), None)
-    handoff = (first.pct / 100.0 * span) if first else 0.0
-    second_off = min(span, handoff + (second.pct / 100.0 * span if second else 0.0))
-
-    lines.append(f"  gas schedule (relative to {anchor} start, "
-                 f"{ov:g}s handoff overlap):")
-    if first:
-        # EE-CVD has no run-up before a cycle, so "first" re-arms before this
-        # cycle ends rather than leading a beam step (RecipeRunner._build_gas_plan).
-        on = (f"on at {anchor}+0s, re-arms at {anchor}+{max(0.0, second_off - ov):g}s"
-              if cvd else f"on at {anchor}-{ov:g}s")
-        lines.append(f"    {first.mfc}: {on}, off at {anchor}+{handoff:g}s "
-                     f"({first.pct:g}% @ {first.flow_sccm:g} sccm)")
-    if second:
-        lines.append(
-            f"    {second.mfc}: on at {anchor}+{max(0.0, handoff - ov):g}s, "
-            f"off at {anchor}+{second_off:g}s "
-            f"({second.pct:g}% @ {second.flow_sccm:g} sccm)")
-    return "\n".join(lines)
-
-
-#: Report line separator, kept as a name so the literal never has to survive
-#: a round-trip through a shell heredoc.
-NL = chr(10)
-
-
-def _fmt_value(v) -> str:
-    """One parameter value, as an operator would want to read it."""
-    if isinstance(v, bool):
-        return "yes" if v else "no"
-    if isinstance(v, float):
-        return f"{v:g}"
-    if v is None or v == "":
-        return "-"
-    return str(v)
-
-
-def _param_block(items, indent: str = "  ") -> list[str]:
-    """Key/value lines with the values column-aligned."""
-    items = [(str(k), _fmt_value(v)) for k, v in items]
-    if not items:
-        return [f"{indent}(none)"]
-    width = max(len(k) for k, _ in items)
-    return [f"{indent}{k.ljust(width)}   {v}" for k, v in items]
-
-
-def _step_lines(steps) -> list[str]:
-    """Numbered recipe steps. Step.describe() already carries the duration for
-    every step that has one, so there is no separate duration column."""
-    if not steps:
-        return ["  (none)"]
-    out = []
-    for i, s in enumerate(steps, start=1):
-        gated = "   [freezes while the plasma is out]" if s.lit_gated else ""
-        out.append(f"  {i:>2}. {s.describe()}{gated}")
-    return out
-
-
-def _fmt_duration(seconds: float) -> str:
-    s = int(round(seconds))
-    h, m, sec = s // 3600, (s % 3600) // 60, s % 60
-    if h:
-        return f"{h}h {m:02d}m {sec:02d}s"
-    return f"{m}m {sec:02d}s" if m else f"{sec}s"
-
-
-def format_run_params(params: dict, recipe, run_name: str = "",
-                      recorded_at: datetime | None = None) -> str:
-    """The run's settings as a plain-text report.
-
-    This used to be a JSON dump. Zach could not open it ("I dont know how to
-    open them"), which is fair: a .json has no default handler on this machine
-    and the nesting made it unreadable anyway. A .txt double-clicks into
-    Notepad and reads like the settings sheet it is. Nothing is dropped -
-    every UI parameter and every recipe step is still here, just laid out.
-    """
-    when = recorded_at or datetime.now()
-    cycle_s = recipe.cycle_seconds()
-    total_s = cycle_s * recipe.cycles
-    mode = "EE-CVD" if recipe.mode == "cvd" else "EE-ALD"
-
-    L: list[str] = []
-    L.append("RUN PARAMETERS")
-    L.append("=" * 60)
-    L.append("")
-    L += _param_block([
-        ("Run", run_name or "(unnamed)"),
-        ("Recorded", when.strftime("%Y-%m-%d %H:%M:%S")),
-        ("Recipe", recipe.name),
-        ("Mode", mode),
-        ("Cycles", recipe.cycles),
-        ("Cycle length", f"{cycle_s:g} s"),
-        ("Nominal run time", f"{_fmt_duration(total_s)}  ({total_s:g} s)"),
-    ])
-    L.append("")
-    L.append("Nominal run time is the cycling phase only - the pre-start, the")
-    L.append("setup and the end-of-run steps below are not counted, and a")
-    L.append("reignite makes the real run longer.")
-    L.append("")
-
-    L.append("SUMMARY")
-    L.append("-" * 60)
-    L += [f"  {ln}" for ln in _describe_recipe(recipe).splitlines()]
-    L.append("")
-
-    L.append("PARAMETERS SET IN THE UI")
-    L.append("-" * 60)
-    L += _param_block(sorted(params.items()))
-    L.append("")
-
-    L.append("RECIPE STEPS")
-    L.append("-" * 60)
-    L.append("Setup (once, before the first cycle)")
-    L += _step_lines(recipe.setup)
-    L.append("")
-    L.append(f"Cycle (repeated {recipe.cycles} times)")
-    L += _step_lines(recipe.steps)
-    L.append("")
-    L.append("End of run")
-    L += _step_lines(recipe.teardown)
-    L.append("")
-
-    L.append("GAS SCHEDULE")
-    L.append("-" * 60)
-    if recipe.gas_schedules:
-        L += _param_block(
-            [(g.mfc, f"{g.order}, {g.pct:g}% of the window @ {g.flow_sccm:g} sccm")
-             for g in recipe.gas_schedules])
-        L.append(f"  handoff overlap   {recipe.gas_overlap_s:g} s "
-                 f"(the incoming gas starts this early)")
-    else:
-        L.append("  (no scheduled gas)")
-    L.append("")
-    return NL.join(L) + NL
+def record_errors(channel):
+    """Surface lifecycle/header failures while preserving the caller's error path."""
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(self, *args, **kwargs):
+            try:
+                return fn(self, *args, **kwargs)
+            except Exception as exc:
+                self.report_error(channel, exc)
+                raise
+        return wrapped
+    return decorate
 
 
 class DataLogger:
-    def __init__(self, cfg: ReactorConfig) -> None:
+    def __init__(self, cfg: ReactorConfig, *, on_error=None) -> None:
         self.cfg = cfg
+        self.errors: dict[str, str] = {}
+        self.on_error = on_error
         self.dir = Path(cfg.site.data_dir).expanduser().resolve()
         self._fh = None
         self._ext_fh = None
@@ -274,6 +129,28 @@ class DataLogger:
         self.run_dir: Path | None = None
         self.run_stem: str = ""
 
+    def report_error(self, channel: str, exc: Exception) -> None:
+        """Latch failures: a later successful row cannot repair missing data."""
+        detail = f"{type(exc).__name__}: {exc}"
+        if self.errors.get(channel) == detail:
+            return
+        self.errors[channel] = detail
+        message = f"Recording failure ({channel}): {detail}"
+        logging.getLogger("reactor.recording").error(message)
+        if self.on_error is not None:
+            self.on_error(message)
+
+    def _close_files(self, channel: str, *handles) -> None:
+        for fh in handles:
+            if fh is None:
+                continue
+            # A failed flush must not prevent close, or later handles closing.
+            for action in (fh.flush, fh.close):
+                try:
+                    action()
+                except Exception as exc:
+                    self.report_error(channel, exc)
+
     @property
     def active(self) -> bool:
         return self._fh is not None
@@ -284,6 +161,7 @@ class DataLogger:
 
     # -- lifecycle ---------------------------------------------------------- #
 
+    @record_errors("manual")
     def start(self, label: str | None = None) -> Path:
         if self.active:
             return self.path            # type: ignore[return-value]
@@ -304,6 +182,7 @@ class DataLogger:
         self.rows = 0
         return self.path
 
+    @record_errors("parameters")
     def write_run_params(self, params: dict, recipe) -> Path:
         """Write a one-time readable report of a UI-built run's settings at
         start: flow rates, phase timings, cycle count, gas schedule, every step.
@@ -376,19 +255,18 @@ class DataLogger:
         if target == self.ell_path:
             return
 
-        with contextlib.suppress(Exception):
-            self._ell_fh.flush()
-            self._ell_fh.close()
+        self._close_files("ellipsometer", self._ell_fh)
         self._ell_fh = None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             self.ell_path.replace(target)       # replace: works across a move
             self.ell_path = target
-        except OSError:
-            pass                        # stay where we are, reopen it below
+        except OSError as exc:
+            self.report_error("ellipsometer move", exc)
         try:
             self._ell_fh = self.ell_path.open("a", encoding="utf-8", newline="")
-        except OSError:
+        except OSError as exc:
+            self.report_error("ellipsometer", exc)
             self._ell_fh = None         # capture stops rather than raising mid-run
 
     def _run_folder(self, stamp: str) -> Path:
@@ -413,6 +291,7 @@ class DataLogger:
             return f"{self.run_name}_{stamp}"
         return f"{stamp}_{slug}" if slug else stamp
 
+    @record_errors("run")
     def start_run_export(self, recipe_name: str, started_at: float) -> Path:
         """Open a per-run CSV, named on the run's own start time so it lines up
         with what the browser would otherwise have downloaded (and survives a
@@ -450,6 +329,7 @@ class DataLogger:
         self._adopt_open_sidecar()
         return self.run_path
 
+    @record_errors("run")
     def write_run_sample(self, sample: dict[str, Any], progress=None,
                          blank: set[str] | None = None) -> None:
         """Append one row from the sample dict _current_cycle already builds
@@ -480,10 +360,11 @@ class DataLogger:
             "cycle_number": cyc_num,
             "recipe_step": step,
         }
+        run_header = ""
         if not self._run_keys:
             self._run_keys = sorted(k for k in sample if k != "t")
             header = ["elapsed_s", "iso_time", *self._run_keys, *extra]
-            self._run_fh.write(",".join(header) + "\n")
+            run_header = ",".join(header) + "\n"
 
         def csv(v: Any) -> str:
             s = v if isinstance(v, str) else self._fmt(v)
@@ -500,11 +381,11 @@ class DataLogger:
                  for k in self._run_keys),
                *(csv(v) for v in extra.values())]
         try:
-            self._run_fh.write(",".join(row) + "\n")
+            self._run_fh.write(run_header + ",".join(row) + "\n")
             self._run_fh.flush()
             self.run_rows += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            self.report_error("run", exc)
 
         # Plot-ready by-cycle row: same channels keyed by fractional cycle
         # number, only for real (non-paused) in-cycle samples. Written in time
@@ -512,27 +393,23 @@ class DataLogger:
         # is already sorted by cycle - no post-processing needed.
         if (self._bycycle_fh is not None and not paused
                 and isinstance(cyc_num, (int, float))):
+            cycle_header = ""
             if not self._bycycle_keys:
                 self._bycycle_keys = self._run_keys
-                self._bycycle_fh.write(
-                    ",".join(["cycle_number", *self._bycycle_keys, "recipe_step"]) + "\n")
+                cycle_header = ",".join(["cycle_number", *self._bycycle_keys, "recipe_step"]) + "\n"
             brow = [f"{cyc_num:.6f}",
                     *("" if k in skip else self._fmt(sample.get(k))
                       for k in self._bycycle_keys),
                     csv(getattr(progress, "step_desc", ""))]
             try:
-                self._bycycle_fh.write(",".join(brow) + "\n")
+                self._bycycle_fh.write(cycle_header + ",".join(brow) + "\n")
                 self._bycycle_fh.flush()
                 self.bycycle_rows += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                self.report_error("bycycle", exc)
 
     def stop_run_export(self) -> None:
-        for fh in (self._run_fh, self._bycycle_fh):
-            if fh is not None:
-                with contextlib.suppress(Exception):
-                    fh.flush()
-                    fh.close()
+        self._close_files("run", self._run_fh, self._bycycle_fh)
         self._run_fh = None
         self._bycycle_fh = None
         self.run_started_at = None
@@ -547,6 +424,7 @@ class DataLogger:
     def ellipsometer_active(self) -> bool:
         return self._ell_fh is not None
 
+    @record_errors("ellipsometer")
     def start_ellipsometer_capture(self, started_at: float) -> Path:
         """Open a new per-acquisition ellipsometer sidecar, named on the
         reactor-clock time of the acquisition's first streamed point (closing
@@ -596,25 +474,16 @@ class DataLogger:
             self._ell_fh.write(",".join(row) + "\n")
             self._ell_fh.flush()
             self.ell_rows += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            self.report_error("ellipsometer", exc)
 
     def stop_ellipsometer_capture(self) -> None:
-        if self._ell_fh is not None:
-            with contextlib.suppress(Exception):
-                self._ell_fh.flush()
-                self._ell_fh.close()
+        self._close_files("ellipsometer", self._ell_fh)
         self._ell_fh = None
         self.ell_started_at = None
 
     def stop(self) -> None:
-        for fh in (self._fh, self._ext_fh):
-            if fh is not None:
-                try:
-                    fh.flush()
-                    fh.close()
-                except Exception:
-                    pass
+        self._close_files("manual", self._fh, self._ext_fh)
         self._fh = None
         self._ext_fh = None
         self.started_at = None
@@ -636,11 +505,13 @@ class DataLogger:
             return f"{v:.6g}"
         return str(v)
 
-    def write_sample(self, snapshot: dict[str, Any], progress=None) -> None:
+    def write_sample(self, snapshot: dict[str, Any], progress=None, *,
+                     sampled_at: float | None = None) -> None:
         if self._fh is None:
             return
 
-        elapsed = time.time() - (self.started_at or time.time())
+        sampled_at = time.time() if sampled_at is None else sampled_at
+        elapsed = sampled_at - (self.started_at or sampled_at)
         row = [
             f"{elapsed:.3f}" if key == ELAPSED_KEY else self._fmt(snapshot.get(key))
             for key in self.cfg.logging.columns.values()
@@ -649,13 +520,14 @@ class DataLogger:
             self._fh.write("\t".join(row) + "\n")
             self._fh.flush()
             self.rows += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            self.report_error("manual", exc)
 
         if self._ext_fh is not None:
-            self._write_extended(snapshot, elapsed, progress)
+            self._write_extended(snapshot, elapsed, progress, sampled_at)
 
-    def _write_extended(self, snapshot, elapsed, progress) -> None:
+    @record_errors("extended")
+    def _write_extended(self, snapshot, elapsed, progress, sampled_at=None) -> None:
         extra = {
             "recipe_state": getattr(progress, "state", ""),
             "recipe_cycle": getattr(progress, "cycle", ""),
@@ -671,7 +543,7 @@ class DataLogger:
             return f'"{s}"' if ("," in s or '"' in s) else s
 
         row = [
-            datetime.now().isoformat(timespec="milliseconds"),
+            datetime.fromtimestamp(time.time() if sampled_at is None else sampled_at).isoformat(timespec="milliseconds"),
             f"{elapsed:.3f}",
             *[self._fmt(snapshot.get(k)) for k in self._ext_keys],
             *[csv(v) for v in extra.values()],
@@ -679,11 +551,12 @@ class DataLogger:
         try:
             self._ext_fh.write(",".join(row) + "\n")
             self._ext_fh.flush()
-        except Exception:
-            pass
+        except Exception as exc:
+            self.report_error("extended", exc)
 
     def status(self) -> dict:
         return {
+            "errors": dict(self.errors),
             "active": self.active,
             "path": str(self.path) if self.path else None,
             "extended_path": str(self.ext_path) if self.ext_path else None,

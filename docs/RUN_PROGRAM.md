@@ -553,3 +553,21 @@ spectrum too.
   not had the same treatment.
 - Identify the NI 9265 current outputs — `reactor-5u2` (low priority, not
   needed for normal operation).
+
+## Runtime boundaries and recording health
+
+Pre-start coordination now lives in `reactor/control/prestart.py`; recipe schema
+and builders in `reactor/control/recipe_model.py`; recipe execution remains in
+`reactor/control/recipe.py`. These extractions preserve the specified hardware
+sequence and the difference between stopping and aborting pre-start.
+
+Recording writes run in an ordered dedicated worker. The raw trace, by-cycle
+file and sidecar preserve their existing formats and per-channel freshness. A
+failed write or a full recording backlog shows a persistent recording error in
+the header chip and event log; later successful samples do not clear evidence
+of lost data. The experiment continues. Shutdown drains accepted writes.
+
+A rejected duplicate Start request cannot rename the active experiment or
+change its configured valve identifiers. If Abort arrives while a start is
+waiting for recording preparation, no recipe hardware commands are started.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for thread ownership and timing limits.

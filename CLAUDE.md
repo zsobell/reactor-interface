@@ -6,14 +6,14 @@ Project context for Claude Code. Read this first; it points to the deeper docs.
 
 A Python + browser control interface for Zach's **UHV electron-beam ALD reactor**,
 replacing an old, buggy LabVIEW program. Single owner of state + hardware is
-`reactor/supervisor.py`; the GUI is one self-contained `index.html`. Full picture:
+`reactor/supervisor.py`; the GUI uses HTML/CSS and vanilla JavaScript ES modules with no build step. Full picture:
 **[README.md](README.md)**, then **[docs/HARDWARE.md](docs/HARDWARE.md)** and
 **[docs/RUN_PROGRAM.md](docs/RUN_PROGRAM.md)**.
 
 ## The one rule that overrides everything
 
-**Zach is the sole arbiter of reactor behavior. There are NO software interlocks,
-limits, or automatic actions, and you do NOT add any without his explicit OK** —
+**Zach is the sole arbiter of reactor behavior. Only explicitly requested interlocks, flags, sequences and cleanup exist;
+you do NOT add automatic hardware actions without his explicit OK** —
 propose it and wait for a yes. A previous version added unrequested safety
 machinery built on assumptions and it destroyed trust; it was all removed. See
 **[docs/CONTROL_MODEL.md](docs/CONTROL_MODEL.md)**. Only two guards exist, both
@@ -21,10 +21,10 @@ requested: a gentle "flag" when precursor fill pressure drifts >20% off
 setpoint (warns, never stops), and the Ar MFC refusing a nonzero setpoint
 while its isolation valve is closed.
 
-Automatic actions that DO exist, each individually requested 2014 do not remove
+Automatic actions that DO exist, each individually requested — do not remove
 them as "unrequested safety machinery", and do not treat them as licence to add
 more: MFCs zeroed + fill valve closed at run end; **HV commanded off at run end
-or abort** (2026-08-21); the beam relay parked de-energised (9 V battery 2014 see
+or abort** (2026-08-21); the beam relay parked de-energised (9 V battery — see
 [docs/HARDWARE.md](docs/HARDWARE.md)); and the one-click pre-start abort.
 
 Related standing conventions:
@@ -47,7 +47,7 @@ redirects them to that file - without it uvicorn dies on startup with no trace.
 ```bash
 python -m reactor            # serve the interface at http://127.0.0.1:8000
 python -m reactor --check    # validate config + print the I/O summary, no serving
-python -m reactor -m tools.discover_hardware --survey-inputs   # read-only hardware probe
+python -m tools.discover_hardware --survey-inputs   # read-only hardware probe
 ```
 
 Use a **real browser** (Chrome/Edge) for the UI — embedded preview panes don't
@@ -79,45 +79,18 @@ really the precursor-1 Baratron or that a valve physically opens.
 
 ## Architecture (where things live)
 
-```
-config/reactor.yaml     the ONLY hardware map (channels, gauge curves, valves, MFCs). Errors name the key.
-config/recipes/*.yaml   file recipes; EE-ALD/EE-CVD are built from UI params instead (build_ald_recipe/build_cvd_recipe)
-config/labels.json      operator display-name overrides (valves/MFCs/gauges), persisted from the UI
-config/run_params.json  Run-tab parameters, SERVER-owned so every browser (incl. over Tailscale)
-                        sees the same values; each browser's localStorage is only a cache
-config/valve_state.json last-commanded valve state, restored (not hardware-read) into the model at startup
-reactor/
-  config.py             pydantic validation of the YAML
-  supervisor.py         single owner of state + all hardware commands; control loop; fill-pressure
-                        regulator; pre-start sequence; valve-ID sweep; telemetry fan-out over WebSocket
-  datalog.py            tab-delimited run logs
-  devices/{base,nidaq,mks_mfc,instrument}.py   DAQ (one DAQmx task per DO line; no analog-output
-                        path on purpose), MKS G50 MFCs (flow/temp/setpoint all over Modbus;
-                        HTTP only for full scale + identity), DMM6500
-  control/recipe.py     recipe engine + step types (dose/wait/electron_beam/beam_start/beam_stop/
-                        start_fill/...) + build_ald_recipe/build_cvd_recipe for the two UI-driven modes
-  devices/glassman_fl.py     XP Glassman FL HV plasma supply over serial. Polls V/I/arc-count;
-                        the ONE command sent is hv_off() at run end / abort. No setpoints,
-                        no HV-on, ever (docs/GLASSMAN_FL.md)
-  devices/keithley_2260b.py  4 Keithley 2260B DC supplies (stage bias / steering / grid /
-                        collimating). Logs V+I; switches OUTPUTS on at pre-start, off at run
-                        end; sets voltage on the sample-bias unit only. Ports resolved by USB
-                        SERIAL, never by COM number (docs/KEITHLEY_2260B.md)
-  devices/ellipsometer.py    FS-1 live TCP stream: read-only subscriber + record decoder
-  analysis/ellipsometer_merge.py   post-run join of a refit FS-1 file onto the reactor clock
-  testing/virtual_reactor.py fake DAQ/MFC/instrument, real Supervisor above them (see tests/README.md)
-  server/app.py         FastAPI HTTP + WebSocket; thin wrapper over Supervisor. Optional HTTP Basic
-                        auth over everything incl. the WebSocket, on only if REACTOR_PASSWORD is set
-  server/static/index.html   the control GUI (HTML+CSS+vanilla JS, no build step; 3 tabs: Run/Hardware/Diagnostics)
-  server/static/analysis.html   post-run plotting page at /analysis. Reads finished
-                        files only - no hardware, no telemetry - which is why it is a separate page,
-                        not a 4th tab. Persistent grid of property-vs-cycle plots; layout in
-                        localStorage. A dropped Auger (AES) spectrum is its own dataset (kinetic
-                        energy, not cycle number) with its own plot, never merged into the run file.
-tools/                  discover_hardware.py (read-only), watch_channels.py (read-only), pulse_line.py (drives one line),
-                        probe_glassman.py (read-only: finds the HV supply's port/baud/address)
-docs/                   HARDWARE, RUN_PROGRAM, CONTROL_MODEL, IDENTIFYING_HARDWARE, LABVIEW_ANALYSIS, GLASSMAN_FL
-```
+[README.md](README.md) lists all modules; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+is the ownership and concurrency reference. Supervisor remains the application
+hardware boundary. Pre-start coordination is in `control/prestart.py`, recipe
+schema/builders in `control/recipe_model.py`, state projection in `telemetry.py`,
+ordered file execution in `recording.py`, and analysis/file routes in
+`server/data.py`. Parameter formatting is in `run_report.py`.
+
+The control UI loads `control.js`, `control.css` and `live-charts.js`; the analysis
+UI loads `analysis.js` and `analysis.css`. There is no build step. Run
+`python -m tests.run_all` after control changes; optional Node chart checks are
+`node tests/js/live-charts.mjs`. Tests must isolate operator JSON files and data.
+
 
 ## Hardware quick reference (all identified; details in docs/HARDWARE.md)
 

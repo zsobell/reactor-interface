@@ -54,9 +54,11 @@ def fnum(s: str):
 
 async def run_to_completion(vr, params, watcher=None):
     tick = await autotick(vr, period=0.05)
-    jobs = [asyncio.create_task(watcher())] if watcher else []
+    jobs = []
     try:
         await vr.sup.start_ald_run(params)
+        if watcher:
+            jobs.append(asyncio.create_task(watcher()))
         run_csv = vr.sup.logger.run_path
         bycycle_csv = vr.sup.logger.bycycle_path
         while vr.sup.recipes.busy:
