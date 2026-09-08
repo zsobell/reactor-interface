@@ -2,9 +2,9 @@
 
 The original program kept system state in LabVIEW functional global variables,
 which any subVI could modify from anywhere. Here there is exactly one Supervisor.
-It owns the devices, the recipe runner and the logger. Every command is a method
-on this class; each one does exactly what it is told and nothing else - there are
-no software interlocks, limits, or automatic actions.
+It owns the devices, the recipe runner and the logger. Application hardware commands are methods on this class. Only the explicitly
+requested interlocks, sequences and cleanup in docs/CONTROL_MODEL.md are applied.
+Pre-start, telemetry and recording are delegated to focused collaborators.
 
 Scope: UHV chamber, gas dosing, pressure + stage-temperature measurement.
 """
@@ -22,8 +22,11 @@ from typing import Any
 
 from .config import ReactorConfig
 from .control.recipe import Recipe, RecipeRunner
+from .control.prestart import PrestartController
 from . import datalog
 from .datalog import DataLogger
+from .recording import RecordingService
+from .telemetry import Telemetry
 from .devices.base import Device, Reading
 from .devices.ellipsometer import EllipsometerClient, EllipsometerPoint
 from .devices.glassman_fl import GlassmanFL
@@ -72,7 +75,12 @@ class Supervisor:
     def __init__(self, cfg: ReactorConfig) -> None:
         self.cfg = cfg
         self.recipes = RecipeRunner(self)
+        self._run_start_lock = asyncio.Lock()
+        self._start_cancelled = False
         self.logger = DataLogger(cfg)
+        self.recording = RecordingService(
+            self.logger, lambda message: self._event("error", message),
+            on_capture=lambda name: self._event("ellipsometer", f"acquisition start -> {name}"))
 
         self.snapshot: dict[str, Any] = {}
         self.readings: dict[str, Reading] = {}
@@ -87,10 +95,9 @@ class Supervisor:
         self.daq: NiDaqBackend | None = None
         self.mfcs: dict[str, Device] = {}
         self.instruments: dict[str, Device] = {}
-        #: Programmable power supplies (the Glassman HV plasma supply). Polled
-        #: polled on the slow loop. The only command this program ever sends
-        #: one is HV OFF at the end of a run or on a pre-start abort (hv_off);
-        #: there is no way to set a level or turn HV on. See CONTROL_MODEL.md.
+        #: Supplies are polled on the slow loop. Glassman has application HV-off
+        #: control only; Keithleys also have manual controls and the requested
+        #: pre-start/run output lifecycle (see CONTROL_MODEL.md).
         self.supplies: dict[str, Device] = {}
         # Best-effort restore of last-commanded state (see VALVE_STATE_PATH) -
         # falls back to False for any valve it has no record of.
@@ -126,7 +133,7 @@ class Supervisor:
         self.label_overrides: dict[str, dict[str, str]] = self._load_labels()
         self._cycle_count = 0
         self._running = False
-        self._subscribers: set[asyncio.Queue] = set()
+        self.telemetry = Telemetry(self, DO_LINE_GROUPS)
 
         # Valve flip markers (for the current-trace overlay). Every set_valve is
         # recorded with its reason so the UI can mark scheduled vs reignite flips.
@@ -146,11 +153,7 @@ class Supervisor:
         self._sweep_abort = asyncio.Event()
         self.sweep: dict[str, Any] = {"running": False}
 
-        # Operator pre-start sequence (see start_prestart)
-        self._prestart_task: asyncio.Task | None = None
-        self._prestart_stop = asyncio.Event()
-        self.prestart: dict[str, Any] = {"running": False}
-        self._prestart_params: dict[str, Any] = {}
+        self._prestart = PrestartController(self)
 
         # Background fill-pressure regulation
         self._reg_task: asyncio.Task | None = None
@@ -170,7 +173,6 @@ class Supervisor:
                 on_point=self._on_ellipsometer_point,
                 on_state=self._on_ellipsometer_state,
             )
-        self._ell_last_recv = 0.0
 
     # ====================================================================== #
     #  Startup / shutdown
@@ -329,22 +331,20 @@ class Supervisor:
                         f"{self.cfg.ellipsometer.port} (read-only)")
 
     async def stop(self) -> None:
-        """Stop polling and disconnect. Does not actuate anything.
+        """Abort a pending/active run or primed pre-start, then disconnect.
 
         Previously documented here as "closing DAQmx output tasks resets those
         lines low" - CONTRADICTED by observation 2026-08: the Ar pneumatic
         isolation valve stayed physically open across a server restart, so at
         least that line (cDAQ2Mod2, NI 9472) does not reset on task close. This
-        program never commands a reset either way - stopping does not write to
-        any line - so whatever happens is purely the DAQ hardware's behaviour,
+        program does not reset every line. Run/pre-start cleanup commands its
+        specified outputs; behavior of other lines on task close belongs to DAQ hardware,
         and per the above it should not be assumed to be "goes low". That is why
         valve state is now persisted (VALVE_STATE_PATH) and restored at startup
         instead of defaulting every valve to closed.
         """
         self._running = False
-
-        with contextlib.suppress(Exception):
-            await self.recipes.abort()
+        await self.abort_recipe()
 
         # Pre-start gets the full ABORT, not just a stop. Operator decision,
         # 2026-08-25 (reactor-4h9), and the reasoning is his: "any server
@@ -398,7 +398,7 @@ class Supervisor:
             with contextlib.suppress(Exception):
                 await self.daq.close()
 
-        self.logger.close()
+        await self.recording.close()
 
     # ====================================================================== #
     #  Control loop
@@ -466,8 +466,8 @@ class Supervisor:
         """Slow loop: DAQ analog inputs and the power supplies, at site.loop_hz
         (the NI 9211 thermocouples cannot be read much faster). Updates the
         shared snapshot in place and writes the data log. MFCs and the
-        sample-current instrument are independent HTTP/VISA devices with no such
-        limit, so they are polled on the faster _current_loop below instead.
+        sample-current instrument are independent Modbus/VISA devices with no such
+        limit, so they are polled on the separate current and MFC loops below.
 
         The power supplies ride this loop rather than getting a timer of their
         own: site.loop_hz (2 Hz) is the slowest cadence in the program, and one
@@ -526,7 +526,8 @@ class Supervisor:
         self._read_seq += 1
         for k in snap:
             self.snapshot_seq[k] = self._read_seq
-        self.logger.write_sample(self.snapshot, self.recipes.progress)
+        self.recording.submit("write_sample", self.snapshot, self.recipes.progress,
+                              sampled_at=time.time())
 
     async def _current_loop(self) -> None:
         """Fast loop: poll the bench instruments (the DMM6500 sample-current) at
@@ -647,7 +648,7 @@ class Supervisor:
         }
         # Channels NOT measured since the previous row: written blank rather
         # than repeating a stale reading, since each loop runs at its own rate
-        # (DAQ ~2 Hz, instruments ~5 Hz, MFCs ~1 Hz) and a row should carry only
+        # (DAQ ~2 Hz, instruments ~5 Hz, MFCs ~6 Hz) and a row should carry only
         # what was really sampled at that instant. The commanded valve flags are
         # never in here - they are state, not a measurement.
         stale = {col for col, key in src.items()
@@ -665,7 +666,8 @@ class Supervisor:
         # tiles must show the last known reading, not blink out between polls.
         # Only the file gets the blanks.
         self.history.append(sample)
-        self.logger.write_run_sample(sample, prog, blank=stale)
+        if self.recipes.busy:
+            self.recording.submit("write_run_sample", sample, prog, blank=stale)
         await self._publish()
 
     # ====================================================================== #
@@ -931,117 +933,18 @@ class Supervisor:
     #  Pre-start sequence
     # ====================================================================== #
 
+    @property
+    def prestart(self) -> dict:
+        return self._prestart.state
+
     async def start_prestart(self, params: dict) -> None:
-        """Bring the tool up to a struck, primed, beam-off state.
-
-        Exactly the sequence the operator specified (2026-08-05):
-        open the Ar isolation valve, wait, flow Ar, start the precursor fill
-        pulse, run the reignite protocol until sample current appears, hold
-        that current, then energise plasma ground so the beam ends OFF.
-
-        The strike retries indefinitely - by explicit instruction there is no
-        timeout and no attempt limit. Stopping is the operator's call, via
-        stop_prestart. However this ends - finished, stopped, or crashed - the
-        beam is grounded on the way out; Ar and the fill regulation are left
-        running, which is the same state a completed sequence leaves behind.
-        """
-        if self.prestart.get("running"):
-            raise RuntimeError("pre-start is already running")
-        if self.recipes.busy:
-            raise RuntimeError("a run is in progress - abort it first")
-
-        self._prestart_stop.clear()
-        # Kept so abort_prestart can undo exactly what this sequence turned on,
-        # rather than guessing at the default valve/MFC ids.
-        self._prestart_params = dict(params)
-        self.prestart = {
-            "running": True, "phase": "starting", "lit": False,
-            "current": None, "held_s": 0.0, "hold_target_s": 0.0, "strikes": 0,
-        }
-        self._prestart_task = asyncio.create_task(
-            self._run_prestart(params), name="prestart")
-        self._event("recipe", "pre-start sequence started")
+        await self._prestart.start(params)
 
     async def stop_prestart(self) -> None:
-        if self._prestart_task is not None and not self._prestart_task.done():
-            self._prestart_stop.set()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(self._prestart_task, timeout=10.0)
-            if not self._prestart_task.done():
-                self._prestart_task.cancel()
-        self._prestart_task = None
-        if self.prestart.get("running"):
-            self._event("recipe", "pre-start stopped by operator")
-        # _run_prestart's own finally already set running=False/done/phase/
-        # strikes in place by the time the wait above returns - merge, don't
-        # replace, or an operator-initiated stop always reports back as bare
-        # "idle" and throws away the phase/strike-count info the UI shows.
-        self.prestart["running"] = False
+        await self._prestart.stop()
 
     async def abort_prestart(self) -> None:
-        """One-click undo of the pre-start: Ar off, fill off, beam relay at rest,
-        HV off.
-
-        `stop_prestart` only ends the *sequence*, and leaves the tool primed -
-        Ar flowing, fill pulsing, beam grounded - because that is the state a
-        successful pre-start is supposed to hand over to Start run. Once the
-        plasma had struck there was no button that undid any of it (the Stop
-        button greys out the moment the sequence finishes), so backing out
-        meant closing Ar, stopping the regulator and clearing the relay by
-        hand. This is that, on one click (operator request, 2026-08-21).
-
-        Ordering matters: the sequence is stopped first, and its own teardown
-        grounds the beam on the way out - so the relay is cleared AFTER that,
-        or it would be re-energised behind us.
-
-        The relay ends DE-ENERGISED, which is the "beam on" sense. That is
-        deliberate: the relay box runs off a 9 V battery that only drains while
-        the relay is energised, so at rest it belongs off. With HV commanded off
-        in the same click there is nothing for an ungrounded beam to do.
-        """
-        p = dict(self._prestart_params)
-        g = lambda k, d: p.get(k, d)  # noqa: E731
-
-        await self.stop_prestart()
-
-        errors: list[str] = []
-
-        async def attempt(what: str, coro) -> None:
-            try:
-                await coro
-            except Exception as exc:
-                errors.append(f"{what}: {type(exc).__name__}: {exc}")
-
-        # Ar: flow to zero before the isolation valve closes, so the MFC is not
-        # left commanding gas into a closed valve.
-        await attempt("Ar flow", self.set_mfc_setpoint(g("ar_mfc", "ar"), 0.0))
-        await attempt("Ar isolation valve",
-                      self.set_valve(g("ar_valve", "ar_pneumatic"), False,
-                                     reason="pre-start abort"))
-        # Precursor fill: stop the pulsing, then close the valve it was pulsing.
-        await attempt("fill regulation", self.stop_fill_regulation())
-        await attempt("fill valve",
-                      self.set_valve(g("fill_valve", "rpm_top"), False,
-                                     reason="pre-start abort"))
-        await attempt("beam relay",
-                      self.set_valve(g("plasma_switch", "plasma_ground"), False,
-                                     reason="pre-start abort - relay at rest"))
-        await attempt("HV off", self.hv_off(reason="pre-start abort"))
-        await attempt("DC supply outputs",
-                      self.supplies_output_off(reason="pre-start abort"))
-
-        # The tool is no longer primed, so the UI must stop offering the abort
-        # (and stop claiming pre-start is complete).
-        self.prestart["running"] = False
-        self.prestart["done"] = False
-        self.prestart["phase"] = ("aborted - Ar and fill off, relay at rest, "
-                                  "HV off, DC supplies off")
-        if errors:
-            self._event("error", "pre-start abort: " + "; ".join(errors))
-        else:
-            self._event("recipe", "pre-start aborted: Ar off, fill off, "
-                                  "beam relay de-energised, HV off, "
-                                  "DC supply outputs off")
+        await self._prestart.abort()
 
     async def hv_off(self, *, reason: str = "") -> None:
         """Command every HV supply's output OFF.
@@ -1223,135 +1126,45 @@ class Supervisor:
             else:
                 self._event("recipe", f"{ps_id}: output OFF{tail}")
 
-    async def _run_prestart(self, p: dict) -> None:
-        g = lambda k, d: p.get(k, d)  # noqa: E731
-        ar_valve = g("ar_valve", "ar_pneumatic")
-        ar_mfc = g("ar_mfc", "ar")
-        ar_sccm = float(g("ar_sccm", 4.0))
-        valve_delay_s = float(g("valve_delay_s", 1.0))
-        hold_s = float(g("hold_s", 5.0))
-        switch = g("plasma_switch", "plasma_ground")
-        ammeter = g("ammeter", "inst.ammeter")
-        min_current = float(g("min_current_a", 5.0e-4))
-        pulse_s = float(g("reignite_pulse_s", 0.10))
-        settle_s = float(g("reignite_settle_s", 0.15))
-
-        async def nap(dur: float) -> bool:      # True if asked to stop
-            try:
-                await asyncio.wait_for(self._prestart_stop.wait(), timeout=dur)
-                return True
-            except asyncio.TimeoutError:
-                return False
-
-        def phase(name: str) -> None:
-            self.prestart["phase"] = name
-
-        struck = False
-        try:
-            self.prestart["hold_target_s"] = hold_s
-
-            # First, before any gas: the operator wants the DC supplies live
-            # early so he can see how the tool is behaving before a run starts.
-            # These stay on for the whole run and are never cycled with the
-            # beam - see supplies_output_on.
-            phase("switching on DC supplies")
-            await self.supplies_output_on(
-                sample_bias_v=float(g("sample_bias_v", 0.0)),
-                polarity=int(g("sample_bias_polarity", 1)),
-                reason="pre-start")
-
-            phase("opening Ar isolation valve")
-            await self.set_valve(ar_valve, True, reason="pre-start")
-            if await nap(valve_delay_s):
-                return
-
-            phase(f"Ar to {ar_sccm:g} sccm")
-            await self.set_mfc_setpoint(ar_mfc, ar_sccm)
-
-            phase("starting precursor fill pulse")
-            await self.start_fill_regulation(
-                valve=g("fill_valve", "rpm_top"),
-                gauge=g("gauge", "gauge.prec1_dose"),
-                target_torr=float(g("dose_pressure_torr", 0.02)),
-                pulse_on_s=float(g("fill_pulse_on_s", 0.10)),
-                pulse_off_s=float(g("fill_pulse_off_s", 0.30)),
-                tolerance_frac=float(g("tolerance_frac", 0.20)),
-            )
-
-            # Strike, then hold. A drop-out during the hold sends it straight
-            # back to striking, and the held time restarts - the point of the
-            # hold is a continuous stretch of current, not a total.
-            phase("striking plasma")
-            await self.set_valve(switch, False, reason="pre-start - beam on")
-            if await nap(settle_s):
-                return
-
-            held = 0.0
-            while not self._prestart_stop.is_set():
-                t0 = time.time()
-                if await nap(0.2):
-                    return
-                dt = time.time() - t0
-                cur = self.snapshot.get(ammeter)
-                lit = isinstance(cur, (int, float)) and abs(cur) >= min_current
-                self.prestart["current"] = (
-                    float(cur) if isinstance(cur, (int, float)) else None)
-                self.prestart["lit"] = lit
-
-                if not lit:
-                    if held > 0.0:
-                        self._event("flag", "pre-start: plasma dropped out, restriking")
-                    held = 0.0
-                    self.prestart["held_s"] = 0.0
-                    phase("striking plasma")
-                    self.prestart["strikes"] = self.prestart.get("strikes", 0) + 1
-                    # Same restrike protocol the run uses.
-                    await self.set_valve(switch, True, reason="pre-start reignite pulse")
-                    if await nap(pulse_s):
-                        return
-                    await self.set_valve(switch, False, reason="pre-start reignite - beam on")
-                    if await nap(settle_s):
-                        return
-                    continue
-
-                held += dt
-                self.prestart["held_s"] = held
-                phase(f"holding current ({held:.1f}/{hold_s:g} s)")
-                if held >= hold_s:
-                    struck = True
-                    break
-
-            if struck:
-                phase("done - beam grounded, Ar and fill running")
-                self._event("recipe",
-                            "pre-start complete: plasma struck and held "
-                            f"{hold_s:g} s, beam grounded")
-        except Exception as exc:
-            self.prestart["phase"] = f"error: {exc}"
-            self._event("error", f"pre-start failed: {exc}")
-        finally:
-            # The sequence's declared end state is beam OFF, and that applies
-            # however it ends - including an operator stop mid-strike.
-            with contextlib.suppress(Exception):
-                await self.set_valve(switch, True, reason="pre-start end - beam off")
-            self.prestart["running"] = False
-            self.prestart["done"] = struck
+    # ====================================================================== #
+    #  Run admission and lifecycle
+    # ====================================================================== #
 
     async def start_recipe(self, recipe: Recipe) -> None:
-        await self.recipes.start(recipe)
-        self._event("recipe", f"started '{recipe.name}' ({recipe.cycles} cycles)")
-        # Automatic server-side trace of this run - every recipe, not just
-        # ALD/CVD, and independent of the operator's own Data Logging toggle.
-        # Keyed on the run's own started_at so the filename correlates with
-        # what the browser would otherwise have downloaded; that download
-        # stays too (this is a redundant copy, not a replacement - it's the
-        # one that survives a closed browser).
+        async with self._run_start_lock:
+            self._check_run_start()
+            try:
+                await self._start_recipe(recipe)
+            except BaseException:
+                await self.recording.call("stop_run_export")
+                raise
+
+    def _check_run_start(self) -> None:
+        if not self._running:
+            raise RuntimeError("server is stopping or not started")
+        if self.recipes.busy:
+            raise RuntimeError("a recipe is already running")
+        if self.prestart.get("running"):
+            raise RuntimeError("pre-start is running - stop it before starting a run "
+                               "(both drive the plasma-ground relay)")
+        self._start_cancelled = False
+
+    async def _start_recipe(self, recipe: Recipe, params: dict | None = None) -> None:
+        # Prepare recording before the recipe task can execute even one step.
+        # The admission lock remains held across this off-thread file work.
+        started_at = time.time()
         try:
-            run_path = self.logger.start_run_export(
-                recipe.name, self.recipes.progress.started_at or time.time())
+            run_path = await self.recording.call("start_run_export", recipe.name, started_at)
             self._event("recipe", f"run data recording to {run_path.name}")
+            if params is not None:
+                await self.recording.call("write_run_params", params, recipe)
         except Exception as exc:
-            self._event("error", f"could not start run data export: {exc}")
+            self._event("error", f"could not prepare run recording: {exc}")
+        if self._start_cancelled or not self._running:
+            await self.recording.call("stop_run_export")
+            raise RuntimeError("run start cancelled")
+        await self.recipes.start(recipe, started_at=started_at)
+        self._event("recipe", f"started '{recipe.name}' ({recipe.cycles} cycles)")
 
     async def start_ald_run(self, params: dict) -> Recipe:
         """Build and launch an e-beam ALD run from UI parameters."""
@@ -1370,29 +1183,37 @@ class Supervisor:
         return await self._start_built_run(build_cvd_recipe(params), params)
 
     async def _start_built_run(self, recipe: Recipe, params: dict) -> Recipe:
-        if self.prestart.get("running"):
-            raise RuntimeError(
-                "pre-start is running - stop it before starting a run "
-                "(both drive the plasma-ground relay)"
-            )
+        async with self._run_start_lock:
+            self._check_run_start()
+            fields = ("_run_dose_valve", "_run_plasma_switch", "_run_fill_valve",
+                      "_run_end_cleanup")
+            previous = {field: getattr(self, field) for field in fields}
+            old_name = self.logger.run_name
+            try:
+                return await self._start_built_run_locked(recipe, params)
+            except BaseException:
+                # The start lock remains held while accepted disk work drains.
+                # A cancelled attempt must not arm cleanup for a later file recipe.
+                for field, value in previous.items():
+                    setattr(self, field, value)
+                await self.recording.call("stop_run_export")
+                await self.recording.call("set_run_name", old_name)
+                raise
+
+    async def _start_built_run_locked(self, recipe: Recipe, params: dict) -> Recipe:
         self._run_dose_valve = params.get("dose_valve", "prec1")
         self._run_plasma_switch = params.get("plasma_switch", "plasma_ground")
         self._run_fill_valve = params.get("fill_valve", "rpm_top")
         self._run_end_cleanup = True     # zero MFCs + close fill valve at run end
         # Name this run before anything opens a file, so the trace, by-cycle,
-        # params JSON and ellipsometer sidecar all carry the same prefix. Only
+        # parameter report and ellipsometer sidecar all carry the same prefix. Only
         # remembered once the run is actually starting, which is what makes the
         # auto-increment track real runs rather than abandoned attempts.
-        run_name = self.logger.set_run_name(str(params.get("run_name") or ""))
+        run_name = await self.recording.call("set_run_name", str(params.get("run_name") or ""))
+        await self._start_recipe(recipe, params)
         if run_name:
             self._remember_run_name(run_name)
             self._event("recipe", f"run name: {run_name}")
-        await self.start_recipe(recipe)
-        try:
-            snap_path = self.logger.write_run_params(params, recipe)
-            self._event("recipe", f"run parameters recorded: {snap_path.name}")
-        except Exception as exc:
-            self._event("error", f"could not record run parameters: {exc}")
         return recipe
 
     # -- operator run naming (see RUN_NAME_PATH) ---------------------------- #
@@ -1439,14 +1260,13 @@ class Supervisor:
         """
         with contextlib.suppress(Exception):
             await self.stop_fill_regulation()
-        with contextlib.suppress(Exception):
-            self.logger.stop_run_export()
         # Above the ALD/CVD gate below on purpose: these apply to EVERY run
         # ending, file recipes included.
         await self.hv_off(reason="run end")
         await self.supplies_output_off(reason="run end")
 
         if not self._run_end_cleanup:
+            await self.recording.call("stop_run_export")
             return
         self._run_end_cleanup = False
 
@@ -1458,14 +1278,13 @@ class Supervisor:
                 await self.set_mfc_setpoint(mfc_id, 0.0)
         self._event("recipe", "run end: MFCs zeroed, fill stopped, "
                               "fill valve closed, HV off")
+        await self.recording.call("stop_run_export")
 
     async def abort_recipe(self) -> None:
-        await self.recipes.abort()
+        self._start_cancelled = True
+        async with self._run_start_lock:
+            await self.recipes.abort()
         self._event("recipe", "aborted by operator")
-
-    # ====================================================================== #
-    #  Telemetry out
-    # ====================================================================== #
 
     def _event(self, kind: str, message: str) -> None:
         self.events.append({"t": time.time(), "kind": kind, "message": message})
@@ -1544,159 +1363,24 @@ class Supervisor:
         stamped with the reactor clock. A new sidecar opens when the point index
         resets to 1 or after an idle gap - the two ways one acquisition ends and
         the next begins (the stream carries no explicit start/stop marker)."""
-        gap = self.cfg.ellipsometer.idle_gap_s
-        if (not self.logger.ellipsometer_active
-                or point.index <= 1
-                or (point.t_recv - self._ell_last_recv) > gap):
-            path = self.logger.start_ellipsometer_capture(point.t_recv)
-            self._event("ellipsometer", f"acquisition start -> {path.name}")
-        self.logger.write_ellipsometer_point(point)
-        self._ell_last_recv = point.t_recv
+        self.recording.capture(point, self.cfg.ellipsometer.idle_gap_s)
 
     def _on_ellipsometer_state(self, connected: bool, detail: str) -> None:
         self._event("ellipsometer",
                     "stream connected" if connected
                     else f"stream disconnected ({detail})")
 
-    def _ellipsometer_state(self) -> dict[str, Any]:
-        cfg = self.cfg.ellipsometer
-        st: dict[str, Any] = {
-            "enabled": cfg.enabled, "label": cfg.label,
-            "host": cfg.host, "port": cfg.port,
-        }
-        if self.ellipsometer is not None:
-            st.update(self.ellipsometer.status())
-        # Points banked in the sidecar for the acquisition in progress, which is
-        # the count the operator cares about mid-run ("points_seen" is every
-        # point since the program started, across all acquisitions).
-        ell_log = self.logger.status().get("ellipsometer", {})
-        st["capture_active"] = bool(ell_log.get("active"))
-        st["capture_rows"] = ell_log.get("rows") or 0
-        st["capture_file"] = (Path(ell_log["path"]).name
-                              if ell_log.get("path") else None)
-        return st
-
-    def _recipe_state(self) -> dict[str, Any]:
-        """Recipe progress plus the run-level countdown, computed here rather
-        than cached on progress so the number is fresh at the instant it is
-        published (the UI shows it to 0.1 s)."""
-        d = self.recipes.progress.as_dict()
-        d["run_remaining_s"] = self.recipes.run_remaining_s()
-        d["run_total_s"] = self.recipes.run_total_s()
-        return d
-
     def state(self) -> dict[str, Any]:
-        return {
-            "t": time.time(),
-            "site": self.cfg.site.name,
-            "cycle_count": self._cycle_count,
-            "loop_hz": self.cfg.site.loop_hz,
-            "snapshot": self.snapshot,
-            "readings": {k: r.as_dict() for k, r in self.readings.items()},
-            "daq": {
-                "configured": bool(self.daq and self.daq.input_count),
-                "inputs": self.daq.input_count if self.daq else 0,
-                "error": self.daq.last_error if self.daq else "not started",
-            },
-            "stage_temp": {
-                "enabled": self.cfg.stage_temp.enabled,
-                "label": self.cfg.stage_temp.label,
-                "value": self.snapshot.get("stage.temp"),
-                "unit": self.cfg.stage_temp.unit,
-            },
-            "aux": [
-                {
-                    "id": a.id,
-                    "label": a.label or a.id,
-                    "value": self.snapshot.get(f"aux.{a.id}"),
-                    "volts": self.snapshot.get(f"aux.{a.id}.volts"),
-                    "unit": a.unit,
-                }
-                for a in self.cfg.aux_inputs
-            ],
-            "gauges": [
-                {
-                    "id": g.id,
-                    "label": self._label("gauge", g.id, g.label or g.id),
-                    "value": self.snapshot.get(f"gauge.{g.id}"),
-                    "volts": self.snapshot.get(f"gauge.{g.id}.volts"),
-                    "unit": g.unit,
-                    "channel": g.channel,
-                }
-                for g in self.cfg.gauges
-            ],
-            "valve_banks": [
-                {"id": b.id, "label": b.label or b.id, "note": b.note}
-                for b in self.cfg.valve_banks
-            ],
-            "valves": [
-                {
-                    "id": v.id,
-                    "label": self._label("valve", v.id, v.label or v.id),
-                    "kind": v.kind,
-                    "bank": v.bank,
-                    "line": v.line,
-                    "identified": v.identified,
-                    "open": self.valve_state.get(v.id, False),
-                }
-                for v in self.cfg.valves
-            ],
-            "mfcs": [
-                {**st, "label": self._label("mfc", mid, st.get("label") or mid),
-                 "isolation_valve": next(
-                     (m.isolation_valve for m in self.cfg.mfcs if m.id == mid), None)}
-                for mid, st in ((mid, d.status()) for mid, d in self.mfcs.items())
-            ],
-            "instruments": [i.status() for i in self.instruments.values()],
-            # Read-only. Each status() carries read_only=True, which is what the
-            # UI keys off to render a monitor card with no controls on it.
-            "power_supplies": [p.status() for p in self.supplies.values()],
-            "regulator": self.regulator,
-            "prestart": self.prestart,
-            "marks": [m for m in self.marks if time.time() - m["t"] <= 900][-500:],
-            "run_valves": {"dose": self._run_dose_valve,
-                           "plasma": self._run_plasma_switch},
-            "valve_id": {
-                **self.sweep,
-                "groups": DO_LINE_GROUPS,
-                "unidentified_valves": [
-                    {"id": v.id, "label": v.label or v.id, "bank": v.bank}
-                    for v in self.cfg.valves if not v.identified
-                ],
-            },
-            "recipe": self._recipe_state(),
-            "logging": self.logger.status(),
-            "ellipsometer": self._ellipsometer_state(),
-            # Deliberately only the live TAIL, not the whole buffer. This
-            # payload goes out on every telemetry frame (5 Hz), so shipping
-            # thousands of events would be ~1 MB/s of pure repetition - painful
-            # over Tailscale, which is exactly where the UI is used remotely.
-            # The browser seeds its scrollback once from /api/events and then
-            # appends whatever is new here. 200 is far more than one frame's
-            # worth, so nothing can slip through the gap.
-            "events": list(self.events)[-200:],
-        }
+        return self.telemetry.state()
 
     def trend(self, limit: int = 1800) -> list[dict[str, Any]]:
-        return list(self.history)[-limit:]
-
-    # -- websocket fan-out -------------------------------------------------- #
+        return self.telemetry.trend(limit)
 
     def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=4)
-        self._subscribers.add(q)
-        return q
+        return self.telemetry.subscribe()
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
-        self._subscribers.discard(q)
+        self.telemetry.unsubscribe(q)
 
     async def _publish(self) -> None:
-        if not self._subscribers:
-            return
-        payload = self.state()
-        for q in list(self._subscribers):
-            if q.full():                       # slow client: drop the old frame
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    q.get_nowait()
-            with contextlib.suppress(asyncio.QueueFull):
-                q.put_nowait(payload)
+        await self.telemetry._publish()

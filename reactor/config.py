@@ -202,8 +202,8 @@ class ValveCfg(BaseModel):
 class MfcRegisterMapCfg(BaseModel):
     """Modbus registers used for writing an MFC setpoint.
 
-    Readings come from the device's HTTP interface, not from Modbus - see
-    reactor/devices/mks_mfc.py for why a register sweep could not find flow.
+    Measurements normally use Modbus. The driver retains HTTP fallback and
+    uses HTTP for identity/full-scale metadata; see devices/mks_mfc.py.
     """
 
     word_order: Literal["big", "little"] = "big"

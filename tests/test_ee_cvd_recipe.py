@@ -47,9 +47,11 @@ async def run_cvd(vr, params, *, drop_after=None, drop_for=None, abort_after=Non
         await asyncio.sleep(drop_for)
         ammeter.value = 1.0e-3
 
-    jobs = [asyncio.create_task(dropper())] if drop_after is not None else []
+    jobs = []
     try:
         await vr.sup.start_cvd_run(params)
+        if drop_after is not None:
+            jobs.append(asyncio.create_task(dropper()))
         if abort_after is not None:
             await asyncio.sleep(abort_after)
             await vr.sup.abort_recipe()

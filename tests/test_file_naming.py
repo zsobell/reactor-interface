@@ -24,6 +24,7 @@ import io
 import re
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, ".")
@@ -150,7 +151,8 @@ async def main() -> int:
     result = ell.merge_text(dyn, side.getvalue())
     csv_text = result.to_csv()
 
-    out = Path("data") / "_test_naming_reactor_synced.csv"
+    temp = tempfile.TemporaryDirectory(prefix="reactor_naming_")
+    out = Path(temp.name) / "reactor_synced.csv"
     try:
         with out.open("w", encoding="utf-8", newline="") as fh:
             fh.write(csv_text)
@@ -164,6 +166,7 @@ async def main() -> int:
                 f"{len(parsed)-1} data rows vs n_points={result.n_points}")
     finally:
         out.unlink(missing_ok=True)
+        temp.cleanup()
 
     c.section("4. one run = one folder, one stem, no .json")
     async with VirtualReactor() as vr:

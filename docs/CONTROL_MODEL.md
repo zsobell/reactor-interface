@@ -3,12 +3,13 @@
 The complete, honest answer. Read it before assuming the software will protect
 anything.
 
-## There are no software interlocks
+## Only explicitly requested automatic behavior
 
-Commands execute **exactly as given**. There is no chamber-pressure interlock, no
-MFC setpoint clamp, no watchdog that closes valves, no arm/disarm gate, no
-refusal to actuate, no auto-close on shutdown. A setpoint is written as typed; a
-valve opens the instant it's told; nothing acts on its own.
+The program has no general chamber-pressure interlock, arm/disarm gate, or
+reactor-wide protective policy. It does implement the requested Ar isolation
+interlock, fill-pressure flag, recipe/pre-start automation and lifecycle cleanup
+specified below. Manual commands and these declared sequences determine what
+moves; a generic assertion that nothing acts automatically is incorrect.
 
 This is deliberate and was done at the operator's explicit direction. **Zach is
 the sole arbiter of reactor behavior.** An earlier version of this program had a
@@ -113,7 +114,8 @@ See [KEITHLEY_2260B.md](KEITHLEY_2260B.md).
 ### The sample bias
 
 The stage/sample bias supply is the conditional one, and the only supply whose
-**voltage** this program sets. Its output comes on at pre-start **only when the
+**voltage** pre-start sets automatically. All four Keithleys accept manual
+voltage/current commands from the Hardware tab. Its output comes on at pre-start **only when the
 run's Sample bias field is non-zero**; at zero it is explicitly commanded off
 and an event says so, rather than leaving the operator to infer it.
 
@@ -153,7 +155,7 @@ from exactly two places, both of them an ending:
   recipe runner calls it from its own `finally`, so a crash is covered too.)
 - `abort_prestart()` (below) — the same intent for the pre-run state.
 
-There is still **no way to set a voltage, and no way to turn HV on**, from the
+There is still **no application route to set a Glassman voltage or turn its HV on**, from the
 supervisor, the API or the browser. The Hardware-tab card has no inputs; not
 disabled inputs, absent ones. Voltage/current control remains a not-yet.
 
@@ -268,9 +270,9 @@ prevent a broken *config*; they do not constrain reactor operation.
 - **Valve position after a restart is not reliably "closed."** This used to say
   closing DAQmx output tasks resets lines low on task close - that was an
   assumption, and it was contradicted 2026-08: the Ar pneumatic isolation valve
-  stayed physically open across a server restart. The program never commands a
-  reset on stop; whatever the line does on task close is DAQ hardware
-  behaviour, and it should not be assumed to go low. Because there is no
+  stayed physically open across a server restart. Run/pre-start cleanup commands its specified outputs on server stop; it does
+  not reset every DAQ line. Whatever other lines do on task close is DAQ
+  hardware behavior and should not be assumed to go low. Because there is no
   valve-position feedback (see IDENTIFYING_HARDWARE.md), the program now
   persists the last-commanded state per valve (`config/valve_state.json`) and
   restores it into its internal model at startup - this is a best-effort
@@ -292,3 +294,10 @@ prevent a broken *config*; they do not constrain reactor operation.
   closed the Ar isolation valve). Fixed 2026-08-03 by giving every valve its
   own single-line DAQmx task. Worth remembering if a future change touches
   `reactor/devices/nidaq.py`: never go back to one task per module for DO.
+
+## Recording and software structure
+
+Recording and analysis file work run in workers; hardware ownership stays with
+the Supervisor. Recording failures are visible warnings, not a new interlock.
+PrestartController implements the existing pre-start behavior, and RecipeRunner
+implements recipes. See [ARCHITECTURE.md](ARCHITECTURE.md).

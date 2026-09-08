@@ -8,7 +8,7 @@ PyYAML>=6.0
 pymodbus>=3.6
 
 # NI CompactDAQ. Needs the NI-DAQmx runtime, which the LabVIEW install already
-# provides. Windows only; the app runs in --sim mode without it.
+# provides. Windows only; virtual-reactor tests run without it.
 nidaqmx>=1.0 ; sys_platform == "win32"
 
 # Bench instruments (ammeter, QCM controller) over VISA or raw serial

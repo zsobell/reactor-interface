@@ -7,11 +7,10 @@ underneath is plain, diffable, and greppable.
 
 > **Resuming in a new chat? Read this whole file, then
 > [docs/HARDWARE.md](docs/HARDWARE.md) and [docs/RUN_PROGRAM.md](docs/RUN_PROGRAM.md).**
-> Also load the memory files (they capture the working relationship and hard-won
-> facts). The single most important standing rule is in
-> [docs/CONTROL_MODEL.md](docs/CONTROL_MODEL.md): **there are no software
-> interlocks; Zach is the sole arbiter of reactor behavior — never add a safety
-> feature without asking him first.**
+> Project memory belongs in Beads (`bd remember`), not ad hoc memory files.
+> [docs/CONTROL_MODEL.md](docs/CONTROL_MODEL.md) describes the operator-requested
+> interlock, flags, sequences and cleanup. **Zach is the sole arbiter of reactor
+> behavior — do not add automatic hardware actions without his approval.**
 
 ---
 
@@ -93,8 +92,9 @@ channels. The MFCs (network devices) and the DMM (USB) are unaffected.
 
 ## The GUI
 
-One self-contained file: [reactor/server/static/index.html](reactor/server/static/index.html)
-(HTML + CSS + vanilla JS, no build step, no external libraries). It talks to the
+The control page is [index.html](reactor/server/static/index.html), with
+`control.css`, `control.js`, and the `live-charts.js` ES module. It uses vanilla
+JavaScript with no build step or external libraries. It talks to the
 server over a WebSocket — DAQ-bound readings (pressure, thermocouples) publish
 at `site.loop_hz` (2 Hz default), while sample current and MFC flow publish at
 the faster `site.current_hz` (5 Hz default) since they have no DAQ coupling.
@@ -109,8 +109,8 @@ Three tabs:
   drag-to-zoom.
 - **Hardware** — valves (grouped by control box, each individually actuable
   and renameable), the 3 MFCs (live flow + settable flow, renameable), other
-  pressure gauges, other inputs, instruments, power supplies (no setpoints — the
-  one command sent is HV off at run end), the **ellipsometer** readout (stream
+  pressure gauges, other inputs, instruments, Keithley power-supply voltage/current
+  controls and output toggles, and the Glassman monitor (HV off at run end), the **ellipsometer** readout (stream
   state, points banked this acquisition, live fit), and primary-sensor detail.
 - **Diagnostics** — a valve-identification sweep tool, data logging, a
   connections table (every device, the FS-1 included), and the event log. A
@@ -134,8 +134,8 @@ Everything is editable **in the interface** — no YAML/code editing for normal 
 - Choose **EE-ALD** (pulsed beam, fixed exposure per cycle) or **EE-CVD**
   (continuous beam, dosing on top of it) from the mode selector. Set cycles,
   dose pressure, dose time, pump A, (EE-ALD: beam exposure, pump B), min
-  current, gas scheduling, and advanced timing. They persist in the browser
-  (localStorage).
+  current, gas scheduling, and advanced timing. They persist on the server in `config/run_params.json`; each browser keeps a
+  localStorage cache.
 - Optional **Pre-start**: opens the Ar isolation valve, flows Ar, starts the
   precursor fill pulse, strikes and holds the plasma (retries indefinitely
   until stopped), then grounds the beam — priming the tool before Start run.
@@ -180,66 +180,61 @@ How the run actually behaves is documented in **[docs/RUN_PROGRAM.md](docs/RUN_P
 
 ## Architecture
 
+A single Supervisor owns hardware. Recipe/pre-start controllers use its command
+methods, telemetry projects its state, and recording writes through a dedicated
+worker. Analysis file work runs off the event loop. Read
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for ownership, timing, startup,
+shutdown, persistence and failure behavior.
+
 ```
-config/reactor.yaml         every hardware address, channel, gauge curve — the ONLY hardware map
-config/recipes/*.yaml       file-based recipes (EE-ALD/EE-CVD are built from UI params instead)
-config/labels.json          operator-set display-name overrides for valves/MFCs/gauges (blank = default)
-config/valve_state.json     last-commanded valve state, restored into the in-memory model on
-                            startup (never written to hardware on restore — connect stays read-only)
-config/last_run.json        name of the last run that actually started, so the Run tab can
-                            pre-fill the next one incremented (Mo-014 -> Mo-015)
+config/reactor.yaml           hardware addresses, channels and gauge scaling
+config/recipes/*.yaml         optional file-based recipes
+config/{labels,valve_state,last_run,run_params}.json  operator metadata/settings
 reactor/
-  __main__.py               the CLI entry point: `python -m reactor` serves, `--check` validates
-                            the config and prints the I/O summary without serving
-  config.py                 validates the YAML; errors name the offending key
-  supervisor.py             THE single owner of state + the only path to hardware.
-                            Control loop, MFC/valve commands, fill-pressure regulator,
-                            pre-start sequence, valve-ID sweep, telemetry fan-out. Read this to
-                            know what the program can do.
-  datalog.py                tab-delimited run logs (LabVIEW-compatible columns), the automatic
-                            per-run CSV + by-cycle export, and the ellipsometer sidecar
-  devices/
-    base.py                 Reading + Device base (no gates, no interlocks)
-    nidaq.py                NI-DAQmx: analog in, digital out, raw-line pulsing. One DAQmx task
-                            PER LINE for digital out, so a write to one valve can never
-                            re-drive (and silently flip) a sibling on the same module.
-                            No analog-output path on purpose - see docs/HARDWARE.md.
-    mks_mfc.py              MKS G50: flow/temperature/valve/setpoint over Modbus (register map from
-                            the device's own /modbus.html), HTTP only for full scale + identity
-    instrument.py           SCPI over VISA (the DMM6500)
-    glassman_fl.py          XP Glassman FL HV plasma supply, serial. Polls V/I/arc count; the ONE
-                            command sent is hv_off() at run end / abort. No setpoints, no HV on
-                            (docs/GLASSMAN_FL.md)
-    keithley_2260b.py       4 Keithley 2260B DC supplies: logs V+I, switches outputs on at
-                            pre-start / off at run end, sets the sample-bias voltage only.
-                            Ports resolved by USB serial, never by COM number
-    ellipsometer.py         Film Sense FS-1 live stream: read-only TCP subscriber + record decoder
+  __main__.py                 CLI and single-process Uvicorn lifecycle
+  config.py                   validated hardware/configuration models
+  supervisor.py               hardware ownership, polling, commands and run admission
+  telemetry.py                stable snapshots and bounded WebSocket fan-out
+  recording.py                ordered file work on a dedicated recording thread
+  datalog.py                  manual/run/by-cycle CSVs and ellipsometer sidecars
+  run_report.py               pure formatting of readable run parameters
   control/
-    recipe.py               recipe engine + step types (dose/wait/electron_beam/beam_start/
-                            beam_stop/start_fill/...) + build_ald_recipe() and build_cvd_recipe()
-                            for the two UI-driven run modes
-  analysis/
-    ellipsometer_merge.py   post-run join: a refit FS-1 file + the live sidecar -> one
-                            plot-ready CSV keyed by cycle number (pure text munging, no I/O)
+    recipe_model.py           recipe schema and pure ALD/CVD builders
+    recipe.py                 recipe execution, gas schedules and exposure clocks
+    prestart.py               pre-start sequence, stop and abort lifecycle
+  devices/
+    base.py                   Reading and device lifecycle contract
+    nidaq.py                  DAQ inputs; one output task per valve line
+    mks_mfc.py                MKS G50 Modbus measurements/setpoints; HTTP metadata/fallback
+    instrument.py             VISA/SCPI instruments such as the DMM6500
+    glassman_fl.py             Glassman monitoring; application commands HV off only
+    keithley_2260b.py          Keithley monitoring, manual controls and requested run outputs
+    ellipsometer.py            read-only FS-1 TCP stream and decoder
+  analysis/ellipsometer_merge.py  pure refit/sidecar clock mapping and merge
   server/
-    app.py                  FastAPI HTTP + WebSocket; thin wrapper over Supervisor methods
-    static/index.html       the entire control GUI
-    static/analysis.html    the post-run plotting page (/analysis) - reads CSVs and dropped
-                            Auger spectra, no hardware
-  testing/virtual_reactor.py  fake DAQ/MFC/instrument devices, real Supervisor on top -
-                            see tests/README.md
+    app.py                    HTTP control, lifecycle, authentication and pages
+    data.py                   analysis/file routes, with worker-based file operations
+    static/index.html         control page markup
+    static/control.css        control-page styles
+    static/control.js         controls, parameters and telemetry rendering
+    static/live-charts.js     live plotting and chart interaction
+    static/analysis.html      analysis page markup
+    static/analysis.css       analysis-page styles
+    static/analysis.js        finished-run and Auger analysis
+  testing/virtual_reactor.py   fake hardware, real application/controllers, temporary files
 tools/
-  discover_hardware.py      read-only enumeration: DAQ, VISA, serial, Modbus, gauge-curve solver, DMM status
-  probe_glassman.py         read-only: finds the HV supply's COM port, baud rate and address
-  watch_channels.py         read-only: watch all inputs, report what changes (channel identification)
-  pulse_line.py             drive ONE digital output line (valve identification), with confirmation
-tests/                      control-logic tests against the virtual reactor; python -m tests.run_all
-docs/                       HARDWARE.md, RUN_PROGRAM.md, CONTROL_MODEL.md, IDENTIFYING_HARDWARE.md,
-                            LABVIEW_ANALYSIS.md, GLASSMAN_FL.md, KEITHLEY_2260B.md
+  discover_hardware.py         read-only hardware enumeration and identification
+  probe_glassman.py            read-only HV supply port/baud/address probe
+  watch_channels.py           input observation for channel identification
+  pulse_line.py               one-line actuation tool, with confirmation
+tests/                        python -m tests.run_all
 ```
 
-The shape that matters: **`Supervisor` is the only thing that can move hardware.**
-The web layer calls its methods and nothing else.
+Rejected duplicate starts leave the active run's metadata unchanged. Disk write
+failures and recording-backlog overflow appear in the alert chip, telemetry and
+event log; they do not stop the experiment. Errors remain visible for the server
+session because a subsequent successful row cannot restore lost data. Run files
+are drained on completion and shutdown.
 
 ---
 

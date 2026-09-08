@@ -462,6 +462,7 @@ class VirtualReactor:
         self._tmpdir: tempfile.TemporaryDirectory | None = None
         self._orig_valve_state_path = None
         self._orig_labels_path = None
+        self._orig_run_name_path = None
         self.sup: Supervisor | None = None
         self.daq: FakeDaq | None = None
         self.mfcs: dict[str, FakeMfc] = {}
@@ -476,8 +477,10 @@ class VirtualReactor:
         # restore last-commanded valve state.
         self._orig_valve_state_path = supervisor_module.VALVE_STATE_PATH
         self._orig_labels_path = supervisor_module.LABELS_PATH
+        self._orig_run_name_path = supervisor_module.RUN_NAME_PATH
         supervisor_module.VALVE_STATE_PATH = tmp / "valve_state.json"
         supervisor_module.LABELS_PATH = tmp / "labels.json"
+        supervisor_module.RUN_NAME_PATH = tmp / "last_run.json"
 
         cfg = load_config(self.config_path)
         cfg.site.data_dir = str(tmp / "data")
@@ -523,10 +526,11 @@ class VirtualReactor:
                 await self.sup.stop_fill_regulation()
             with contextlib.suppress(Exception):
                 await self.sup.stop_prestart()
-            self.sup.logger.close()
+            await self.sup.recording.close()
         if self._orig_valve_state_path is not None:
             supervisor_module.VALVE_STATE_PATH = self._orig_valve_state_path
             supervisor_module.LABELS_PATH = self._orig_labels_path
+            supervisor_module.RUN_NAME_PATH = self._orig_run_name_path
         if self._tmpdir is not None:
             self._tmpdir.cleanup()
 

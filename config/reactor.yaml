@@ -18,10 +18,10 @@ site:
   data_dir: "./data"
 
 # ---------------------------------------------------------------------------
-#  There are NO software interlocks, limits, or automatic actions in this
-#  program. Commands do exactly what they say - a setpoint is written as given,
-#  a valve opens when told, and nothing closes valves or changes setpoints on
-#  its own. The operator is the sole arbiter of reactor behaviour.
+#  Only explicitly requested interlocks, flags, sequences and cleanup exist.
+#  See docs/CONTROL_MODEL.md for Ar isolation, fill-pressure warnings,
+#  pre-start, recipe and shutdown behavior. Do not add automatic hardware
+#  actions without the operator's approval.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------

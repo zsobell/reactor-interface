@@ -8,6 +8,30 @@ from __future__ import annotations
 
 import asyncio
 import time
+import json
+from urllib.parse import urlsplit
+
+
+async def request(app, url, *, method="GET", body=b""):
+    """Exercise an ASGI HTTP app without a server, lifespan, or hardware startup."""
+    parsed = urlsplit(url)
+    messages = []
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+    async def send(message):
+        messages.append(message)
+    await app({"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+               "http_version": "1.1", "method": method, "scheme": "http",
+               "path": parsed.path, "raw_path": parsed.path.encode(), "root_path": "",
+               "query_string": parsed.query.encode(), "headers": [],
+               "client": ("127.0.0.1", 1), "server": ("localhost", 80)}, receive, send)
+    status = next(m["status"] for m in messages if m["type"] == "http.response.start")
+    data = b"".join(m.get("body", b"") for m in messages)
+    try:
+        data = json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        pass
+    return status, data
 
 
 class Checker:
