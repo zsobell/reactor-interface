@@ -29,8 +29,8 @@ from tests._support import Checker, autotick
 P = dict(
     cycles=3, dose_s=0.10, pump_a_s=0.40, dose_pressure_torr=0.02,
     min_current_a=5.0e-4, gas_overlap_s=0.05,
-    h2_gas_enable=True, h2_gas_order="first", h2_gas_pct=40, h2_gas_flow_sccm=5,
-    n2_gas_enable=True, n2_gas_order="second", n2_gas_pct=60, n2_gas_flow_sccm=3,
+    mfc1_gas_enable=True, mfc1_gas_order="first", mfc1_gas_pct=40, mfc1_gas_flow_sccm=5,
+    mfc2_gas_enable=True, mfc2_gas_order="second", mfc2_gas_pct=60, mfc2_gas_flow_sccm=3,
 )
 
 
@@ -96,7 +96,7 @@ async def main() -> int:
         c.check("completed run parks in beam-ON mode",
                 vr.daq.do_state["plasma_ground"] is False)
         c.check("MFCs zeroed at run end",
-                vr.mfcs["h2"].commanded_sccm == 0.0 and vr.mfcs["n2"].commanded_sccm == 0.0)
+                vr.mfcs["mfc1"].commanded_sccm == 0.0 and vr.mfcs["mfc2"].commanded_sccm == 0.0)
         c.check("fill valve closed at run end", vr.sup.valve_state["rpm_top"] is False)
 
         c.section("3. plasma drops out mid-run: reignites, beam still ends grounded")
@@ -111,18 +111,27 @@ async def main() -> int:
         c.check("beam still parks in beam-ON mode after a reignite",
                 vr.daq.do_state["plasma_ground"] is False)
 
-        c.section("4. abort mid-run: beam grounded, everything cleaned up")
+        c.section("4. abort mid-run: beam grounded, then parked, all cleaned up")
         vr.instruments["ammeter"].value = 1.0e-3
         await run_cvd(vr, dict(P, cycles=50), abort_after=0.4)
-        c.check("beam grounded after abort", vr.daq.do_state["plasma_ground"] is True)
+        # An abort grounds the beam at once, HV is commanded off, and only then
+        # is the relay released to its resting (de-energised) state - the same
+        # place a clean run leaves it. Until 2026-09-09 an abort stopped at the
+        # grounded step, so the relay sat energised on its 9 V battery.
+        c.check("beam grounded during the abort",
+                any(w[1] == "plasma_ground" and w[2] is True
+                    for w in vr.daq.do_writes[-12:]),
+                str([w[1:] for w in vr.daq.do_writes[-8:]]))
+        c.check("relay parked de-energised once HV was off",
+                vr.daq.do_state["plasma_ground"] is False)
         c.check("state is idle after abort", vr.sup.recipes.progress.state == "idle",
                 vr.sup.recipes.progress.state)
         c.check("watchdog task stopped", vr.sup.recipes._beam_task is None)
         c.check("MFCs zeroed after abort",
-                vr.mfcs["h2"].commanded_sccm == 0.0 and vr.mfcs["n2"].commanded_sccm == 0.0)
+                vr.mfcs["mfc1"].commanded_sccm == 0.0 and vr.mfcs["mfc2"].commanded_sccm == 0.0)
 
         c.section("5. no gas scheduled: no MFC writes at all, beam still grounded")
-        NP = dict(P, cycles=2, h2_gas_enable=False, n2_gas_enable=False)
+        NP = dict(P, cycles=2, mfc1_gas_enable=False, mfc2_gas_enable=False)
         vr.instruments["ammeter"].value = 1.0e-3
         events_before = len(vr.sup.events)
         await run_cvd(vr, NP)
@@ -141,7 +150,7 @@ async def main() -> int:
         # n2 second 60% -> handoff 1.62, second on 1.12, second off 4.05,
         # h2 re-arms at 3.55 (see docs/RUN_PROGRAM.md's gas-scheduling section)
         RP = dict(P, cycles=2, dose_s=0.05, pump_a_s=4.0, gas_overlap_s=0.5,
-                  h2_gas_pct=40, n2_gas_pct=60)
+                  mfc1_gas_pct=40, mfc2_gas_pct=60)
         vr.instruments["ammeter"].value = 1.0e-3
         runner = vr.sup.recipes
         marks = []
@@ -150,7 +159,7 @@ async def main() -> int:
             await vr.sup.start_cvd_run(RP)
             while runner.busy:
                 marks.append((round(runner._cycle_clock, 2),
-                              vr.mfcs["h2"].commanded_sccm, vr.mfcs["n2"].commanded_sccm))
+                              vr.mfcs["mfc1"].commanded_sccm, vr.mfcs["mfc2"].commanded_sccm))
                 await asyncio.sleep(0.02)
         finally:
             tick_task.cancel()

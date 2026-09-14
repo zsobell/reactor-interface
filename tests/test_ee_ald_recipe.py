@@ -19,8 +19,8 @@ from tests._support import Checker, autotick
 P = dict(
     cycles=2, dose_s=0.05, pump_a_s=0.30, beam_s=1.0, pump_b_s=0.1,
     dose_pressure_torr=0.02, min_current_a=5.0e-4, gas_overlap_s=0.2,
-    h2_gas_enable=True, h2_gas_order="first", h2_gas_pct=40, h2_gas_flow_sccm=5,
-    n2_gas_enable=True, n2_gas_order="second", n2_gas_pct=60, n2_gas_flow_sccm=3,
+    mfc1_gas_enable=True, mfc1_gas_order="first", mfc1_gas_pct=40, mfc1_gas_flow_sccm=5,
+    mfc2_gas_enable=True, mfc2_gas_order="second", mfc2_gas_pct=60, mfc2_gas_flow_sccm=3,
 )
 
 
@@ -50,14 +50,15 @@ async def main() -> int:
         beam_on_writes = [w for w in beam_writes if w[2] is False]
         # One strike per cycle, plus one more from the end-of-run sequence: a
         # completed run is deliberately parked in beam-ON mode (plasma ground
-        # OFF) at the operator's request. An ABORT still ends grounded - the
-        # teardown that parks the beam is skipped - which section 3 pins down.
+        # OFF) at the operator's request. Since 2026-09-09 an ABORT lands in
+        # that same resting state - it grounds the beam at once, commands HV
+        # off, and only then releases the relay - which section 3 pins down.
         c.check("beam struck once per cycle + end-of-run park (2 cycles)",
                 len(beam_on_writes) == 3, str(len(beam_on_writes)))
         c.check("completed run parks in beam-ON mode",
                 vr.daq.do_state["plasma_ground"] is False)
         c.check("MFCs zeroed at run end",
-                vr.mfcs["h2"].commanded_sccm == 0.0 and vr.mfcs["n2"].commanded_sccm == 0.0)
+                vr.mfcs["mfc1"].commanded_sccm == 0.0 and vr.mfcs["mfc2"].commanded_sccm == 0.0)
 
         c.section("2. plasma drops mid-exposure: reignites, run still completes")
         # _electron_beam's first current check happens ~0.2s AFTER the beam
@@ -115,7 +116,16 @@ async def main() -> int:
             with contextlib.suppress(asyncio.CancelledError):
                 await tick_task
         c.check("dose valve closed after abort", vr.daq.do_state["prec1"] is False)
-        c.check("beam grounded after abort", vr.daq.do_state["plasma_ground"] is True)
+        # The abort grounds the beam immediately (while HV may still be up),
+        # then finish_run commands HV off and parks the relay de-energised -
+        # the same state a clean run ends in, and the one the 9 V relay-box
+        # battery needs. Before 2026-09-09 an abort left it energised.
+        c.check("beam grounded during the abort",
+                any(w[1] == "plasma_ground" and w[2] is True
+                    for w in vr.daq.do_writes[-12:]),
+                str([w[1:] for w in vr.daq.do_writes[-8:]]))
+        c.check("relay parked de-energised once HV was off",
+                vr.daq.do_state["plasma_ground"] is False)
         c.check("state idle after abort", vr.sup.recipes.progress.state == "idle")
 
     return c.summary()

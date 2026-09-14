@@ -20,3 +20,8 @@ __pycache__/
 data/
 server.log
 config/run_params.json
+
+# One JSON file per RUNNING server, so the Shut down button can find the others
+# (reactor/instances.py). Live process state - meaningless on another machine
+# and stale the moment this one reboots.
+config/instances/

@@ -1,0 +1,67 @@
+{
+  "cols": 2,
+  "plotH": 260,
+  "settings": true,
+  "plots": [
+    {
+      "id": 1,
+      "title": "",
+      "x": "cycle_number",
+      "xmin": "0",
+      "xmax": "150",
+      "y1": "Thick(A).1",
+      "y1min": "",
+      "y1max": "",
+      "y1log": false,
+      "y2": "stage_temp",
+      "y2min": "",
+      "y2max": "",
+      "y2log": false
+    },
+    {
+      "id": 2,
+      "title": "",
+      "x": "cycle_number",
+      "xmin": "",
+      "xmax": "20",
+      "y1": "pressure",
+      "y1min": "",
+      "y1max": "",
+      "y1log": false,
+      "y2": "mfc_NH3",
+      "y2min": "",
+      "y2max": "",
+      "y2log": false
+    },
+    {
+      "id": 3,
+      "title": "",
+      "x": "cycle_number",
+      "xmin": "0",
+      "xmax": "20",
+      "y1": "inst_ammeter",
+      "y1min": "",
+      "y1max": "",
+      "y1log": false,
+      "y2": "hv_hv_arcs",
+      "y2min": "",
+      "y2max": "",
+      "y2log": false
+    },
+    {
+      "id": 4,
+      "title": "",
+      "x": "cycle_number",
+      "xmin": "",
+      "xmax": "20",
+      "y1": "Thick(A).1",
+      "y1min": "",
+      "y1max": "",
+      "y1log": false,
+      "y2": "stage_temp",
+      "y2min": "",
+      "y2max": "",
+      "y2log": false
+    }
+  ]
+}

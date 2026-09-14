@@ -24,9 +24,10 @@ from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketD
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import instances
 from ..analysis import ellipsometer_merge as ell
 from ..config import ReactorConfig, load_config
-from ..control.recipe import Recipe
+from ..control.recipe import Recipe, build_ald_recipe, build_cvd_recipe
 from ..supervisor import Supervisor
 
 log = logging.getLogger("reactor.server")
@@ -116,43 +117,57 @@ def merged_name(reactor_run: str, sidecar: str, filename: str) -> str:
 RUN_PARAMS_PATH = (Path(__file__).resolve().parent.parent.parent
                    / "config" / "run_params.json")
 
+#: The two process-gas MFCs used to be keyed by the gas on them ("h2_gas_pct").
+#: The gas is selected on the unit and changes, so they are keyed by CHANNEL now
+#: (2026-09-09) - but a saved run_params.json written before that still uses the
+#: old names, as does a browser tab holding the old page, and losing an
+#: operator's flows and percentages to a rename is not acceptable. Everything
+#: that READS parameters goes through this; nothing writes the old keys back.
+_LEGACY_PARAM_PREFIX = {"h2_gas_": "mfc1_gas_", "n2_gas_": "mfc2_gas_"}
+
+
+def migrate_params(params: dict) -> dict:
+    """Rename pre-2026-09-09 gas-keyed run parameters onto their channels."""
+    out = {}
+    for key, value in params.items():
+        for old, new in _LEGACY_PARAM_PREFIX.items():
+            if key.startswith(old):
+                key = new + key[len(old):]
+                break
+        out[key] = value
+    return out
+#: Analysis-page plot layout - which plots, which columns, which ranges.
+#: Server-owned for the same reason as RUN_PARAMS_PATH: one reactor, one set of
+#: plots. It lived only in each browser's localStorage until 2026-08-26, so the
+#: reactor PC and a laptop over Tailscale showed different grids.
+ANALYSIS_LAYOUT_PATH = (Path(__file__).resolve().parent.parent.parent
+                        / "config" / "analysis_layout.json")
+
 
 def _kill_other_reactor_servers() -> list[int]:
-    """Terminate every OTHER `python -m reactor` process. Returns the PIDs hit.
+    """Terminate every OTHER running reactor server. Returns the PIDs hit.
 
-    Blocking (shells out to PowerShell); call it off the event loop. This
-    program's own PID and its parent are skipped: the parent is the venv
-    launcher shim that spawned us, and killing it before our own teardown would
-    take the console down early.
+    Reads the instance registry (`reactor.instances`) rather than asking
+    Windows, and terminates through the Win32 API rather than `taskkill`. Both
+    changed on 2026-09-10 for one reason: SPEED. This runs inside the shutdown
+    request, before the browser is told anything, and the old version shelled
+    out to `powershell.exe` for a Win32_Process query - a 1-3 s cold start on
+    this machine, every single press, which is most of what "20 s hold is way
+    too long" was. The registry read is microseconds.
+
+    The command line was the only thing that distinguished a reactor server
+    from any other pythonw.exe and nothing in the standard library can read
+    another process's command line on Windows, so the servers register
+    themselves instead - see reactor/instances.py.
+
+    Still blocking (it waits for each process to actually go), so call it off
+    the event loop.
     """
-    import subprocess
-
-    me, parent = os.getpid(), os.getppid()
-    ps = ("Get-CimInstance Win32_Process | Where-Object { "
-          "$_.CommandLine -like '*-m reactor*' -and $_.Name -match '^python' "
-          "} | ForEach-Object { $_.ProcessId }")
     try:
-        out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=25).stdout
+        return instances.kill_others()
     except Exception as exc:
-        log.warning("could not enumerate reactor processes: %s", exc)
+        log.warning("could not sweep other reactor servers: %s", exc)
         return []
-
-    killed: list[int] = []
-    for tok in out.split():
-        try:
-            pid = int(tok)
-        except ValueError:
-            continue
-        if pid in (me, parent):
-            continue
-        try:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, timeout=15)
-            killed.append(pid)
-        except Exception as exc:
-            log.warning("could not kill reactor PID %s: %s", pid, exc)
-    return killed
 
 
 def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
@@ -161,6 +176,14 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        # The operator's saved Advanced-timing values for the Ar soft open, so
+        # the first manual open after a restart uses them rather than the
+        # built-in fallbacks (see Supervisor.set_soft_open_params).
+        try:
+            sup.set_soft_open_params(migrate_params(
+                json.loads(RUN_PARAMS_PATH.read_text(encoding="utf-8"))))
+        except Exception:
+            pass            # no saved params yet - the defaults stand
         await sup.start()
         try:
             yield
@@ -280,14 +303,28 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
 
     @app.get("/api/events")
     async def get_events(limit: int = 20000) -> dict[str, Any]:
-        """The full event scrollback.
+        """The event scrollback, newest `limit` entries.
 
         The live telemetry frame carries only the last 200 - see Supervisor's
         state() for why - so the browser seeds its log from here once and then
-        appends. Every event is also in server.log permanently; this is the
-        in-memory copy, and it starts empty after a restart.
+        appends. The default is a seed size, not the buffer size: the buffer
+        holds 200 000 and shipping all of them at once would be tens of MB over
+        Tailscale. Pass `limit` to reach further back. Every event is also in
+        server.log permanently, and a run's own events are in its folder; this
+        is the in-memory copy, and it starts empty after a restart.
         """
         return {"events": list(sup.events)[-limit:]}
+
+    @app.get("/api/errors")
+    async def get_errors(limit: int = 20000) -> dict[str, Any]:
+        """The error scrollback: the same entries as /api/events, filtered to
+        the kinds worth finding without scrolling (errors and flags).
+
+        Its own endpoint rather than a query parameter on /api/events because
+        the browser keeps the two panels separately seeded and tailed, and
+        because a run writes the same split to disk (`*_errors.log`).
+        """
+        return {"errors": list(sup.errors)[-limit:]}
 
     @app.get("/api/trend")
     async def get_trend(limit: int = 1800) -> dict[str, Any]:
@@ -397,8 +434,8 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
     @app.get("/api/run_params")
     async def get_run_params() -> dict[str, Any]:
         try:
-            return {"params": json.loads(
-                RUN_PARAMS_PATH.read_text(encoding="utf-8"))}
+            return {"params": migrate_params(json.loads(
+                RUN_PARAMS_PATH.read_text(encoding="utf-8")))}
         except Exception:
             # No file yet, or it is unreadable - the UI falls back to its own
             # cache and then to the field defaults.
@@ -406,10 +443,37 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
 
     @app.post("/api/run_params")
     async def set_run_params(params: dict = Body(default={})) -> dict[str, Any]:
+        params = migrate_params(params)
         RUN_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
         RUN_PARAMS_PATH.write_text(
             json.dumps(params, indent=2, sort_keys=True), encoding="utf-8")
+        # Most of these are only read when a run starts. The Ar soft-open pulse
+        # settings are the exception: they also govern a MANUAL open from the
+        # Hardware tab, which carries no run parameters at all, so the
+        # supervisor is handed them as they are saved.
+        sup.set_soft_open_params(params)
         return {"params": params}
+
+    # The Analysis page's plot grid, same ownership model as the run params
+    # above: the server holds it, each browser keeps a localStorage copy as a
+    # cache so the page paints instantly and still works if the fetch fails.
+    # The dropped Auger spectra are deliberately NOT here - those are data a
+    # person dropped on one machine, not layout, and can be megabytes.
+
+    @app.get("/api/analysis_layout")
+    async def get_analysis_layout() -> dict[str, Any]:
+        try:
+            return {"layout": json.loads(
+                ANALYSIS_LAYOUT_PATH.read_text(encoding="utf-8"))}
+        except Exception:
+            return {"layout": None}     # never saved, or unreadable
+
+    @app.post("/api/analysis_layout")
+    async def set_analysis_layout(layout: dict = Body(default={})) -> dict[str, Any]:
+        ANALYSIS_LAYOUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ANALYSIS_LAYOUT_PATH.write_text(
+            json.dumps(layout, indent=2), encoding="utf-8")
+        return {"ok": True}
 
     # -- server shutdown --------------------------------------------------- #
 
@@ -424,10 +488,27 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
         call: "just a button that kills all servers in use", then start it again
         from the shortcut.
 
-        Order matters. Other instances are terminated FIRST, then this one shuts
-        down gracefully through the normal lifespan teardown - so the server you
-        are talking to releases its devices properly, and any orphan holding a
-        serial port is gone by the time you restart.
+        Order matters, and it changed on 2026-09-10. It is now:
+
+            1. terminate the other instances,
+            2. run THIS server's device teardown, right here,
+            3. answer with a receipt of what was released,
+            4. and only then end the process.
+
+        The teardown used to happen after this response, on the way out through
+        the lifespan - which meant the only thing the page could observe was
+        port 8000 going quiet, and that happens BEFORE the teardown: uvicorn
+        drains the listening socket first. So the page reported success on the
+        one fact that was never in question, while the DAQ and COM8-COM12 were
+        still held. Zach, 2026-09-10: "there is no way for me to know if it
+        worked or not. I need some confirmation things are shut down and ready
+        to be booted again."
+
+        Doing it here costs nothing - the teardown is a handful of disconnects,
+        each separately bounded (Supervisor._teardown) - and buys a receipt
+        delivered while there is still a connection to deliver it on.
+        `Supervisor.stop` is idempotent, so the lifespan calling it again on the
+        way out is a no-op.
 
         Same consequences as any stop: a running recipe is aborted with its full
         teardown, and gas stops because the MFCs zero their own setpoints when
@@ -450,13 +531,27 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
         log.warning("shutdown requested from the UI (run active: %s, "
                     "other instances killed: %s)", busy, killed or "none")
 
+        # The teardown, now, while the browser is still connected to hear how
+        # it went. Bounded from the inside - every step in Supervisor.stop has
+        # its own deadline - so this cannot park the response indefinitely.
+        receipt = await sup.stop()
+        log.warning("shutdown: released %s in %.2fs%s",
+                    ", ".join(receipt["released"]) or "nothing",
+                    receipt["elapsed_s"],
+                    "" if receipt["ok"] else
+                    f" ({len(receipt['failed'])} step(s) failed)")
+
         async def _go() -> None:
             # Let this response reach the browser before the socket closes.
             await asyncio.sleep(0.25)
             request_shutdown()
 
-        asyncio.create_task(_go())
-        return {"stopping": True, "run_was_active": busy, "also_killed": killed}
+        # Held on app.state, not fire-and-forget: the event loop keeps only a
+        # WEAK reference to a task, so a bare create_task() can be collected
+        # mid-sleep and the shutdown would then simply never happen.
+        app.state.shutdown_task = asyncio.create_task(_go())
+        return {"stopping": True, "run_was_active": busy, "also_killed": killed,
+                **receipt}
 
     # -- power supplies -------------------------------------------------- #
     #
@@ -534,30 +629,68 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
 
     @app.post("/api/run/ald")
     async def start_ald(params: dict = Body(...)) -> dict[str, Any]:
-        recipe = await sup.start_ald_run(params)
+        recipe = await sup.start_ald_run(migrate_params(params))
         return {"started": recipe.name, "cycles": recipe.cycles}
 
     @app.post("/api/run/cvd")
     async def start_cvd(params: dict = Body(...)) -> dict[str, Any]:
-        recipe = await sup.start_cvd_run(params)
+        recipe = await sup.start_cvd_run(migrate_params(params))
         return {"started": recipe.name, "cycles": recipe.cycles}
+
+    @app.post("/api/run/params")
+    async def update_run_params(params: dict = Body(default={})) -> dict[str, Any]:
+        """Change parameters on the run in progress (2026-09-01).
+
+        Same body as /api/run/ald and /api/run/cvd - the browser posts what it
+        would start a run with, and the supervisor diffs it against what the run
+        is actually using, so only what moved is applied and logged. 409 if no
+        run is in progress; the Run tab's fields are then just the next run's
+        settings, saved through /api/run_params as before.
+        """
+        try:
+            return await sup.update_run_params(migrate_params(params or {}))
+        except REFUSALS as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.post("/api/run/estimate")
+    async def estimate_run(params: dict = Body(default={})) -> dict[str, Any]:
+        """How long a run with these parameters would take. Starts nothing.
+
+        This is what the Run tab shows between runs, so that "how long is 150
+        cycles of this?" is answerable from the parameters as typed rather than
+        by starting a run. It builds the SAME recipe the run would build and
+        reports its length, which is by construction the number the countdown
+        starts from (RecipeRunner.run_total_s: cycle length x cycles, setup and
+        teardown excluded). A browser-side copy of that arithmetic is exactly
+        what the countdown itself was moved off in 2026-08-21.
+
+        A build failure is not an error here - the operator is typing, and a
+        half-edited gas schedule (one lone "simultaneous") raises. Answer 200
+        with total_s: null and let the panel show a dash.
+        """
+        build = (build_cvd_recipe
+                 if str(params.get("mode", "ald")).lower() == "cvd"
+                 else build_ald_recipe)
+        try:
+            recipe = build(migrate_params(params or {}))
+        except Exception as exc:
+            return {"total_s": None, "error": str(exc)}
+        cycle_s = recipe.cycle_seconds()
+        return {"cycle_s": cycle_s, "cycles": recipe.cycles,
+                "total_s": cycle_s * recipe.cycles}
 
     @app.post("/api/prestart/start")
     async def prestart_start(params: dict = Body(default={})) -> dict[str, Any]:
         await sup.start_prestart(params or {})
         return sup.prestart
 
-    @app.post("/api/prestart/stop")
-    async def prestart_stop() -> dict[str, Any]:
-        await sup.stop_prestart()
-        return sup.prestart
-
     @app.post("/api/prestart/abort")
     async def prestart_abort() -> dict[str, Any]:
         """Undo the pre-start in one call: Ar off, fill off, beam relay at rest,
-        HV off. Unlike /stop this stays available after the sequence has
-        finished - a struck, primed tool is the state the operator most often
-        needs to back out of, and until now nothing in the UI did it."""
+        HV off. The only way out of a pre-start, running or already struck: it
+        calls stop_prestart itself and then undoes what the sequence turned on.
+        A /api/prestart/stop route used to end just the sequence, leaving the
+        tool primed; it was dropped with its button (2026-08-28)."""
         await sup.abort_prestart()
         return sup.prestart
 
@@ -622,10 +755,12 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Body is the raw text of the refit .txt (no multipart dependency);
         `sidecar` and `reactor_run` are file names in the data dir. With a
-        reactor_run the output is the combined plot-ready file (reactor channels
-        + interpolated ellipsometry, keyed by cycle number, paused samples
-        dropped); without it, ellipsometry alone on the reactor clock.
-        `channels` optionally limits which reactor columns are included."""
+        reactor_run the output is the combined plot-ready file - reactor
+        channels and FS-1 measurements interleaved on one cycle_number axis,
+        each keeping its own row at its own instant, paused samples dropped
+        (see ellipsometer_merge.merge); without it, ellipsometry alone on the
+        reactor clock. `channels` optionally limits which reactor columns are
+        included."""
         dyn_text = (await request.body()).decode("utf-8", errors="replace")
         if not dyn_text.strip():
             raise HTTPException(400, "empty refit file body")

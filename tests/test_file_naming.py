@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
+from reactor import supervisor as supervisor_module
 from reactor.analysis import ellipsometer_merge as ell
 from reactor.server.app import merged_name
 from reactor.testing.virtual_reactor import VirtualReactor
@@ -57,6 +58,18 @@ async def main() -> int:
     async with VirtualReactor() as vr:
         log = vr.sup.logger
         data_dir = log.dir
+
+        # Isolation, asserted rather than assumed. Every module-level path
+        # constant in supervisor.py must point inside the throwaway temp dir
+        # while a VirtualReactor is up. RUN_NAME_PATH was missing from
+        # VirtualReactor's monkeypatch until 2026-08-26, so running the suite
+        # overwrote the operator's real config/last_run.json with a test run
+        # name and reset the next-run-name suggestion in the UI.
+        tmp = data_dir.parent
+        for const in ("VALVE_STATE_PATH", "LABELS_PATH", "RUN_NAME_PATH"):
+            path = getattr(supervisor_module, const)
+            c.check(f"{const} is redirected into the temp dir",
+                    tmp in Path(path).parents, str(path))
         # The real order of events: the FS-1 is already streaming when the
         # operator presses Start run, so the capture opens FIRST - unnamed, and
         # loose in data/ because no run folder exists yet.
@@ -91,20 +104,45 @@ async def main() -> int:
                 and log.bycycle_path.parent == moved.parent,
                 log.run_path.parent.name)
 
-        # Adopting twice must not stack prefixes.
+        # A sidecar is adopted ONCE. Zach, 2026-09-01: "I stopped a previous
+        # run, and started a new one, and for the new run the points measured
+        # on the ellipsometer port didn't reset." The FS-1 broadcasts whether
+        # or not its own acquisition is running, so stopping one run and
+        # starting another usually leaves no gap in the stream at all - and the
+        # second run used to inherit the first one's open file, points and all,
+        # still sitting in the FIRST run's folder (the rename below no longer
+        # matches a name that already carries a run prefix, so it silently gave
+        # up). A second run gets a second acquisition.
         log.stop_run_export()
         log.start_ellipsometer_capture(t0 + 100)
         log.set_run_name("Mo-016")
         log.start_run_export("ALD + e-beam", t0 + 130)
+        first = log.ell_path
+        for i in range(3):
+            log.write_ellipsometer_point(FakePoint(i + 1, t0 + 131 + i))
+        c.check("the pre-run capture is adopted by the run that starts",
+                first.name.startswith("Mo-016_") and first.parent == data_dir / "Mo-016",
+                str(first.relative_to(data_dir)))
+        c.check("and keeps the points it already had", log.ell_rows == 3,
+                f"{log.ell_rows} rows")
+
         log.stop_run_export()
         log.set_run_name("Mo-017")
         log.start_run_export("ALD + e-beam", t0 + 160)
         name = log.ell_path.name
-        c.check("re-adopting replaces the prefix, never stacks it",
+        c.check("the NEXT run does not inherit it",
+                log.ell_path != first, f"{name} vs {first.name}")
+        c.check("its points start from zero", log.ell_rows == 0,
+                f"{log.ell_rows} rows")
+        c.check("the name carries this run and not the last one",
                 name.startswith("Mo-017_") and "Mo-016" not in name, name)
-        c.check("and it followed the run into the new folder",
+        c.check("and it is in this run's folder",
                 log.ell_path.parent == data_dir / "Mo-017",
                 str(log.ell_path.relative_to(data_dir)))
+        c.check("the first run keeps its own file, with its own points",
+                first.exists()
+                and len(first.read_text(encoding="utf-8").strip().splitlines()) == 4,
+                str(first.relative_to(data_dir)))
         log.stop_ellipsometer_capture()
         log.stop_run_export()
 

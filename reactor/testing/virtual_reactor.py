@@ -79,6 +79,7 @@ class FakeDaq:
     def __init__(self) -> None:
         self._plan = None
         self.raw: dict[str, float] = {}
+        self.closed = False
         self.do_state: dict[str, bool] = {}
         self.do_writes: list[tuple[float, str, bool]] = []
         self.id_state: dict[str, bool] = {}
@@ -113,7 +114,10 @@ class FakeDaq:
         self.id_state.clear()
 
     async def close(self) -> None:
-        pass
+        # Recorded, not ignored: "did the DAQ actually get released" is the
+        # question a hung shutdown leaves behind - a zombie still holding it is
+        # what stops the next server from configuring its tasks.
+        self.closed = True
 
 
 class FakeMfc(Device):
@@ -133,6 +137,10 @@ class FakeMfc(Device):
         self.device_mode = "virtual"
         self.health = {"over_temp": "No", "open_circuit": "No", "interface_error": "No"}
         self.commanded_sccm: float = 0.0
+        #: Every set_setpoint_sccm(...) value, timestamped. `commanded_sccm`
+        #: alone only shows where a gas ENDED up; a schedule is about when it
+        #: was switched, and about what was NOT switched mid-window.
+        self.setpoint_calls: list[tuple[float, float]] = []
         self.flow_sccm: float = 0.0
 
     async def connect(self) -> None:
@@ -158,6 +166,7 @@ class FakeMfc(Device):
     async def set_setpoint_sccm(self, sccm: float) -> float:
         self.commanded_sccm = float(sccm)
         self.flow_sccm = float(sccm)
+        self.setpoint_calls.append((time.time(), self.commanded_sccm))
         return self.commanded_sccm
 
     def status(self) -> dict:
@@ -339,6 +348,9 @@ class FakeKeithley(Device):
         #: Every set_output(...) value, in order. A test asserts on the SHAPE of
         #: the sequence, not just the final state.
         self.output_calls: list[bool] = []
+        #: The same transitions, timestamped - the sample bias brackets the
+        #: beam by a lead/trail time, so WHEN it switched is the assertion.
+        self.output_events: list[tuple[float, bool]] = []
         #: Every set_voltage(...) magnitude, in order.
         self.voltage_calls: list[float] = []
         #: Every set_current(...) magnitude, in order. Nothing sets a current
@@ -385,6 +397,7 @@ class FakeKeithley(Device):
 
     async def set_output(self, on: bool) -> None:
         self.output_calls.append(bool(on))
+        self.output_events.append((time.time(), bool(on)))
         self.output_on = bool(on)
 
     async def set_voltage(self, volts: float) -> None:
@@ -439,11 +452,18 @@ class VirtualReactor:
     - `cfg.site.data_dir` is redirected to a throwaway temp directory, so
       DataLogger and the automatic run-export never touch the project's real
       `data/`.
-    - `VALVE_STATE_PATH` / `LABELS_PATH` (hardcoded in supervisor.py as
-      module-level constants, not per-instance - there is no constructor
-      argument for them) are monkeypatched to that same temp directory for
-      the life of this object and restored on exit, so a test can never
-      overwrite the real `config/valve_state.json` or `config/labels.json`.
+    - `VALVE_STATE_PATH` / `LABELS_PATH` / `RUN_NAME_PATH` (hardcoded in
+      supervisor.py as module-level constants, not per-instance - there is no
+      constructor argument for them) are monkeypatched to that same temp
+      directory for the life of this object and restored on exit, so a test
+      can never overwrite the real `config/valve_state.json`,
+      `config/labels.json` or `config/last_run.json`.
+
+      `RUN_NAME_PATH` was missing from that list until 2026-08-26, and every
+      test that started a NAMED run (test_file_naming, test_sample_freshness,
+      test_keithley_supplies) wrote its run name into the operator's real
+      `config/last_run.json` - so running the suite silently replaced the
+      next-run-name suggestion in the UI with a test name.
 
     Background loops (`_control_loop`, `_current_loop`, `_reconnect_loop`)
     are deliberately NOT started - a real timer racing test assertions would
@@ -462,6 +482,7 @@ class VirtualReactor:
         self._tmpdir: tempfile.TemporaryDirectory | None = None
         self._orig_valve_state_path = None
         self._orig_labels_path = None
+        self._orig_run_name_path = None
         self.sup: Supervisor | None = None
         self.daq: FakeDaq | None = None
         self.mfcs: dict[str, FakeMfc] = {}
@@ -476,8 +497,10 @@ class VirtualReactor:
         # restore last-commanded valve state.
         self._orig_valve_state_path = supervisor_module.VALVE_STATE_PATH
         self._orig_labels_path = supervisor_module.LABELS_PATH
+        self._orig_run_name_path = supervisor_module.RUN_NAME_PATH
         supervisor_module.VALVE_STATE_PATH = tmp / "valve_state.json"
         supervisor_module.LABELS_PATH = tmp / "labels.json"
+        supervisor_module.RUN_NAME_PATH = tmp / "last_run.json"
 
         cfg = load_config(self.config_path)
         cfg.site.data_dir = str(tmp / "data")
@@ -527,6 +550,7 @@ class VirtualReactor:
         if self._orig_valve_state_path is not None:
             supervisor_module.VALVE_STATE_PATH = self._orig_valve_state_path
             supervisor_module.LABELS_PATH = self._orig_labels_path
+            supervisor_module.RUN_NAME_PATH = self._orig_run_name_path
         if self._tmpdir is not None:
             self._tmpdir.cleanup()
 

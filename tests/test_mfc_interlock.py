@@ -65,10 +65,10 @@ async def main() -> int:
 
         c.section("5. the interlock is per-MFC, not global - H2/N2 have no isolation_valve")
         c.check("H2 has no isolation valve configured",
-                next(m for m in vr.sup.cfg.mfcs if m.id == "h2").isolation_valve is None)
-        await vr.sup.set_mfc_setpoint("h2", 5.0)   # must NOT raise
+                next(m for m in vr.sup.cfg.mfcs if m.id == "mfc1").isolation_valve is None)
+        await vr.sup.set_mfc_setpoint("mfc1", 5.0)   # must NOT raise
         c.check("H2 setpoint accepted with no valve gating it",
-                vr.mfcs["h2"].commanded_sccm == 5.0)
+                vr.mfcs["mfc1"].commanded_sccm == 5.0)
 
     return c.summary()
 

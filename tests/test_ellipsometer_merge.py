@@ -1,7 +1,9 @@
 """Post-run merge (reactor/analysis/ellipsometer_merge.py): parse an FS-1
 refit file, fit the reactor<->FS-1 time map from the live sidecar, and build the
-COMBINED plot-ready file - reactor run channels keyed by cycle number, paused
-samples dropped, with the ellipsometry columns interpolated onto them.
+COMBINED plot-ready file - reactor run channels and FS-1 measurements on one
+cycle_number axis, paused samples dropped. A union of instants, not a
+resampling: each source keeps its own rows and is blank in the other's columns,
+and the only derived number is an ellipsometry row's cycle_number.
 
 Synthetic data gives exact, deterministic assertions; a real on-disk FS-1
 dynamic file (if present) is parsed as a smoke check of the header/column
@@ -105,7 +107,7 @@ async def main() -> int:
     c.check("thickness carried onto row", abs(float(r4["Thick(A).1"]) - 12.0) < 1e-6)
     c.check("no spurious warnings", res.warnings == [], f"{res.warnings}")
 
-    # -- combined merge: reactor run backbone + interpolated ellipsometry --- #
+    # -- combined merge: reactor rows and FS-1 rows on one cycle axis ------- #
     c.section("merge: combined plot-ready (cycle number, paused dropped)")
     # clean sidecar (no jitter) so the fit is exact: reactor epoch == BASE + fs_time
     CLEANSIDE = "\n".join(["point_index,fs_time_s,reactor_epoch,reactor_iso",

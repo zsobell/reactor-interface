@@ -11,10 +11,21 @@ tool and just watch the readings.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
+import threading
+import time
 import webbrowser
 from pathlib import Path
+
+#: Named, not `logging.getLogger(__name__)`: this module is `__main__` when run
+#: with -m, and the file handler and level are configured for "reactor".
+#: It was missing entirely until 2026-08-28, and the one place that used it was
+#: the shutdown deadline thread below - which therefore died on a NameError
+#: instead of ending a wedged process. Nothing else referenced it, so nothing
+#: ever raised where anyone would see it.
+log = logging.getLogger("reactor")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,8 +118,11 @@ def main(argv: list[str] | None = None) -> int:
     ell = cfg.ellipsometer
 
     print(f"  site        : {cfg.site.name}")
-    print(f"  loop rate   : {cfg.site.loop_hz} Hz DAQ / {cfg.site.current_hz} Hz "
-          f"current + MFC")
+    # Three independent timers, three numbers. This used to print current_hz
+    # twice and label it "current + MFC", which hid the MFC rate entirely - and
+    # that rate is deliberately just ABOVE the row rate (see SiteConfig).
+    print(f"  loop rate   : {cfg.site.loop_hz} Hz DAQ / "
+          f"{cfg.site.current_hz} Hz current+rows / {cfg.site.mfc_hz} Hz MFC")
     print(f"  pressure    : {cfg.pressure.channel}  curve={curve}")
     print(f"  stage TC    : {cfg.stage_temp.channel or '(disabled)'}"
           f"  type {cfg.stage_temp.tc_type}")
@@ -123,10 +137,15 @@ def main(argv: list[str] | None = None) -> int:
                     f"(monitor + HV off)")
         # Port is resolved from the USB serial at connect, so there is nothing
         # useful to print for it here - the serial is the identity.
-        what = "output on at pre-start, off at run end" if p.prestart_output \
-            else "monitor only"
-        role = ", SAMPLE BIAS" if p.sample_bias else ""
-        return f"{p.id}#{p.usb_serial} {p.model or p.driver} ({what}{role})"
+        if p.sample_bias:
+            # Since 2026-08-26 the bias is armed at pre-start and switched by
+            # the beam, not held on for the whole run like the coils.
+            what = "SAMPLE BIAS: armed at pre-start, output brackets the beam"
+        elif p.prestart_output:
+            what = "output on at pre-start, off at run end"
+        else:
+            what = "monitor only"
+        return f"{p.id}#{p.usb_serial} {p.model or p.driver} ({what})"
 
     supplies = [p for p in cfg.power_supplies if p.enabled]
     print(f"  supplies    : {supplies[0] and _supply_line(supplies[0]) if supplies else 'none'}")
@@ -159,8 +178,6 @@ def main(argv: list[str] | None = None) -> int:
         # before server.run() binds, so opening immediately can land on a
         # connection-refused page. This is the normal path now that the taskbar
         # shortcut passes --open.
-        import threading
-
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     # Served through an explicit uvicorn.Server rather than uvicorn.run() so the
@@ -174,30 +191,142 @@ def main(argv: list[str] | None = None) -> int:
     # removed on 2026-08-25: an old instance survived the restart, sat holding
     # COM8-COM12, and the new one came up unable to reach any of them. Stopping
     # cleanly and starting from the shortcut is both simpler and easier to see.
+    #: How long uvicorn may wait for open connections to close before it gives
+    #: up on them and tears the app down anyway.
+    #:
+    #: THIS IS THE SHUTDOWN BUG (diagnosed 2026-08-28). uvicorn's default is
+    #: None - wait forever - and its drain loop runs BEFORE the lifespan
+    #: shutdown. So one WebSocket that never closes (a laptop asleep over
+    #: Tailscale, a browser gone without a FIN) parks the entire stop: the
+    #: listening socket is released at once, but `Supervisor.stop()` is never
+    #: reached, and the process sits there holding the DAQ and COM8-COM12.
+    #:
+    #: server.log, 2026-08-28: "[command] server shutdown requested from the UI"
+    #: at 14:53:20 and then not one further line from that process - no
+    #: teardown, no error. The next server started 20 s later and got "resource
+    #: is reserved" from the DAQ and "Access is denied" on COM9; the old one was
+    #: still there at 14:54:10, when a second shutdown finally taskkilled it.
+    #: The silence was uvicorn's own INFO "Waiting for connections to close",
+    #: which log_level="warning" suppresses.
+    #:
+    #: On timeout uvicorn cancels the stragglers and CONTINUES into the lifespan
+    #: shutdown, so the devices are still released properly. That is why this is
+    #: a timeout and not `force_exit`, which would skip the teardown entirely.
+    #:
+    #: Cut from 3 s to 1 s on 2026-09-10. It no longer gates anything the
+    #: operator is waiting on: /api/server/shutdown runs the device teardown
+    #: itself, before it answers, so by the time the drain starts the DAQ and
+    #: the COM ports are ALREADY released and this is just the socket tidying
+    #: up after a page that has gone away.
+    SHUTDOWN_DRAIN_S = 1
+
     app = create_app(cfg)
     server = uvicorn.Server(
-        uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
+        uvicorn.Config(app, host=args.host, port=args.port, log_level="warning",
+                       timeout_graceful_shutdown=SHUTDOWN_DRAIN_S))
 
-    shutdown = {"wanted": False}
+    #: How long the whole graceful stop gets before the process is ended anyway.
+    #:
+    #: 20 s until 2026-09-10, and Zach was watching all of it: "20 s hold is way
+    #: too long". It was sized for a teardown that had not happened yet. Now the
+    #: teardown runs inside the shutdown REQUEST (see /api/server/shutdown), so
+    #: everything left after the response is socket cleanup and an interpreter
+    #: exit - and if THAT takes more than a moment, waiting longer has never
+    #: once helped. The devices are already released either way, so the fallback
+    #: costs nothing.
+    SHUTDOWN_DEADLINE_S = 3.0
 
     def request_shutdown() -> None:
-        shutdown["wanted"] = True
         server.should_exit = True      # uvicorn tears down gracefully
+
+        # ...and a hard deadline behind it. Reported 2026-08-27: pressing "Shut
+        # down server" greyed the button and did nothing - the process stayed
+        # up holding the DAQ and COM8-COM12, so the next server started could
+        # not reach a single device ("resource is reserved", "Access is
+        # denied"), and it took a SECOND shutdown from the new server to
+        # taskkill the old one. The first press can never taskkill it, either:
+        # _kill_other_reactor_servers skips this PID and its parent, and the
+        # parent IS the other `-m reactor` process (the venv's pythonw.exe
+        # launcher shim re-execs the real interpreter as a child).
+        #
+        # So the graceful path is the ONLY way this instance ends, and it must
+        # not be able to hang. A daemon timer ends the process if the teardown
+        # has not finished in time. (Until 2026-08-28 this timer could not do
+        # that: its first statement referenced a `log` this module never
+        # defined, so it raised NameError and never reached the exit below.
+        # There is no trace of that in server.log because it had never once
+        # been reached - the drain above hung long before 20 s were up.)
+        #
+        # Forcing an exit here is not a data risk in the way it would be
+        # mid-run: the recipe abort and the pre-start abort
+        # have already run above (that is the first thing Supervisor.stop does),
+        # the MFCs zero their own setpoints the moment this program's sockets
+        # close, and valve state is persisted rather than inferred. A zombie
+        # holding the hardware is strictly worse than an abrupt exit.
+        def _deadline() -> None:
+            time.sleep(SHUTDOWN_DEADLINE_S)
+            log.error("shutdown did not complete in %.0fs - ending the process "
+                      "anyway so the DAQ and the serial ports are released. "
+                      "The last 'shutdown: ...' line above names the step that "
+                      "hung.", SHUTDOWN_DEADLINE_S)
+            _flush()
+            os._exit(1)
+
+        threading.Thread(target=_deadline, name="shutdown-deadline",
+                         daemon=True).start()
+
+    def _flush() -> None:
+        for stream in (sys.stdout, sys.stderr):
+            with contextlib.suppress(Exception):
+                stream.flush()
 
     app.state.request_shutdown = request_shutdown
 
-    server.run()
+    # Announce this process so another instance's Shut down button can find it
+    # without asking Windows (reactor/instances.py). Only a real
+    # `python -m reactor` registers - an app built inside a test must never be
+    # reachable by the sweep.
+    from . import instances
+    instances.register(args.port)
 
-    if shutdown["wanted"]:
-        # server.run() has returned, so the lifespan teardown has completed and
-        # every device is disconnected. Do NOT fall out of main() and wait for
-        # the interpreter to finish: something in this stack keeps a non-daemon
-        # thread alive, which is exactly how the orphaned instance above stayed
-        # up holding its serial ports. Go now.
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(0)
-    return 0
+    # try/finally, not a bare call. THIS IS THE ORPHAN BUG (2026-09-10).
+    #
+    # uvicorn 0.52's Server.startup() does `logger.error(exc); sys.exit(
+    # STARTUP_FAILURE)` when the bind fails. sys.exit raises SystemExit, which
+    # propagates straight out of server.run() - so the os._exit(0) below was
+    # skipped, and because something in this stack keeps a NON-DAEMON thread
+    # alive, the interpreter did not end either. The second copy just sat
+    # there.
+    #
+    # Observed on 2026-09-10: two servers started within the same second, one
+    # bound port 8000, the other failed to bind and lingered holding COM10 and
+    # COM11 - so `steering` and `grid_bias` could not connect and looked like
+    # dead hardware. The comment here used to claim this exact case was
+    # covered. It was covered only on the path where run() RETURNS.
+    #
+    # Whatever comes out of run() - a clean return, a bind failure, a startup
+    # error - this process ends, and ends released.
+    status = 0
+    try:
+        server.run()
+    except SystemExit as exc:
+        # The bind failure above, almost always. Keep the code rather than
+        # reporting success - `python -m reactor` is scriptable even if the
+        # windowless shortcut never looks.
+        status = int(exc.code or 0)
+        log.error("server exited during startup (status %s) - most likely "
+                  "port %s is already in use by another reactor server",
+                  status, args.port)
+    except BaseException:
+        status = 1
+        log.exception("server stopped on an unhandled exception")
+    finally:
+        instances.unregister()
+        # Do NOT fall out of main() and wait for the interpreter to finish:
+        # the non-daemon thread above is exactly how an orphan stayed up
+        # holding its serial ports. Go now.
+        _flush()
+        os._exit(status)
 
 
 if __name__ == "__main__":

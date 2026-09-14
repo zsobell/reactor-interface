@@ -23,7 +23,8 @@ the hardware (not by trusting the old VI, which is full of dead code):
 - **Cold-cathode chamber gauge** (base ~3e-8 Torr) + **3 Baratrons** (10 Torr heads)
 - **Sample thermocouple**, a precursor-bubbler thermocouple, + two more
 - **Keithley DMM6500** measuring sample current (the plasma/e-beam diagnostic)
-- **3 MKS G50 mass flow controllers** (Ar, H2, N2) — flow, temperature and
+- **3 MKS G50 mass flow controllers** (`ar` plus two process-gas lines,
+  `mfc1`/`mfc2`, named by whatever gas they report) — flow, temperature and
   setpoint all over Modbus; HTTP only for full scale and identity
 - **Film Sense FS-1 in-situ ellipsometer**, read-only over its live TCP stream
 - **XP Glassman FL1.5F1.0 high-voltage plasma supply** (1500 V / 1.0 A) on USB,
@@ -113,7 +114,9 @@ Three tabs:
   one command sent is HV off at run end), the **ellipsometer** readout (stream
   state, points banked this acquisition, live fit), and primary-sensor detail.
 - **Diagnostics** — a valve-identification sweep tool, data logging, a
-  connections table (every device, the FS-1 included), and the event log. A
+  connections table (every device, the FS-1 included), an **error log** and the
+  event log below it — same entries, the errors split out so a fault is not
+  found by scrolling, and both saved into the run's own folder as it goes. A
   header chip shows any condition that is wrong **right now** — fill pressure
   off setpoint, a dead plasma, a disconnected device — and clears itself the
   moment the condition does; the log is the history. Post-run ellipsometer sync
@@ -136,9 +139,11 @@ Everything is editable **in the interface** — no YAML/code editing for normal 
   dose pressure, dose time, pump A, (EE-ALD: beam exposure, pump B), min
   current, gas scheduling, and advanced timing. They persist in the browser
   (localStorage).
-- Optional **Pre-start**: opens the Ar isolation valve, flows Ar, starts the
-  precursor fill pulse, strikes and holds the plasma (retries indefinitely
-  until stopped), then grounds the beam — priming the tool before Start run.
+- Optional **Pre-start**: soft-opens the Ar isolation valve (pulsed in, see
+  below), flows Ar, starts the precursor fill pulse, strikes and holds the
+  plasma (retries indefinitely until stopped), then grounds the beam — priming
+  the tool before Start run. It also arms the sample bias at its set level,
+  output off.
 - **Start run** builds and launches the run (`POST /api/run/ald` or
   `/api/run/cvd`).
 - A **phase strip** highlights the active phase with a live countdown; the
@@ -167,6 +172,8 @@ data/Mo-015/
     Mo-015_260821_131320_run.csv              trace, by time
     Mo-015_260821_131320_bycycle.csv          trace, by fractional cycle
     Mo-015_260821_131320_run_params.txt       the settings, in plain text
+    Mo-015_260821_131320_events.log           every event, timestamped
+    Mo-015_260821_131320_errors.log           just the errors and flags
     Mo-015_260821_131256_ellipsometer.csv     FS-1 sidecar for this run
     Mo-015_260821_131320_reactor_synced.csv   the post-run merge, once made
 ```
@@ -192,6 +199,11 @@ reactor/
   __main__.py               the CLI entry point: `python -m reactor` serves, `--check` validates
                             the config and prints the I/O summary without serving
   config.py                 validates the YAML; errors name the offending key
+  instances.py              which reactor servers are running: each `python -m reactor` drops a
+                            PID file in config/instances/ at startup and removes it on the way
+                            out, so the Shut down button can find and end the others through the
+                            Win32 API. Replaced a `powershell.exe` Win32_Process query that cost
+                            1-3 s of cold start inside every shutdown request
   supervisor.py             THE single owner of state + the only path to hardware.
                             Control loop, MFC/valve commands, fill-pressure regulator,
                             pre-start sequence, valve-ID sweep, telemetry fan-out. Read this to
@@ -259,7 +271,9 @@ tuned on real hardware** (`reactor-alz`, `reactor-2z1`, confirmed
 **Logic-verified against the virtual reactor (`tests/`), not yet confirmed on
 real hardware:** the **EE-CVD** run (continuous beam, dosing on top of it), the
 operator **pre-start** sequence, gas scheduling (single overlap field, freezes
-with the plasma), and the ±20% fill-pressure flag. Those tests run the real
+with the plasma; plus the Simultaneous order, where both gases run the whole
+window), the sample bias bracketing the beam, the Ar soft open, and the ±20%
+fill-pressure flag. Those tests run the real
 `Supervisor` and recipe engine against fake devices — they prove sequencing and
 reaction, never anything about the physical reactor. See
 [tests/README.md](tests/README.md) for exactly where that line falls.
@@ -337,8 +351,9 @@ Two things worth knowing:
 
 **[docs/CONTROL_MODEL.md](docs/CONTROL_MODEL.md)** is the complete answer. Summary:
 commands execute exactly as given. There are **no** software interlocks, limits,
-clamps, or automatic actions, except two the operator explicitly asked for: a
+clamps, or automatic actions, except three the operator explicitly asked for: a
 gentle "flag" when precursor fill pressure drifts >20% off setpoint (warns,
-never stops), and the Ar MFC refusing a nonzero setpoint while its isolation
-valve is closed. This is deliberate: Zach is the sole arbiter of reactor
-behavior.
+never stops), the Ar MFC refusing a nonzero setpoint while its isolation valve
+is closed, and that valve being bled open (a 0.05 s pulse, a 0.5 s wait, then
+open) rather than flipped open, so built-up Ar does not dump in. This is
+deliberate: Zach is the sole arbiter of reactor behavior.

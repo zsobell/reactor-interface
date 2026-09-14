@@ -405,12 +405,19 @@ def merge(
 ) -> MergeResult:
     """Produce a single plot-ready table.
 
-    With a ``reactor_run`` (the normal case) the output is the COMBINED file:
-    the reactor run is the backbone (every logged channel, keyed by fractional
-    cycle_number), reignite/operator-paused samples are dropped, and the
-    ellipsometry columns (thickness, rho, ...) are linearly interpolated onto
-    each reactor sample's time. One row per real reactor sample - ready to plot
-    any property, reactor or ellipsometer, against cycle number.
+    With a ``reactor_run`` (the normal case) the output is the COMBINED file,
+    keyed by fractional cycle_number with reignite/operator-paused samples
+    dropped - ready to plot any property, reactor or ellipsometer, against
+    cycle number.
+
+    It is a **union of instants, not a resampling**: every reactor sample keeps
+    its own row with the ellipsometry columns blank, and every FS-1 measurement
+    gets its own row at its true time with the reactor columns blank, told
+    apart by the ``source`` column. Nothing is interpolated onto anything else,
+    so every number in the file is one that was actually measured and a blank
+    cell means "not sampled here". The single exception is ``cycle_number`` on
+    an ellipsometry row (see below): the cycle number is a function of the
+    clock, not a measurement.
 
     Without a ``reactor_run`` it falls back to the ellipsometry alone, on the
     reactor clock (no cycle number, nothing dropped)."""

@@ -7,6 +7,7 @@ python; nothing here requires pytest or any other dependency.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 
@@ -77,3 +78,42 @@ async def autotick(vr, period: float = 0.1) -> asyncio.Task:
             await asyncio.sleep(period)
 
     return asyncio.create_task(_loop(), name="autotick")
+
+
+async def asgi_call(app, method: str, path: str, body=None) -> tuple[int, object]:
+    """Send one JSON request straight into a FastAPI app over raw ASGI.
+
+    Deliberately does NOT run the app's lifespan: startup calls
+    Supervisor.start(), which would take the DAQ and the serial ports away from
+    the server actually running the reactor. Building scopes by hand exercises
+    the routes and nothing else.
+
+    Returns (status, decoded JSON body).
+    """
+    payload = json.dumps(body).encode() if body is not None else b""
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": method, "path": path, "raw_path": path.encode(),
+        "query_string": b"", "root_path": "", "scheme": "http",
+        "server": ("127.0.0.1", 8000), "client": ("127.0.0.1", 1234),
+        "headers": [(b"host", b"127.0.0.1:8000"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(payload)).encode())],
+    }
+    got = {"status": None, "body": b""}
+    done = asyncio.Event()
+
+    async def receive():
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            got["status"] = msg["status"]
+        elif msg["type"] == "http.response.body":
+            got["body"] += msg.get("body", b"")
+            if not msg.get("more_body"):
+                done.set()
+
+    await app(scope, receive, send)
+    await done.wait()
+    return got["status"], json.loads(got["body"] or b"null")

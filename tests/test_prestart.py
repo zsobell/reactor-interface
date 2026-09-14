@@ -23,11 +23,21 @@ PARAMS = dict(ar_sccm=4.0, valve_delay_s=0.1, hold_s=0.4, min_current_a=5.0e-4,
               reignite_pulse_s=0.05, reignite_settle_s=0.05,
               dose_pressure_torr=0.02)
 
+#: The Ar pneumatic is soft-opened (pulsed in) on the way through - see
+#: tests/test_soft_open.py, which is where that behaviour is actually tested.
+#: At the operator's real 1 x 0.05 s / 0.5 s it adds ~0.55 s to every
+#: pre-start here, enough to eat into the budgets the sections below wait on,
+#: so it is scaled down with everything else in PARAMS.
+FAST_SOFT_OPEN = {"ar_soft_open_pulses": 2, "ar_soft_open_on_s": 0.02,
+                  "ar_soft_open_gap_s": 0.02}
+
 
 async def main() -> int:
     c = Checker("test_prestart")
 
     async with VirtualReactor() as vr:
+        vr.sup.set_soft_open_params(FAST_SOFT_OPEN)
+
         c.section("1. plasma lights straight away")
         vr.instruments["ammeter"].value = 1.0e-3
         tick_task = await autotick(vr, period=0.05)
@@ -41,6 +51,10 @@ async def main() -> int:
                 await tick_task
 
         c.check("Ar pneumatic opened", vr.daq.do_state.get("ar_pneumatic") is True)
+        c.check("...and it was pulsed in, not flipped open",
+                sum(1 for _t, key, _v in vr.daq.do_writes
+                    if key == "ar_pneumatic") == 5,
+                str([v for _t, k, v in vr.daq.do_writes if k == "ar_pneumatic"]))
         c.check("Ar set to 4 sccm", vr.mfcs["ar"].commanded_sccm == 4.0,
                 str(vr.mfcs["ar"].commanded_sccm))
         c.check("fill regulation started on prec1",

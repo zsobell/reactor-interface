@@ -63,7 +63,15 @@ def next_run_name(previous: str) -> str:
     return f"{head}{str(int(digits) + 1).zfill(len(digits))}"
 
 
-def _describe_recipe(recipe) -> str:
+#: Event kinds that count as bad news: they go to the error log as well as the
+#: event log, on screen and in a run's folder. "flag" is in deliberately - a
+#: fill pressure drifting off setpoint is exactly what gets hunted for after a
+#: run. Defined here, not in the supervisor, because the supervisor already
+#: imports this module and both need the same list (2026-09-09).
+ERROR_KINDS = ("error", "flag")
+
+
+def _describe_recipe(recipe, gas_names: dict[str, str] | None = None) -> str:
     """Plain-English summary of a built EE-ALD / EE-CVD Recipe - cycle
     architecture and the gas-schedule timeline, for a human skimming the run
     snapshot file.
@@ -72,7 +80,18 @@ def _describe_recipe(recipe) -> str:
     what the runner measures against (see control/recipe.py's GasSchedule):
     EE-ALD divides up the beam step's exposure, EE-CVD the whole cycle. Both
     handoffs move the incoming gas earlier by the single Recipe.gas_overlap_s.
+
+    Simultaneous gases do not divide the window at all - they each cover the
+    whole of it - so their percentages are deliberately NOT printed. A run
+    report that said "60% of the window" for a gas that ran the whole window
+    would be a lie in the one file kept to say what the run actually did.
     """
+    # The gas a line is ACTUALLY flowing, not the channel id: the MFC's own
+    # selection moves (the `h2` line runs NH3), and this report is the file that
+    # says what the run did. Falls back to the id for a device that never said.
+    def gas(mfc_id: str) -> str:
+        return (gas_names or {}).get(mfc_id) or mfc_id
+
     lines = [f"{recipe.name} — {recipe.cycles} cycles"]
     for s in recipe.steps:
         lines.append(f"  {s.describe()}")
@@ -89,6 +108,17 @@ def _describe_recipe(recipe) -> str:
         return "\n".join(lines)
 
     ov = recipe.gas_overlap_s
+    simul = [g for g in recipe.gas_schedules if g.order == "simultaneous"]
+    if simul:
+        lines.append(f"  gas schedule (relative to {anchor} start): "
+                     f"simultaneous - each covers the whole {anchor}")
+        # EE-CVD's window IS the cycle and the beam never stops, so these are
+        # not re-cycled per cycle: they come on once and stay on to run end.
+        when = ("on at the first cycle, off at run end" if cvd
+                else f"on at {anchor}-{ov:g}s, off at {anchor}+{span:g}s")
+        for g in simul:
+            lines.append(f"    {gas(g.mfc)}: {when} (@ {g.flow_sccm:g} sccm)")
+        return "\n".join(lines)
     first = next((g for g in recipe.gas_schedules if g.order == "first"), None)
     second = next((g for g in recipe.gas_schedules if g.order == "second"), None)
     handoff = (first.pct / 100.0 * span) if first else 0.0
@@ -101,11 +131,11 @@ def _describe_recipe(recipe) -> str:
         # cycle ends rather than leading a beam step (RecipeRunner._build_gas_plan).
         on = (f"on at {anchor}+0s, re-arms at {anchor}+{max(0.0, second_off - ov):g}s"
               if cvd else f"on at {anchor}-{ov:g}s")
-        lines.append(f"    {first.mfc}: {on}, off at {anchor}+{handoff:g}s "
+        lines.append(f"    {gas(first.mfc)}: {on}, off at {anchor}+{handoff:g}s "
                      f"({first.pct:g}% @ {first.flow_sccm:g} sccm)")
     if second:
         lines.append(
-            f"    {second.mfc}: on at {anchor}+{max(0.0, handoff - ov):g}s, "
+            f"    {gas(second.mfc)}: on at {anchor}+{max(0.0, handoff - ov):g}s, "
             f"off at {anchor}+{second_off:g}s "
             f"({second.pct:g}% @ {second.flow_sccm:g} sccm)")
     return "\n".join(lines)
@@ -156,8 +186,18 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}m {sec:02d}s" if m else f"{sec}s"
 
 
+def _fmt_elapsed(seconds: float) -> str:
+    """h:mm:ss from the start of the run, for the changes log."""
+    seconds = max(0.0, float(seconds))
+    h, rem = divmod(int(seconds), 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}"
+
+
 def format_run_params(params: dict, recipe, run_name: str = "",
-                      recorded_at: datetime | None = None) -> str:
+                      recorded_at: datetime | None = None,
+                      changes: list[dict] | None = None,
+                      gas_names: dict[str, str] | None = None) -> str:
     """The run's settings as a plain-text report.
 
     This used to be a JSON dump. Zach could not open it ("I dont know how to
@@ -192,13 +232,36 @@ def format_run_params(params: dict, recipe, run_name: str = "",
 
     L.append("SUMMARY")
     L.append("-" * 60)
-    L += [f"  {ln}" for ln in _describe_recipe(recipe).splitlines()]
+    L += [f"  {ln}" for ln in _describe_recipe(recipe, gas_names).splitlines()]
     L.append("")
 
     L.append("PARAMETERS SET IN THE UI")
     L.append("-" * 60)
     L += _param_block(sorted(params.items()))
     L.append("")
+
+    # Mid-run edits (2026-09-01). The block above is the CURRENT value of every
+    # parameter - which for a run that was adjusted is not what it started
+    # with, so the report would otherwise quietly describe a run that never
+    # happened. Operator: "if I change a parameter mid run you should update
+    # the document with a changes section that shows when (timestamp from start
+    # and cycle #) a parameter was changed, and to what value."
+    if changes:
+        L.append("CHANGES DURING THE RUN")
+        L.append("-" * 60)
+        L.append(f"  {'ELAPSED':>8}  {'CYCLE':>7}  {'PARAMETER':<26}  "
+                 f"{'FROM':>14}  ->  TO")
+        for ch in changes:
+            cyc = ch.get("cycle")
+            cyc_s = (f"{cyc}/{recipe.cycles}" if cyc else "setup")
+            L.append(f"  {_fmt_elapsed(ch.get('elapsed_s', 0.0)):>8}  "
+                     f"{cyc_s:>7}  {str(ch.get('key', '')):<26}  "
+                     f"{_fmt_value(ch.get('old')):>14}  ->  "
+                     f"{_fmt_value(ch.get('new'))}")
+        L.append("")
+        L.append("  Times are from the start of the run. A parameter changed")
+        L.append("  more than once appears once per change, in order.")
+        L.append("")
 
     L.append("RECIPE STEPS")
     L.append("-" * 60)
@@ -216,10 +279,21 @@ def format_run_params(params: dict, recipe, run_name: str = "",
     L.append("-" * 60)
     if recipe.gas_schedules:
         L += _param_block(
-            [(g.mfc, f"{g.order}, {g.pct:g}% of the window @ {g.flow_sccm:g} sccm")
+            [((gas_names or {}).get(g.mfc) or g.mfc,
+              f"{g.order}, whole window @ {g.flow_sccm:g} sccm"
+                     if g.order == "simultaneous" else
+                     f"{g.order}, {g.pct:g}% of the window @ {g.flow_sccm:g} sccm")
              for g in recipe.gas_schedules])
-        L.append(f"  handoff overlap   {recipe.gas_overlap_s:g} s "
-                 f"(the incoming gas starts this early)")
+        if any(g.order == "simultaneous" for g in recipe.gas_schedules):
+            # No handoff to overlap. In EE-ALD the same number still leads the
+            # gases into the beam; in EE-CVD it does nothing at all.
+            L.append(f"  overlap           {recipe.gas_overlap_s:g} s "
+                     + ("(unused - simultaneous gases run the whole cycle)"
+                        if recipe.mode == "cvd"
+                        else "(how early the gases lead the beam in)"))
+        else:
+            L.append(f"  handoff overlap   {recipe.gas_overlap_s:g} s "
+                     f"(the incoming gas starts this early)")
     else:
         L.append("  (no scheduled gas)")
     L.append("")
@@ -254,6 +328,17 @@ class DataLogger:
         self.bycycle_path: Path | None = None
         self.bycycle_rows = 0
         self._bycycle_keys: list[str] = []
+        # The run's own event log and error log, opened alongside the trace and
+        # written as things happen (Zach, 2026-09-09: he needs the errors
+        # separately, and both saved with the run rather than only in the
+        # in-memory buffer and server.log). Unbounded: a text line per event is
+        # nothing next to the CSV beside it.
+        self._events_fh = None
+        self._errors_fh = None
+        self.events_path: Path | None = None
+        self.errors_path: Path | None = None
+        self.event_rows = 0
+        self.error_rows = 0
         # Per-acquisition ellipsometer sidecar - the (fs_time -> reactor_clock)
         # record captured live from the FS-1 stream, so a refit file can later
         # be put back onto the reactor clock. One file per acquisition; opened
@@ -263,6 +348,13 @@ class DataLogger:
         self.ell_path: Path | None = None
         self.ell_started_at: float | None = None
         self.ell_rows = 0
+        #: Which run the open acquisition already belongs to, so a second run
+        #: cannot adopt the first one's file (see _adopt_open_sidecar).
+        self._ell_adopted_run = None
+        # MFC id -> the gas that MFC is actually flowing ("mfc1" -> "NH3"), kept
+        # current by the supervisor (see set_gas_names). Column HEADINGS are
+        # written through it; the snapshot keys underneath are untouched.
+        self._gas_names: dict[str, str] = {}
         # Operator's name for the current run (e.g. "Mo-014"); prefixes every
         # file the run writes. Empty = historical timestamp-first naming.
         self.run_name: str = ""
@@ -273,6 +365,57 @@ class DataLogger:
         # None means "no run in progress", and files fall back to data/.
         self.run_dir: Path | None = None
         self.run_stem: str = ""
+
+    def set_gas_names(self, names: dict[str, str]) -> None:
+        """Tell the logger what gas each MFC is actually flowing.
+
+        The gas is selected on the MFC itself, and it moves: the `h2` line ran
+        H2 and now runs NH3. Zach's rule (2026-09-09) is that the gas ACTUALLY
+        in use is what gets tracked and labelled, everywhere - and that nothing
+        static may name a gas, so the channel is `mfc1` and only the heading
+        moves with the gas.
+        """
+        # Whitespace or a comma in a heading would split or scruff up a
+        # column. The G50's gas table has neither, but a data file is not the
+        # place to find out.
+        clean = {k: "".join(v.split()).replace(",", "") for k, v in names.items()}
+        self._gas_names = {k: v for k, v in clean.items() if v}
+
+    def _heading(self, key: str) -> str:
+        """Column heading for one channel key, with the MFC segment replaced by
+        the gas that line is really flowing:
+
+            mfc_mfc1        -> mfc_NH3        (run + by-cycle export columns)
+            mfc.mfc1.flow   -> mfc.NH3.flow   (extended log, raw snapshot keys)
+
+        Only that one segment moves, so a heading still reads and sorts like the
+        rest of the file, and every other channel is returned untouched. An MFC
+        that has not reported a gas yet keeps its id.
+        """
+        for sep in (".", "_"):
+            parts = key.split(sep)
+            if (len(parts) >= 2 and parts[0] == "mfc"
+                    and parts[1] in self._gas_names):
+                parts[1] = self._gas_names[parts[1]]
+                return sep.join(parts)
+        return key
+
+    def _manual_heading(self, heading: str, key: str) -> str:
+        """Heading for one configured manual-log column: "MFC 1 sccm" ->
+        "NH3 sccm".
+
+        These are written by hand in reactor.yaml as "<name> <unit>". The UNIT
+        is the last word and stays; everything before it is the name and is
+        replaced by the gas. Splitting on the FIRST space instead - which is
+        what this did until the channels were renamed - turned "MFC 1 sccm"
+        into "NH3 1 sccm".
+        """
+        parts = key.split(".")
+        if len(parts) >= 2 and parts[0] == "mfc" and parts[1] in self._gas_names:
+            gas = self._gas_names[parts[1]]
+            head, sep, unit = heading.rpartition(" ")
+            return f"{gas} {unit}" if sep else gas
+        return heading
 
     @property
     def active(self) -> bool:
@@ -292,7 +435,9 @@ class DataLogger:
         stamp = datetime.now().strftime("%y%m%d_%H%M%S")
         self.path = self.dir / f"{stamp}_{suffix}"
         self._fh = self.path.open("w", encoding="utf-8", newline="")
-        self._fh.write("\t".join(self.cfg.logging.columns.keys()) + "\n")
+        self._fh.write("\t".join(
+            self._manual_heading(h, k)
+            for h, k in self.cfg.logging.columns.items()) + "\n")
         self._fh.flush()
 
         if self.cfg.logging.extended_log:
@@ -304,7 +449,8 @@ class DataLogger:
         self.rows = 0
         return self.path
 
-    def write_run_params(self, params: dict, recipe) -> Path:
+    def write_run_params(self, params: dict, recipe,
+                         changes: list[dict] | None = None) -> Path:
         """Write a one-time readable report of a UI-built run's settings at
         start: flow rates, phase timings, cycle count, gas schedule, every step.
         Covers both EE-ALD and EE-CVD.
@@ -330,7 +476,8 @@ class DataLogger:
         # and the BOM is what makes Notepad and Excel render it rather than
         # guessing the codepage. Harmless everywhere else.
         path.write_text(
-            format_run_params(params, recipe, self.run_name),
+            format_run_params(params, recipe, self.run_name, changes=changes,
+                              gas_names=self._gas_names),
             encoding="utf-8-sig")
         return path
 
@@ -361,8 +508,25 @@ class DataLogger:
         same file at its new path and nothing already written is lost.
         Best-effort throughout: a failed move leaves the capture running where
         it is rather than costing the operator the acquisition.
+
+        A sidecar is adopted ONCE (2026-09-01). The FS-1 broadcasts whether or
+        not its own acquisition is running, so stopping a run and starting
+        another usually produces no gap in the stream at all - and this used to
+        hand the second run the first run's still-open file: same path, same
+        rows, in the FIRST run's folder, because the rename below no longer
+        matches a name that already carries a run prefix. Run Mo-017 was
+        therefore logging into Mo-016's ellipsometer file with Mo-016's points
+        in it. If the open capture has already been adopted by an earlier run,
+        it is left closed where it belongs and a fresh one is opened for this
+        run instead.
         """
         if self._ell_fh is None or self.ell_path is None:
+            return
+        if self._ell_adopted_run is not None:
+            # Already belongs to a previous run - do not drag it into this one.
+            self.stop_ellipsometer_capture()
+            self.start_ellipsometer_capture(time.time())
+            self._ell_adopted_run = self.run_name or self.run_dir
             return
         # The timestamp is the run-name-independent part of the name; matching
         # it explicitly means adopting twice replaces the prefix instead of
@@ -390,6 +554,7 @@ class DataLogger:
             self._ell_fh = self.ell_path.open("a", encoding="utf-8", newline="")
         except OSError:
             self._ell_fh = None         # capture stops rather than raising mid-run
+        self._ell_adopted_run = self.run_name or self.run_dir
 
     def _run_folder(self, stamp: str) -> Path:
         """The directory one run's files live in.
@@ -440,6 +605,12 @@ class DataLogger:
         self._run_fh = self.run_path.open("w", encoding="utf-8", newline="")
         self.bycycle_path = self.run_dir / f"{stem}_bycycle.csv"
         self._bycycle_fh = self.bycycle_path.open("w", encoding="utf-8", newline="")
+        self.events_path = self.run_dir / f"{stem}_events.log"
+        self.errors_path = self.run_dir / f"{stem}_errors.log"
+        self._events_fh = self.events_path.open("w", encoding="utf-8", newline="")
+        self._errors_fh = self.errors_path.open("w", encoding="utf-8", newline="")
+        self.event_rows = 0
+        self.error_rows = 0
         self.run_started_at = started_at
         self.run_rows = 0
         self.bycycle_rows = 0
@@ -449,6 +620,33 @@ class DataLogger:
         # in so the whole set lives together under the run's name.
         self._adopt_open_sidecar()
         return self.run_path
+
+    def write_event(self, entry: dict[str, Any]) -> None:
+        """Append one event to the run's event log, and to its error log if it
+        is bad news. No-op outside a run - between runs the event buffer and
+        server.log are the record. Never raises: losing a log line must not
+        take down whatever was being reported."""
+        if self._events_fh is None:
+            return
+        stamp = datetime.fromtimestamp(
+            entry.get("t") or time.time()).isoformat(timespec="milliseconds")
+        elapsed = (entry.get("t") or time.time()) - (self.run_started_at or 0.0)
+        line = (f"{stamp}  {elapsed:9.3f}s  "
+                f"{str(entry.get('kind', '')):<12}  {entry.get('message', '')}\n")
+        for fh, is_err in ((self._events_fh, False), (self._errors_fh, True)):
+            if is_err and entry.get("kind") not in ERROR_KINDS:
+                continue
+            if fh is None:
+                continue
+            try:
+                fh.write(line)
+                fh.flush()
+                if is_err:
+                    self.error_rows += 1
+                else:
+                    self.event_rows += 1
+            except Exception:
+                pass
 
     def write_run_sample(self, sample: dict[str, Any], progress=None,
                          blank: set[str] | None = None) -> None:
@@ -482,7 +680,8 @@ class DataLogger:
         }
         if not self._run_keys:
             self._run_keys = sorted(k for k in sample if k != "t")
-            header = ["elapsed_s", "iso_time", *self._run_keys, *extra]
+            header = ["elapsed_s", "iso_time",
+                      *(self._heading(k) for k in self._run_keys), *extra]
             self._run_fh.write(",".join(header) + "\n")
 
         def csv(v: Any) -> str:
@@ -515,7 +714,9 @@ class DataLogger:
             if not self._bycycle_keys:
                 self._bycycle_keys = self._run_keys
                 self._bycycle_fh.write(
-                    ",".join(["cycle_number", *self._bycycle_keys, "recipe_step"]) + "\n")
+                    ",".join(["cycle_number",
+                     *(self._heading(k) for k in self._bycycle_keys),
+                     "recipe_step"]) + "\n")
             brow = [f"{cyc_num:.6f}",
                     *("" if k in skip else self._fmt(sample.get(k))
                       for k in self._bycycle_keys),
@@ -528,13 +729,16 @@ class DataLogger:
                 pass
 
     def stop_run_export(self) -> None:
-        for fh in (self._run_fh, self._bycycle_fh):
+        for fh in (self._run_fh, self._bycycle_fh,
+                   self._events_fh, self._errors_fh):
             if fh is not None:
                 with contextlib.suppress(Exception):
                     fh.flush()
                     fh.close()
         self._run_fh = None
         self._bycycle_fh = None
+        self._events_fh = None
+        self._errors_fh = None
         self.run_started_at = None
         # No run in progress: anything opened from here on goes to data/ again.
         # Paths already handed out (run_path, bycycle_path) stay valid.
@@ -568,6 +772,9 @@ class DataLogger:
         self._ell_fh.flush()
         self.ell_started_at = started_at
         self.ell_rows = 0
+        # Which run this acquisition belongs to, or None while it is the
+        # pre-run capture that _adopt_open_sidecar is allowed to claim.
+        self._ell_adopted_run = (self.run_name or self.run_dir) if self.run_dir else None
         return self.ell_path
 
     def write_ellipsometer_point(self, point: Any) -> None:
@@ -663,7 +870,8 @@ class DataLogger:
         }
         if not self._ext_keys:
             self._ext_keys = sorted(k for k in snapshot if not k.endswith(".volts"))
-            header = ["iso_time", "elapsed_s", *self._ext_keys, *extra]
+            header = ["iso_time", "elapsed_s",
+                      *(self._heading(k) for k in self._ext_keys), *extra]
             self._ext_fh.write(",".join(header) + "\n")
 
         def csv(v: Any) -> str:
@@ -696,6 +904,10 @@ class DataLogger:
                 "rows": self.run_rows,
                 "bycycle_path": str(self.bycycle_path) if self.bycycle_path else None,
                 "bycycle_rows": self.bycycle_rows,
+                "events_path": str(self.events_path) if self.events_path else None,
+                "event_rows": self.event_rows,
+                "errors_path": str(self.errors_path) if self.errors_path else None,
+                "error_rows": self.error_rows,
             },
             "ellipsometer": {
                 "active": self.ellipsometer_active,

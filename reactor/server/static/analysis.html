@@ -16,8 +16,10 @@
   shows names relative to the data dir and the folder is part of the label:
     *_bycycle.csv         channels keyed by fractional cycle number, paused
                           samples already dropped  <- the usual one
-    *_reactor_synced.csv  the above plus interpolated ellipsometry, produced by
-                          Ellipsometer sync on this page
+    *_reactor_synced.csv  the above with the FS-1 measurements interleaved on
+                          the same axis, produced by Ellipsometer sync on this
+                          page. Each source keeps its own rows, so its columns
+                          are sparse by construction
     *_run.csv             the raw per-time run export
   Anything else with a header row and numeric columns works too. (A run also
   writes a _run_params.txt; it is not a CSV and is not listed here.)
@@ -27,10 +29,16 @@
   (kinetic energy, not cycle number) - so it gets its own plot instead of
   columns bolted onto the reactor file.
 
-  Layout (which plots, which columns, which ranges) lives in localStorage and
-  is re-applied by COLUMN NAME whenever a new file is loaded, so compiling a
-  fresh merged file repopulates the same grid of plots. A column the new file
-  lacks is flagged on its plot rather than silently blanked.
+  Layout (which plots, which columns, which ranges) is owned by the SERVER
+  (config/analysis_layout.json, via /api/analysis_layout) with localStorage as
+  a per-browser cache, so every machine that opens this page sees the same
+  grid - the same ownership model the Run tab's parameters use. It is
+  re-applied by COLUMN NAME whenever a new file is loaded, so compiling a fresh
+  merged file repopulates the same plots. A column the new file lacks is
+  flagged on its plot rather than silently blanked.
+
+  Dropped Auger spectra stay local to the browser they were dropped on: that
+  is data, not layout, and a spectrum is far too big to post on every edit.
 -->
 <style>
   :root{
@@ -160,8 +168,8 @@
       <div class="hint">
         Plots the reactor's own CSVs: <code>*_bycycle.csv</code> (channels vs
         fractional cycle number, reignite-paused samples already dropped),
-        <code>*_reactor_synced.csv</code> (the same plus interpolated
-        ellipsometry — produced by Ellipsometer sync just below), or
+        <code>*_reactor_synced.csv</code> (the same with the FS-1 measurements
+        interleaved — produced by Ellipsometer sync just below), or
         <code>*_run.csv</code> (raw, vs time).
         Your plot layout is remembered and re-applied by column name, so
         loading a newer file repopulates the same grid. The newest merged file
@@ -189,10 +197,19 @@
       </div>
       <div class="hint">
         Drop in the refit file you downloaded from the FS-1, pick this run's
-        sidecar and reactor run: you get every reactor channel plus the
-        interpolated thickness, keyed by cycle number, with reignite-paused
-        samples dropped. The result is saved into the data folder <em>and</em>
-        loaded into the plots below immediately — no save-then-drag step.
+        sidecar and reactor run: you get every reactor channel and every FS-1
+        measurement on one cycle-number axis, with reignite-paused samples
+        dropped. The result is saved into the data folder <em>and</em> loaded
+        into the plots below immediately — no save-then-drag step.<br>
+        It is a <strong>union of instants, not a resampling</strong>: each
+        source keeps its own rows at its own times and is blank in the other's
+        columns, so every number in the file is one that was really measured —
+        which is why those columns are sparse, and why a plot draws one line
+        through the cells that have values rather than breaking at the blanks.
+        The only derived number is an FS-1 row's <code>cycle_number</code>,
+        read off the reactor's own time→cycle curve; a point taken while the
+        run was paused, or outside the cycling window, is dropped rather than
+        given a position the tool was never at.
       </div>
       <div class="hint" id="ellWarn" style="margin-top:4px"></div>
     </div>
@@ -354,9 +371,6 @@ const PRETTY = {
   gauge_ar_baratron: "Ar Baratron (Torr)",
   gauge_prec1_dose: "Precursor 1 dose pressure (Torr)",
   gauge_prec2_dose: "Precursor 2 dose pressure (Torr)",
-  mfc_ar: "Ar flow (sccm)",
-  mfc_h2: "H2 flow (sccm)",
-  mfc_n2: "N2 flow (sccm)",
   beam_on: "Beam on (0/1)",
   dosing: "Dosing (0/1)",
   paused: "Paused (0/1)",          // only in run exports written before 2026-08-21
@@ -371,6 +385,11 @@ const PRETTY = {
 function pretty(col){
   if(!col) return "";
   if(PRETTY[col]) return PRETTY[col];
+  // MFC columns are named by the GAS the line was flowing when the file was
+  // written (mfc_NH3), and that changes - so there is nothing static to look
+  // up. The column carries the name; this just makes it read like a label.
+  const mfc = /^mfc[._](.+?)(?:[._]flow)?$/.exec(col);
+  if(mfc) return `${mfc[1]} flow (sccm)`;
   const m = /^Thick\(([^)]*)\)/.exec(col);        // FS-1: "Thick(A).1"
   if(m) return `Thickness (${m[1] === "A" ? "Å" : m[1]})`;
   // Whatever else the refit carried. A model with a Drude layer adds
@@ -407,13 +426,25 @@ function seedX(){
    Persistence
    =========================================================================== */
 
+let layoutSaveTimer = null;
 function saveLayout(){
   LAYOUT.cols = +$("cols").value;
   LAYOUT.plotH = +$("plotH").value;
   LAYOUT.settings = $("showSettings").checked;
-  try{ localStorage.setItem(LS_KEY, JSON.stringify(LAYOUT)); }catch(_){}
+  const body = JSON.stringify(LAYOUT);
+  try{ localStorage.setItem(LS_KEY, body); }catch(_){}
+  /* Debounced, and fire-and-forget: saveLayout() runs on every drag of a range
+     field, and a failed POST leaves the local cache correct. Last write wins
+     if two browsers edit at once - single-operator tool. */
+  clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = setTimeout(() => {
+    fetch("/api/analysis_layout", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body,
+    }).catch(() => {});
+  }, 600);
 }
-function loadLayout(){
+async function loadLayout(){
+  // Cache first (instant, and survives an unreachable server), server on top.
   try{
     const raw = localStorage.getItem(LS_KEY);
     if(raw){
@@ -421,6 +452,16 @@ function loadLayout(){
       if(l && Array.isArray(l.plots)) LAYOUT = l;
     }
   }catch(_){}
+  try{
+    const r = await fetch("/api/analysis_layout");
+    if(r.ok){
+      const l = (await r.json()).layout;
+      if(l && Array.isArray(l.plots)){
+        LAYOUT = l;
+        try{ localStorage.setItem(LS_KEY, JSON.stringify(l)); }catch(_){}
+      }
+    }
+  }catch(_){ /* server copy unavailable - the cache above already applied */ }
   LAYOUT.cols = LAYOUT.cols || 2;
   LAYOUT.plotH = LAYOUT.plotH || 260;
   LAYOUT.settings = LAYOUT.settings !== false;
@@ -1209,7 +1250,7 @@ window.addEventListener("focus", async () => {
 });
 
 (async () => {
-  loadLayout();
+  await loadLayout();
   loadAuger();
   renderGrid();
   await rescan();

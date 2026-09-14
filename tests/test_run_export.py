@@ -30,10 +30,10 @@ P = dict(cycles=2, dose_s=0.05, pump_a_s=0.15, beam_s=0.2, pump_b_s=0.1,
 
 #: same params plus a full two-gas schedule - the case that was broken
 P_GAS = dict(P, gas_overlap_s=0.05,
-             h2_gas_enable=True, h2_gas_order="first", h2_gas_pct=40,
-             h2_gas_flow_sccm=5.0,
-             n2_gas_enable=True, n2_gas_order="second", n2_gas_pct=50,
-             n2_gas_flow_sccm=3.0)
+             mfc1_gas_enable=True, mfc1_gas_order="first", mfc1_gas_pct=40,
+             mfc1_gas_flow_sccm=5.0,
+             mfc2_gas_enable=True, mfc2_gas_order="second", mfc2_gas_pct=50,
+             mfc2_gas_flow_sccm=3.0)
 
 
 async def _next_second() -> None:
@@ -128,6 +128,13 @@ async def main() -> int:
 
         c.section("5. run-parameters report is written, gas schedule included")
         data_dir = vr.sup.logger.dir
+        # The `h2` line is running NH3 - the gas is selected on the MFC itself,
+        # and the report has to say what actually flowed, not the channel id
+        # (Zach, 2026-09-09: "I need the gas I am ACTUALLY using tracked and
+        # labeled everywhere"). One poll pushes the new name through.
+        vr.mfcs["mfc1"].gas = "2: NH3"     # the G50 reports index + name
+        vr.mfcs["mfc2"].gas = "32: N2"
+        await vr.tick()
         for mode, params, anchor in (("ald", P_GAS, "beam"),
                                      ("cvd", P_GAS, "cycle")):
             await _next_second()        # same one-second stamp collision as above
@@ -151,11 +158,17 @@ async def main() -> int:
             c.check(f"{mode}: sits in the run's own folder",
                     new[0].parent != data_dir, str(new[0].relative_to(data_dir)))
             c.check(f"{mode}: carries the ui_params it was launched with",
-                    "h2_gas_flow_sccm" in report)
+                    "mfc1_gas_flow_sccm" in report)
             c.check(f"{mode}: summary describes the gas schedule against the "
                     f"{anchor} clock", f"relative to {anchor} start" in report)
             c.check(f"{mode}: both scheduled gases appear in the summary",
-                    "h2:" in report and "n2:" in report)
+                    "NH3:" in report and "N2:" in report)
+            c.check(f"{mode}: named by the gas in use, not the channel",
+                    "mfc1:" not in report and "MFC 1:" not in report,
+                    str([ln for ln in report.splitlines() if "mfc1" in ln]))
+            steps = [ln.strip() for ln in report.splitlines() if "set NH3" in ln]
+            c.check(f"{mode}: and the steps name it too", bool(steps),
+                    steps[0] if steps else "")
             c.check(f"{mode}: lists every cycle step",
                     "RECIPE STEPS" in report and "Cycle (repeated" in report)
         # An exception in write_run_params is swallowed by _start_built_run
@@ -163,6 +176,55 @@ async def main() -> int:
         c.check("no 'could not record run parameters' event was raised",
                 not any("record run parameters" in e["message"]
                         for e in vr.sup.events))
+
+        c.section("6. CSV columns are named by the gas, not the channel id")
+        # The run above ran with the `h2` line set to NH3 (section 5), so its
+        # trace and by-cycle files have to say so. The snapshot key underneath
+        # is still mfc.mfc1.flow - only the HEADING follows the gas.
+        run_head = vr.sup.logger.run_path.read_text(
+            encoding="utf-8").splitlines()[0].split(",")
+        cyc_head = vr.sup.logger.bycycle_path.read_text(
+            encoding="utf-8").splitlines()[0].split(",")
+        c.check("run trace has an NH3 column", "mfc_NH3" in run_head, str(run_head))
+        c.check("and no h2 column", "mfc_mfc1" not in run_head)
+        c.check("the other gases keep their own names",
+                "mfc_N2" in run_head and "mfc_Ar" in run_head)
+        c.check("by-cycle file matches", "mfc_NH3" in cyc_head
+                and "mfc_mfc1" not in cyc_head, str(cyc_head))
+        c.check("nothing else was renamed",
+                all(h in run_head for h in ("pressure", "stage_temp", "beam_on")))
+        # The manual log's headings are written by hand as "<name> <unit>", so
+        # the UNIT is the last word and only the name in front of it moves.
+        lg = vr.sup.logger
+        c.check("manual-log headings keep their unit",
+                [lg._manual_heading(h, k) for h, k in
+                 (("MFC 1 sccm", "mfc.mfc1.flow"), ("MFC 2 sccm", "mfc.mfc2.flow"),
+                  ("Ar sccm", "mfc.ar.flow"), ("Pressure", "pressure"))]
+                == ["NH3 sccm", "N2 sccm", "Ar sccm", "Pressure"],
+                str([lg._manual_heading(h, k) for h, k in
+                     (("MFC 1 sccm", "mfc.mfc1.flow"), ("Ar sccm", "mfc.ar.flow"))]))
+
+        c.section("7. the run keeps its own event log and error log")
+        # Zach, 2026-09-09: the errors have to be findable without scrolling the
+        # event log, and both have to land with the run's other files.
+        ev = vr.sup.logger.events_path
+        er = vr.sup.logger.errors_path
+        c.check("both sit in the run's folder alongside the trace",
+                ev.parent == vr.sup.logger.run_path.parent == er.parent,
+                f"{ev.parent.name}")
+        ev_txt = ev.read_text(encoding="utf-8")
+        er_txt = er.read_text(encoding="utf-8")
+        c.check("the event log has the run's events", "recipe" in ev_txt,
+                f"{len(ev_txt.splitlines())} lines")
+        c.check("every error line is also an event line",
+                all(ln in ev_txt for ln in er_txt.splitlines()),
+                f"{len(er_txt.splitlines())} error lines")
+        c.check("and the error log holds only errors and flags",
+                all(any(k in ln for k in vr.sup.ERROR_KINDS)
+                    for ln in er_txt.splitlines()), er_txt[:200])
+        c.check("each line carries a wall clock and an elapsed time",
+                all(ln[:4].isdigit() and "s  " in ln
+                    for ln in ev_txt.splitlines()), ev_txt[:120])
 
     return c.summary()
 

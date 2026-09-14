@@ -126,12 +126,21 @@ stage_temp:
 #      python -m tools.discover_hardware --survey-inputs
 aux_inputs:
   # Precursor bubbler thermocouple, added on the port next to the stage TC
-  # (stage is cDAQ1Mod4/ai1). Expected ~30-60 C. If this reads the NI 9211
-  # open-circuit full-scale (~2385 C), the TC is on ai2 instead - swap the
-  # channel below. Verified live 2026-08-03.
+  # (stage is cDAQ1Mod4/ai1). Expected ~30-60 C. Verified live 2026-08-03.
   - id: "bubbler"
     label: "Precursor bubbler"
     channel: "cDAQ1Mod4/ai0"
+    kind: "thermocouple"
+    tc_type: "K"
+    unit: "C"
+  # Bakeout thermocouple, plugged into cDAQ1Mod4/ai2 on 2026-09-11. Expected
+  # 60-70 C during a bake. Listed right after the bubbler because the Hardware
+  # tab's Thermocouples card draws aux inputs in this file's order. An NI 9211
+  # open-circuit reads its full scale (~2385 C) - if it shows that, the TC is
+  # not on ai2 (ai3 is the only other free port on this module).
+  - id: "bakeout1"
+    label: "Bakeout temp 1"
+    channel: "cDAQ1Mod4/ai2"
     kind: "thermocouple"
     tc_type: "K"
     unit: "C"
@@ -221,6 +230,11 @@ valves:
     bank: "lower"
     line: "cDAQ2Mod2/port0/line5"
     identified: true
+    # Requested by operator 2026-08-26: opening this in one flip dumps the Ar
+    # that has built up behind it into the reactor, so EVERY open of it - the
+    # Hardware tab, pre-start, a recipe step - is pulsed in instead and only
+    # then left open. Pulse count/width/gap are in the UI's Advanced timing.
+    soft_open: true
   # line6, line7 unused
 
   # === UPPER box - cDAQ1Mod3 port1 (NI 9375) ================================
@@ -319,16 +333,18 @@ mfcs:
     # closing it zeroes the setpoint.
     isolation_valve: "ar_pneumatic"
 
-  - id: "h2"
-    label: "H2 - reactive background"
-    gas: "H2"
+  # Process-gas lines, identified by CHANNEL, never by gas: the gas is
+  # selected on the MFC itself and changes (this one ran H2, now NH3), so
+  # nothing static here - id, label or param name - may name one. The label's
+  # head is replaced by whatever the device reports (Supervisor.mfc_label).
+  - id: "mfc1"
+    label: "MFC 1 - reactive background"
     host: "192.168.2.222"                    # CONFIRMED
     port: 502
     unit_id: 1
 
-  - id: "n2"
-    label: "N2 - reactive background"
-    gas: "N2"
+  - id: "mfc2"
+    label: "MFC 2 - reactive background"
     host: "192.168.2.223"                    # CONFIRMED
     port: 502
     unit_id: 1
@@ -513,8 +529,10 @@ logging:
     "TC A": "aux.tc_a"
     "TC B": "aux.tc_b"
     "Ar sccm": "mfc.ar.flow"
-    "H2 sccm": "mfc.h2.flow"
-    "N2 sccm": "mfc.n2.flow"
+    # Headings are rewritten to the gas actually flowing when the device
+    # reports one (DataLogger._manual_heading); these are the fallbacks.
+    "MFC 1 sccm": "mfc.mfc1.flow"
+    "MFC 2 sccm": "mfc.mfc2.flow"
     "HV V": "hv.hv.voltage"
     "HV mA": "hv.hv.current"
     "HV arcs": "hv.hv.arc_count"

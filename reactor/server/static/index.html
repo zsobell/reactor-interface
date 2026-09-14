@@ -49,10 +49,18 @@
   /* Latest loud event, pinned in the header: the event log lives on the
      Diagnostics tab, so without this a fill-pressure flag would be invisible
      from the Run tab. Display only — it never changes reactor behaviour. */
-  .alertchip{max-width:min(46vw,540px);overflow:hidden;text-overflow:ellipsis;
+  /* Up to MAX_CHIPS of them side by side (operator, 2026-09-01: "up to 4
+     warnings should display at once in the upper right"). They wrap onto a
+     second header line rather than squeezing, and each is individually
+     ellipsised so one long message cannot crowd the other three out. */
+  .alertchips{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;
+              max-width:min(60vw,760px)}
+  .alertchips:empty{display:none}
+  .alertchip{max-width:min(46vw,360px);overflow:hidden;text-overflow:ellipsis;
              white-space:nowrap;font-size:12px;padding:5px 11px;border-radius:6px;
              cursor:pointer;background:#332701;border:1px solid var(--warn);color:#f0c674}
   .alertchip.bad{background:#3d1113;border-color:var(--bad);color:#ffb3b0}
+  .alertchip.more{background:transparent;border-color:var(--line);color:var(--dim)}
 
   main{padding:14px 16px 16px}
   .pane{display:grid;gap:14px;align-content:start}
@@ -115,13 +123,33 @@
      single-column-flow layout. */
   .hwtop{display:grid;grid-template-columns:minmax(380px,1.12fr) minmax(340px,1fr);
          gap:14px}
-  .hwbottom{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));
-            gap:14px}
+  /* Four fixed columns, not auto-fit: the four sensor/instrument cards are one
+     row of peers and should stay one row, rather than the track count changing
+     with the window and leaving the wide supply card spanning empty tracks. */
+  .hwbottom{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+  /* Five supplies in one narrow column is a very tall stack, and the tiles
+     overflowed the card. Give it the whole row, above the four. */
+  #supplyCard{grid-column:1/-1}
+  @media(max-width:1240px){ .hwbottom{grid-template-columns:repeat(2,minmax(0,1fr))} }
   @media(max-width:1000px){ .hwtop{grid-template-columns:1fr} }
+  @media(max-width:700px){ .hwbottom{grid-template-columns:1fr} }
 
   /* ---- Diagnostics tab ------------------------------------------------- */
   .diagtop{display:grid;grid-template-columns:minmax(380px,1.15fr) minmax(330px,1fr);
            gap:14px}
+  /* A card that collapses. The summary is styled as the card's own h2 so it
+     reads identically whether it is open or shut. */
+  details.card{display:block}
+  details.card>summary{padding:9px 14px;font-size:12px;letter-spacing:.09em;
+        text-transform:uppercase;color:var(--dim);background:var(--panel2);
+        display:flex;align-items:center;gap:9px;cursor:pointer;list-style:none}
+  details.card[open]>summary{border-bottom:1px solid var(--line)}
+  details.card>summary::-webkit-details-marker{display:none}
+  details.card>summary::before{content:"\25B8";font-size:11px;transition:transform .15s}
+  details.card[open]>summary::before{transform:rotate(90deg)}
+  details.card>summary .sum{text-transform:none;letter-spacing:0;opacity:.75;
+        margin-left:auto;font-size:11px}
+  .idcard{margin-top:14px}
   .diagcol{display:grid;gap:14px;align-content:start;min-width:0}
   @media(max-width:1000px){ .diagtop{grid-template-columns:1fr} }
 
@@ -129,7 +157,10 @@
   .tilegrid{display:grid;gap:10px}
   #mfcs{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
   #instruments,#gauges,#aux{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
-  #supplies{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+  /* auto-FIT, not auto-fill: with the card spanning the row, the five tiles
+     share the width evenly instead of leaving empty phantom tracks. The floor
+     is what a 2260B tile needs for its V/I inputs plus the Set button. */
+  #supplies{grid-template-columns:repeat(auto-fit,minmax(238px,1fr))}
   /* Status chips on a supply tile: neutral by default, coloured when asserted. */
   .chips{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0 2px}
   .chip{font-size:11px;padding:1px 7px;border-radius:10px;
@@ -162,6 +193,11 @@
   .valve .rename{margin-left:auto}
   .note{font-size:12px;color:var(--dim);margin-top:7px;overflow-wrap:anywhere}
   .note:empty{display:none}
+  /* Divider inside a card body, for blocks folded in from elsewhere. */
+  .subhead{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+           color:var(--dim);margin:12px 0 5px;padding-bottom:3px;
+           border-bottom:1px solid var(--line)}
+  .subhead:first-child{margin-top:0}
 
   /* ---- valves ---------------------------------------------------------- */
   #valves{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:8px}
@@ -186,10 +222,25 @@
   th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line)}
   th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;
      letter-spacing:.06em}
+  /* Columns come from the <colgroup>, not from the cell contents, so a Detail
+     cell that grows cannot shove the Device column sideways. */
+  .conntable{table-layout:fixed}
+  .conntable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .conntable td:last-child{white-space:normal;overflow-wrap:anywhere}
 
-  #events{max-height:min(46vh,440px);overflow-y:auto;font-family:var(--mono);font-size:12px}
-  #events div{padding:2px 0;border-bottom:1px solid #1b2027}
-  #events .t{color:var(--dim);margin-right:7px}
+  /* Sized to the tab, not to a fixed strip: it sits in the big top-left slot
+     now (2026-08-26) and should be the tall thing on the page. The card body
+     is the scroll container so the header stays put. */
+  #events{max-height:min(72vh,760px);min-height:340px;overflow-y:auto;
+          font-family:var(--mono);font-size:12px}
+  /* Same list, its own panel: the errors are what get hunted for, and hunting
+     them meant scrolling the event log (2026-09-09). Shorter, because if this
+     one is long something is badly wrong. */
+  #errors{max-height:min(38vh,320px);min-height:120px;overflow-y:auto;
+          font-family:var(--mono);font-size:12px}
+  #events div,#errors div{padding:2px 0;border-bottom:1px solid #1b2027}
+  #events .t,#errors .t{color:var(--dim);margin-right:7px}
+  #errors .quiet{color:var(--dim);border:0}
   /* one class per event kind the supervisor emits (see Supervisor._event) */
   .k-error{color:var(--bad)} .k-flag{color:var(--warn);font-weight:600}
   .k-valve,.k-valve-id{color:var(--hot)}
@@ -199,6 +250,11 @@
   button.primary{background:#193a2a;border-color:#2ea043;color:#7ee787;font-weight:600}
   button.primary:hover:not(:disabled){border-color:#3fb950}
   button.mini{padding:3px 8px;font-size:12px}
+  /* Shown while a run is running, because the fields below then retune THAT
+     run rather than setting up the next one (2026-09-01). */
+  .livebadge{font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+             padding:2px 7px;border-radius:999px;background:#241206;
+             border:1px solid var(--hot);color:var(--hot);font-weight:600}
   .params{display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:9px}
   .params label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--dim)}
   .params label.adv{opacity:.85}
@@ -300,7 +356,7 @@
   <a class="badge" href="/analysis" target="_blank" rel="noopener"
      style="text-decoration:none" title="Post-run plotting (opens in a new tab)">Analysis ↗</a>
   <div class="spacer"></div>
-  <div class="alertchip hidden" id="alertChip" title="latest warning — click for the event log"></div>
+  <div class="alertchips" id="alertChips"></div>
 </header>
 
 <div id="banners"></div>
@@ -350,6 +406,8 @@
 
     <section class="card" id="aldCard">
       <h2><span id="runTitle">EE-ALD run</span>
+        <span class="livebadge hidden" id="liveEditBadge"
+              title="A run is in progress. Editing a field below changes THAT run, not the next one - every change is logged in the run's parameters file.">editing the run in progress</span>
         <span class="grow"></span>
         <select id="modeSel" class="mini" title="run mode">
           <option value="ald" selected>EE-ALD</option>
@@ -362,21 +420,26 @@
             <label>Cycles<input type="number" id="p_cycles" min="1" step="1" value="100"></label>
             <label>Dose pressure (Torr)<input type="number" id="p_dose_pressure_torr" step="0.001" value="0.020"></label>
             <label>Dose time (s)<input type="number" id="p_dose_s" step="0.01" value="0.05"></label>
-            <label>Pump A (s)<input type="number" id="p_pump_a_s" step="0.1" value="10"></label>
+            <label>Pump A after dose (s)<input type="number" id="p_pump_a_s" step="0.1" value="10"></label>
             <label data-mode="ald">Beam exposure (s)<input type="number" id="p_beam_s" step="0.1" value="5"></label>
-            <label data-mode="ald">Pump B (s)<input type="number" id="p_pump_b_s" step="0.1" value="10"></label>
+            <label data-mode="ald">Pump B after beam (s)<input type="number" id="p_pump_b_s" step="0.1" value="10"></label>
             <label>Sample bias (V)<input type="number" id="p_sample_bias_v" step="1" min="0" value="0"></label>
             <label>Bias polarity<select id="p_sample_bias_polarity">
               <option value="1">+ positive to stage</option>
               <option value="-1">&minus; negative to stage</option>
             </select></label>
           </div>
-          <div class="hint">Sample bias comes on at pre-start only when it is
-            non-zero, and stays on for the whole run. Enter a magnitude — the
-            supply cannot source a negative voltage, so the polarity toggle
-            records which way you ran the leads onto the stage and signs the
-            <em>logged</em> voltage. Its current limit stays whatever you set on
-            the supply's front panel.</div>
+          <div class="hint">Sample bias <strong>follows the electron
+            beam</strong>: pre-start arms the supply at this level but leaves its
+            output off, and each beam brings it on a lead time early and drops it
+            a trail time late (both in <em>Advanced timing</em>). That leaves the
+            stage unenergised for the rest of the cycle, so the stage
+            thermocouple reads clean whenever the beam is off. A reignite does
+            not cycle it. Zero here means the supply is never switched on at all.
+            <br>Enter a magnitude — the supply cannot source a negative voltage,
+            so the polarity toggle records which way you ran the leads onto the
+            stage and signs the <em>logged</em> voltage. Its current limit stays
+            whatever you set on the supply's front panel.</div>
         </div>
 
         <details class="sub" id="gasSchedSection" open>
@@ -390,34 +453,43 @@
               </tr></thead>
               <tbody>
                 <tr>
-                  <td>H2</td>
-                  <td><input type="checkbox" id="p_h2_gas_enable"></td>
-                  <td><select id="p_h2_gas_order">
+                  <td data-gas-name="mfc1">MFC 1</td>
+                  <td><input type="checkbox" id="p_mfc1_gas_enable"></td>
+                  <td><select id="p_mfc1_gas_order">
                     <option value="first">First</option>
                     <option value="second">Second</option>
+                    <option value="simultaneous">Simultaneous</option>
                   </select></td>
-                  <td><input type="number" id="p_h2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
-                  <td><input type="number" id="p_h2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc1_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc1_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
                 </tr>
                 <tr>
-                  <td>N2</td>
-                  <td><input type="checkbox" id="p_n2_gas_enable"></td>
-                  <td><select id="p_n2_gas_order">
+                  <td data-gas-name="mfc2">MFC 2</td>
+                  <td><input type="checkbox" id="p_mfc2_gas_enable"></td>
+                  <td><select id="p_mfc2_gas_order">
                     <option value="first">First</option>
                     <option value="second" selected>Second</option>
+                    <option value="simultaneous">Simultaneous</option>
                   </select></td>
-                  <td><input type="number" id="p_n2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
-                  <td><input type="number" id="p_n2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
                 </tr>
               </tbody>
             </table>
             <div class="params" style="margin-top:10px">
-              <label>Overlap (s)<input type="number" id="p_gas_overlap_s" min="0" step="0.05" value="0.5"></label>
+              <label>Gas overlap (s)<input type="number" id="p_gas_overlap_s" min="0" step="0.05" value="0.5"></label>
             </div>
             <div class="hint">Overlap is how long the incoming gas starts before
               the outgoing one stops. The same value applies at every handoff —
-              First to Second, and Second back to First.</div>
-            <div class="hint" data-mode="ald">H2/N2 turn on automatically around
+              First to Second, and Second back to First.<br>
+              <strong>Simultaneous</strong> means the gases do not divide the
+              window at all: every gas set to it flows for the whole window at
+              its own rate, so the % is greyed out. It takes <em>two</em> —
+              setting only one gas to Simultaneous is refused when you press
+              Start, since a lone one is almost always a half-finished edit.
+              They still lead the beam in by the overlap.</div>
+            <div class="hint" data-mode="ald"><span data-gas-name="mfc1">MFC 1</span>/<span
+              data-gas-name="mfc2">MFC 2</span> turn on automatically around
               the beam exposure instead of running the whole cycle. Percentages
               cover the beam's lit exposure time, freezing along with the
               exposure clock during a reignite or a pause. "First" also leads
@@ -435,25 +507,71 @@
 
         <details class="sub" id="advSection">
           <summary><span class="stitle">Advanced timing</span><span class="sum" id="reigniteHint"></span></summary>
+          <!-- Grouped by the mechanism each number belongs to (2026-08-28). As
+               one flat 12-field grid, "Ar pulse gap" sat next to "Bias trail"
+               with nothing to say they have nothing to do with each other, and
+               a single hint at the bottom had to explain all of them at once.
+               Each group now carries its own explanation, under the fields it
+               is about. -->
           <div class="dbody">
+            <div class="subhead">Precursor fill regulation</div>
             <div class="params">
               <label class="adv">Fill pulse on (s)<input type="number" id="p_fill_pulse_on_s" step="0.01" value="0.10"></label>
               <label class="adv">Fill pulse off (s)<input type="number" id="p_fill_pulse_off_s" step="0.01" value="0.30"></label>
-              <label class="adv">Flag tolerance (%)<input type="number" id="p_tolerance_pct" step="1" value="20"></label>
-              <label class="adv">Min current (µA)<input type="number" id="p_min_current_ua" step="1" value="500"></label>
-              <label class="adv">Reignite pulse (s)<input type="number" id="p_reignite_pulse_s" step="0.01" min="0" value="0.10"></label>
-              <label class="adv">Reignite settle (s)<input type="number" id="p_reignite_settle_s" step="0.01" min="0" value="0.15"></label>
-              <label class="adv">Ar close delay (s)<input type="number" id="p_ar_close_delay_s" step="1" min="0" value="10"></label>
+              <label class="adv">Fill flag tolerance (%)<input type="number" id="p_tolerance_pct" step="1" value="20"></label>
             </div>
             <div class="hint">Flag tolerance only warns — fill pressure drifting
-              past it raises an event, it never stops or changes the run.<br>
+              past it raises an event, it never stops or changes the run.</div>
+
+            <div class="subhead">Beam strike and reignite</div>
+            <div class="params">
+              <label class="adv">Min beam current (µA)<input type="number" id="p_min_current_ua" step="1" value="500"></label>
+              <label class="adv">Reignite pulse (s)<input type="number" id="p_reignite_pulse_s" step="0.01" min="0" value="0.10"></label>
+              <label class="adv">Reignite settle (s)<input type="number" id="p_reignite_settle_s" step="0.01" min="0" value="0.15"></label>
+            </div>
+            <div class="hint">Sample current below <strong>min beam current</strong>
+              is what counts as the plasma being out, and is what triggers a
+              reignite.<br>
               <strong>Reignite settle</strong> is also how long the initial strike
               is given to draw current before it counts as a failure — the first
               flip of the plasma ground is always required to start the beam, so
-              it is never reported as a reignite.<br>
-              <strong>Ar close delay</strong>: at the end of a run the Ar setpoint
-              is zeroed, this delay runs, then the Ar pneumatic closes. The run
-              then parks with the plasma ground OFF (beam-on mode).</div>
+              it is never reported as a reignite.</div>
+
+            <div class="subhead">Sample bias bracket</div>
+            <div class="params">
+              <label class="adv">Bias lead before beam (s)<input type="number" id="p_sample_bias_lead_s" step="0.05" min="0" value="0.20"></label>
+              <label class="adv">Bias trail after beam (s)<input type="number" id="p_sample_bias_trail_s" step="0.05" min="0" value="0.20"></label>
+            </div>
+            <div class="hint">How far ahead of the beam the sample bias comes on,
+              and how long after it goes off. The lead runs down inside pump A and
+              the trail inside pump B, so bracketing the beam does not make a
+              cycle any longer. A reignite does not cycle the bias. In EE-CVD the
+              beam is one long step, so the bias leads the strike at the start of
+              the run and drops after the beam at the end of it.</div>
+
+            <div class="subhead">Ar pneumatic soft open</div>
+            <div class="params">
+              <label class="adv">Ar soft-open pulses<input type="number" id="p_ar_soft_open_pulses" step="1" min="0" value="1"></label>
+              <label class="adv">Ar pulse width (s)<input type="number" id="p_ar_soft_open_on_s" step="0.01" min="0" value="0.05"></label>
+              <label class="adv">Ar pulse gap (s)<input type="number" id="p_ar_soft_open_gap_s" step="0.1" min="0" value="0.50"></label>
+            </div>
+            <div class="hint">The Ar pneumatic is never opened in one flip — it is
+              pulsed this many times, this wide, this far apart, and only then
+              left open, so the Ar built up behind it bleeds in instead of
+              dumping. It applies to <em>every</em> open of that valve: the
+              Hardware tab, pre-start, and the recipe. Zero pulses turns it off
+              and an open becomes one plain flip again.<br>
+              One pulse is the default: the pneumatic is too slow for a short
+              command to move it far, so more pulses just meant more
+              inrushes.</div>
+
+            <div class="subhead">End of run</div>
+            <div class="params" style="max-width:300px">
+              <label class="adv">Ar close delay (s)<input type="number" id="p_ar_close_delay_s" step="1" min="0" value="10"></label>
+            </div>
+            <div class="hint">At the end of a run the Ar setpoint is zeroed, this
+              delay runs, then the Ar pneumatic closes. The run then parks with
+              the plasma ground OFF (beam-on mode).</div>
           </div>
         </details>
 
@@ -463,8 +581,8 @@
             <div class="params">
               <label class="adv">Run name<input type="text" id="p_run_name" placeholder="Mo-001" autocomplete="off"></label>
               <label class="adv">Ar flow (sccm)<input type="number" id="p_pre_ar_sccm" step="0.1" min="0" value="4"></label>
-              <label class="adv">Valve settle (s)<input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1"></label>
-              <label class="adv">Hold current (s)<input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5"></label>
+              <label class="adv">Ar valve settle (s)<input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1"></label>
+              <label class="adv">Current hold time (s)<input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5"></label>
             </div>
             <div class="hint"><strong>Run name</strong> prefixes every file this
               run writes (trace, by-cycle, parameters, ellipsometer), e.g.
@@ -475,7 +593,8 @@
               Opens the Ar pneumatic, waits, flows Ar, starts the
               precursor fill pulse, then runs the reignite protocol until sample
               current appears and holds it. <strong>The strike retries
-              indefinitely</strong> — it stops only when you press Stop pre-start.
+              indefinitely</strong> — it stops only when you press Abort
+              pre-start.
               However it ends, the beam is grounded on the way out; Ar and the
               fill pulse are left running.<br><br>
               <strong>Abort pre-start</strong> is the undo, and stays available
@@ -495,7 +614,6 @@
 
         <div class="row">
           <button id="preStartBtn">Pre-start</button>
-          <button id="preStopBtn" class="estop">Stop pre-start</button>
           <button id="preAbortBtn" class="estop">Abort pre-start</button>
           <button id="fillStart">Initiate fill pulse</button>
           <button id="fillStop">Stop fill</button>
@@ -512,10 +630,14 @@
 
         <div class="note" id="recipeInfo">No run in progress.</div>
         <div class="prog"><i id="recipeBar" style="width:0"></i></div>
+        <!-- The two labels change with the state: idle they read
+             "est. duration" / "finish if started now" off the parameters as
+             typed, running they read "est. remaining" / "finish" off the run
+             clock. -->
         <div class="progmeta">
           <span>elapsed <b id="rElapsed">—</b></span>
-          <span id="rEtaWrap">est. remaining <b id="rEta">—</b></span>
-          <span>finish <b id="rFinish">—</b></span>
+          <span id="rEtaWrap"><span id="rEtaLbl">est. duration</span> <b id="rEta">—</b></span>
+          <span><span id="rFinishLbl">finish</span> <b id="rFinish">—</b></span>
         </div>
         <div class="runstats">
           <div class="kv"><span>Cycle</span><span id="rCycle">—</span></div>
@@ -616,28 +738,69 @@
   </div>
 
   <div class="hwbottom">
-    <section class="card" id="gaugeCard">
-      <h2>Other pressure gauges</h2>
-      <div class="body"><div id="gauges" class="tilegrid"></div></div>
-    </section>
-
-    <section class="card" id="auxCard">
-      <h2>Other inputs</h2>
-      <div class="body"><div id="aux" class="tilegrid"></div></div>
-    </section>
-
-    <section class="card">
-      <h2>Instruments</h2>
-      <div class="body"><div id="instruments" class="tilegrid"></div></div>
-    </section>
-
     <!-- No setpoint controls here on purpose: the Glassman is operated by hand
          from its front panel. The one command this program ever sends it is HV
          OFF at the end of a run or on abort, and that is not driven from here.
          See docs/CONTROL_MODEL.md before adding any control. -->
-    <section class="card">
+    <section class="card" id="supplyCard">
       <h2>Power supplies</h2>
       <div class="body"><div id="supplies" class="tilegrid"></div></div>
+    </section>
+
+    <!-- Chamber pressure and the stage TC used to sit in a separate "Primary
+         sensor detail" card. They belong with the sensors they describe, which
+         is what these two cards now are - hence the names. -->
+    <section class="card" id="gaugeCard">
+      <h2>Pressure Sensors</h2>
+      <div class="body">
+        <div class="subhead">Chamber (cold cathode)</div>
+        <div class="tile" style="background:transparent;border:0;padding:0">
+          <div class="top">
+            <span class="name">Chamber pressure</span>
+            <div style="flex:1"></div>
+            <span class="read"><span id="hwPressure">—</span
+              ><span class="unit">Torr</span></span>
+          </div>
+        </div>
+        <div class="kv"><span>Gauge output</span><span id="hwPressureV">—</span></div>
+        <div class="kv"><span>Channel</span><span id="pressureChan">—</span></div>
+        <div class="kv"><span>Curve</span><span id="pressureCurve">—</span></div>
+        <div class="subhead" id="gaugeSub">Capacitance manometers</div>
+        <div id="gauges" class="tilegrid"></div>
+      </div>
+    </section>
+
+    <section class="card" id="auxCard">
+      <h2>Thermocouples</h2>
+      <div class="body">
+        <div class="subhead">Stage</div>
+        <div class="tile" style="background:transparent;border:0;padding:0">
+          <div class="top">
+            <span class="name">Stage temperature</span>
+            <div style="flex:1"></div>
+            <span class="read"><span id="hwStageTemp">—</span
+              ><span class="unit">°C</span></span>
+          </div>
+        </div>
+        <div class="kv"><span>Channel</span><span id="stageChan">—</span></div>
+        <div class="kv"><span>Type</span><span id="stageType">—</span></div>
+        <div class="kv"><span>Voltage</span><span id="stageVolts">—</span></div>
+        <div class="hint" style="margin-bottom:4px">Measurement only — this tool
+          has no heater control.</div>
+        <div class="subhead" id="auxSub">Other</div>
+        <div id="aux" class="tilegrid"></div>
+        <!-- Answers the question before it is asked: there is no millivolt
+             readout for these because DAQmx does the cold-junction
+             compensation and linearisation itself and hands back °C. A channel
+             declared kind:"voltage" in reactor.yaml DOES report volts, and the
+             Voltage row above fills in when it does. -->
+        <div class="hint" id="tcVoltHint"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Ammeter</h2>
+      <div class="body"><div id="instruments" class="tilegrid"></div></div>
     </section>
 
     <!-- The FS-1 belongs with the other hardware: it is a live instrument the
@@ -659,18 +822,6 @@
       </div>
     </section>
 
-    <section class="card">
-      <h2>Primary sensor detail</h2>
-      <div class="body">
-        <div class="kv"><span>Pressure channel</span><span id="pressureChan">—</span></div>
-        <div class="kv"><span>Pressure curve</span><span id="pressureCurve">—</span></div>
-        <div class="kv"><span>Stage TC channel</span><span id="stageChan">—</span></div>
-        <div class="kv"><span>Stage TC type</span><span id="stageType">—</span></div>
-        <div class="note" id="pressureWarn"></div>
-        <div class="hint">Stage temperature is measurement only — this tool has
-          no heater control.</div>
-      </div>
-    </section>
   </div>
 </section>
 
@@ -678,8 +829,77 @@
 <section class="pane hidden" data-pane="diag">
 
   <div class="diagtop">
-    <section class="card" id="valveIdCard">
-      <h2>Valve identification</h2>
+    <!-- The event log is the thing actually read on this tab, so it gets the
+         big top-left slot. Valve identification, which is a one-off bring-up
+         tool, is folded away at the bottom (swapped 2026-08-26). -->
+    <div class="diagcol">
+      <section class="card" data-card="errors">
+        <h2>Errors <span class="hint" style="text-transform:none;letter-spacing:0"
+              id="errCount"></span></h2>
+        <div class="body"><div id="errors"></div></div>
+      </section>
+
+      <section class="card" data-card="events">
+        <h2>Event log</h2>
+        <div class="body"><div id="events"></div></div>
+      </section>
+    </div>
+
+    <div class="diagcol">
+      <section class="card" data-card="logging">
+        <h2>Data logging</h2>
+        <div class="body">
+          <div class="row" style="margin-top:0">
+            <input id="logLabel" placeholder="General" style="flex:1;min-width:120px">
+            <button id="logStart">Start</button>
+            <button id="logStop">Stop</button>
+          </div>
+          <div class="kv"><span>File</span><span id="logFile">—</span></div>
+          <div class="kv"><span>Rows</span><span id="logRows">—</span></div>
+          <div class="hint" id="logCols"></div>
+        </div>
+      </section>
+
+      <section class="card" data-card="connections">
+        <h2>Connections</h2>
+        <div class="body" style="overflow-x:auto">
+          <!-- Fixed layout with explicit widths. With the default auto layout
+               the browser re-solves every column from its content on every
+               repaint, so the Device column visibly jumped whenever a Detail
+               cell changed width - a row count ticking over, an error string
+               appearing, a reconnect message coming and going. Reported
+               2026-08-26 (most visible over Tailscale, where the window is
+               narrower and the columns are tighter). Detail takes whatever is
+               left and ellipsises. -->
+          <table class="conntable">
+            <colgroup>
+              <col style="width:22%"><col style="width:14%"><col style="width:22%">
+              <col style="width:12%"><col>
+            </colgroup>
+            <thead><tr>
+              <th>Device</th><th>Interface</th><th>Address</th><th>State</th><th>Detail</th>
+            </tr></thead>
+            <tbody id="conns"></tbody>
+          </table>
+          <!-- Restarting picks up changed code. It is a graceful shutdown +
+               re-exec, not a kill, so Supervisor.stop() runs normally. The
+               consequences are spelled out in the confirm dialog rather than
+               here, because that is where they get read. -->
+          <div class="row" style="margin-top:12px">
+            <button id="shutdownBtn" class="danger">Shut down server</button>
+            <span class="hint" id="shutdownHint" style="flex:1"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Collapsed by default: this is bring-up equipment, used once per line.
+       Everything inside is unchanged - only its home and its wrapper moved. -->
+  <details class="card idcard" id="valveIdCard">
+    <summary><span class="stitle">Valve identification</span>
+      <span class="sum">pulse a line to see which valve moves</span></summary>
+
       <div class="body">
         <div class="hint" id="idIntro" style="margin-top:0">
           Pulses each output line in turn so you can see which valve moves. Put the
@@ -722,49 +942,7 @@
         </div>
         <div class="marks" id="idMarks"></div>
       </div>
-    </section>
-
-    <div class="diagcol">
-      <section class="card" data-card="logging">
-        <h2>Data logging</h2>
-        <div class="body">
-          <div class="row" style="margin-top:0">
-            <input id="logLabel" placeholder="General" style="flex:1;min-width:120px">
-            <button id="logStart">Start</button>
-            <button id="logStop">Stop</button>
-          </div>
-          <div class="kv"><span>File</span><span id="logFile">—</span></div>
-          <div class="kv"><span>Rows</span><span id="logRows">—</span></div>
-          <div class="hint" id="logCols"></div>
-        </div>
-      </section>
-
-      <section class="card" data-card="connections">
-        <h2>Connections</h2>
-        <div class="body" style="overflow-x:auto">
-          <table>
-            <thead><tr>
-              <th>Device</th><th>Interface</th><th>Address</th><th>State</th><th>Detail</th>
-            </tr></thead>
-            <tbody id="conns"></tbody>
-          </table>
-          <!-- Restarting picks up changed code. It is a graceful shutdown +
-               re-exec, not a kill, so Supervisor.stop() runs normally. The
-               consequences are spelled out in the confirm dialog rather than
-               here, because that is where they get read. -->
-          <div class="row" style="margin-top:12px">
-            <button id="shutdownBtn" class="danger">Shut down server</button>
-            <span class="hint" id="shutdownHint" style="flex:1"></span>
-          </div>
-        </div>
-      </section>
-    </div>
-  </div>
-
-  <section class="card" data-card="events">
-    <h2>Event log</h2>
-    <div class="body"><div id="events"></div></div>
-  </section>
+  </details>
 </section>
 
 </main>
@@ -896,7 +1074,7 @@ function connect(){
     const sb = $("shutdownBtn"), sh = $("shutdownHint");
     if(sb && sb.disabled){
       sb.disabled = false;
-      if(sh) sh.textContent = SHUTDOWN_HINT;
+      if(sh){ sh.textContent = SHUTDOWN_HINT; sh.style.color = ""; }
     }
   };
   ws.onclose = () => { setLink("disconnected", "bad"); setTimeout(connect, 1500); };
@@ -970,6 +1148,17 @@ function render(s){
   for(const m of s.mfcs) sample["mfc_"+m.id] = s.snapshot[`mfc.${m.id}.flow`];  // actual flow, not setpoint
   MFC_IDS = s.mfcs.map(m => m.id);
   MFC_LABELS = Object.fromEntries(s.mfcs.map(m => [m.id, m.label || m.id]));
+  MFC_GAS = Object.fromEntries(s.mfcs.map(m => [m.id, m.gas_name || ""]));
+  // A rename has to reach the run page's gas scheduler in the same frame it
+  // reaches the Hardware tab tile - but only when it actually changed. This
+  // runs at the publish rate, and re-rendering the schedule hint 5x a second
+  // for labels that have not moved is pure churn.
+  const labelSig = JSON.stringify([MFC_LABELS, MFC_GAS]);
+  if(labelSig !== LAST_MFC_LABEL_SIG){
+    LAST_MFC_LABEL_SIG = labelSig;
+    applyGasNames();
+    updateGasSchedHint();
+  }
   trend.push(sample);
   if(trend.length > 18000) trend.shift();   // ~1 h at the 5 Hz publish rate
   recordRun(s, sample);
@@ -993,12 +1182,21 @@ function pressure(s){
   const v = s.snapshot["pressure.volts"];
   $("pressureV").textContent = v === undefined ? "—" : num(v,4) + " V";
   const cf = CFG.pressure || {}, sc = cf.scaling || {};
+  // Same numbers as the Run tab's hero readout, on the card that describes the
+  // sensor - a channel and a curve with no reading next to them is a spec
+  // sheet, not an instrument panel (operator, 2026-08-27).
+  const hp = $("hwPressure");
+  if(hp){
+    hp.textContent = sci(p);
+    cls(hp, "stale", !!(r && !r.ok));
+    $("hwPressureV").textContent = v === undefined ? "—" : num(v,4) + " V";
+  }
   $("pressureChan").textContent = cf.channel || "—";
   $("pressureCurve").textContent = sc.preset || `${sc.type||"?"} g=${sc.gain} o=${sc.offset}`;
-  $("pressureWarn").textContent = sc.type === "log10"
-    ? "Log gauge: a 0.1 V offset is roughly a 30% pressure error. Confirm the "
-      + "curve against the gauge controller before trusting these numbers."
-    : "";
+  /* There used to be a warning here that a log gauge's 0.1 V offset is ~30%
+     of pressure and the curve should be confirmed against the controller.
+     It has been - the curve reads correctly - so the warning is gone
+     (2026-08-26). It was advice for bring-up, not a live condition. */
 }
 
 function stage(s){
@@ -1009,7 +1207,17 @@ function stage(s){
   cls(el, "stale", !!(rd && !rd.ok));
   const cf = CFG.stage_temp || {};
   $("stageChan").textContent = cf.channel || "—";
-  $("stageType").textContent = cf.tc_type || "—";
+  $("stageType").textContent = cf.tc_type ? `type ${cf.tc_type}` : "—";
+  const hs = $("hwStageTemp");
+  if(hs){
+    hs.textContent = st.enabled ? num(st.value, 1) : "off";
+    cls(hs, "stale", !!(rd && !rd.ok));
+    // Only ever a number if the channel is declared kind:"voltage"; a DAQmx
+    // thermocouple channel returns °C and no millivolts.
+    const mv = s.snapshot["stage.temp.volts"];
+    $("stageVolts").textContent = typeof mv === "number"
+      ? num(mv, 5) + " V" : "not measured";
+  }
 }
 
 /* Hero readouts that aren't already covered by pressure()/stage(): the
@@ -1224,8 +1432,9 @@ function supplies(s){
       if(sb) sb.disabled = !p.connected;
 
       put(el, "hint", p.is_sample_bias
-        ? "Pre-start sets this from the run's Sample bias field and switches it "
-          + "on only when that is non-zero. Fields above override it by hand."
+        ? "Pre-start ARMS this at the run's Sample bias level and leaves the "
+          + "output off; each beam then switches it on a lead time early and "
+          + "off a trail time late. Fields above override it by hand."
         : "Output switched on at pre-start, off at run end. Fields above set it "
           + "by hand.");
     } else {
@@ -1249,7 +1458,9 @@ function supplies(s){
 
 function gauges(s){
   const list = s.gauges || [];
-  cls($("gaugeCard"), "hidden", !list.length);
+  // The CARD always shows now - it carries the chamber gauge's channel and
+  // curve as well as these tiles - so only the tile section is hidden.
+  cls($("gaugeSub"), "hidden", !list.length);
   if(!list.length) return;
   const box = $("gauges");
   reconcile(box, list, g => g.id, g => `
@@ -1278,9 +1489,14 @@ function gauges(s){
 }
 
 function aux(s){
-  cls($("auxCard"), "hidden", !s.aux.length);
+  // The CARD always shows - it carries the stage TC's channel and type as well
+  // as these tiles - so only the "Other" block is hidden when there are none.
+  cls($("auxSub"), "hidden", !s.aux.length);
   if(!s.aux.length) return;
   const box = $("aux");
+  /* Same shape as the Stage block above it: name, reading, channel, type,
+     voltage. Asked for 2026-08-27 - "Stage temp is the same as the other
+     thermocouples, so make the others have the same fields". */
   reconcile(box, s.aux, a => a.id, a => `
     <div class="tile" data-id="${esc(a.id)}">
       <div class="top">
@@ -1289,15 +1505,32 @@ function aux(s){
         <span class="read"><span data-f="val">—</span
           ><span class="unit">${esc(a.unit||"")}</span></span>
       </div>
-      <div class="kv"><span>Raw</span><span data-f="volts">—</span></div>
+      <div class="kv"><span>Channel</span><span data-f="chan">—</span></div>
+      <div class="kv"><span>Type</span><span data-f="kind">—</span></div>
+      <div class="kv"><span>Voltage</span><span data-f="volts">—</span></div>
     </div>`);
+  let anyTc = false;
   for(const a of s.aux){
     const el = box.querySelector(`[data-id="${CSS.escape(a.id)}"]`);
     if(!el) continue;
-    put(el, "val", sci(a.value, 4));
+    // A thermocouple reads in degrees, not decades - fixed 1 dp, like the
+    // stage TC, rather than the sci() the generic aux channel used to get.
+    const tc = a.kind === "thermocouple";
+    anyTc = anyTc || tc;
+    put(el, "val", tc ? num(a.value, 1) : sci(a.value, 4));
+    put(el, "chan", a.channel || "—");
+    put(el, "kind", tc ? `thermocouple, type ${a.tc_type || "?"}` : (a.kind || "—"));
     put(el, "volts", a.volts === undefined || a.volts === null
-      ? "—" : num(a.volts,4) + " V");
+      ? "not measured" : num(a.volts,5) + " V");
   }
+  // Said once for the card, not once per tile.
+  const hint = $("tcVoltHint");
+  if(hint) hint.textContent = anyTc
+    ? "No millivolts for a thermocouple channel: DAQmx does the cold-junction "
+      + "compensation and linearisation on the module and returns °C, so the "
+      + "raw signal never reaches this program. A channel declared "
+      + "kind: \"voltage\" in reactor.yaml does report volts."
+    : "";
 }
 
 function mfcs(s){
@@ -1458,9 +1691,12 @@ function valveId(s){
         ? "<span class='hint'>sweep complete — no valves marked</span>" : ""));
 }
 
+let RUN_ACTIVE = false;
 function recipe(s){
   const r = s.recipe;
   const running = ["running","paused","aborting"].includes(r.state);
+  RUN_ACTIVE = running;
+  cls($("liveEditBadge"), "hidden", !running);
   const pre = s.prestart || {};
   // Pre-start and a run both drive the plasma-ground relay, so only one of them
   // can be armed at a time (the server refuses the overlap with a 409 too).
@@ -1469,10 +1705,11 @@ function recipe(s){
   $("resumeBtn").disabled = r.state !== "paused";
   $("abortBtn").disabled  = !running;
   $("preStartBtn").disabled = running || !!pre.running;
-  $("preStopBtn").disabled  = !pre.running;
-  // Stop only ends the SEQUENCE, so it greys out the moment the plasma has
-  // struck and held - exactly when the tool is primed and most likely to need
-  // backing out of. Abort stays live for that whole primed state.
+  // Abort is the only way out of a pre-start (2026-08-28). There used to be a
+  // Stop button beside it that ended the SEQUENCE and left the tool primed -
+  // Ar flowing, fill pulsing - so it greyed out at the moment the operator was
+  // most likely to want out, and Abort had to be pressed anyway. Abort stays
+  // live across the whole primed state, running or struck-and-held.
   $("preAbortBtn").disabled = running || !(pre.running || pre.done);
 
   const pEl = $("preStatus");
@@ -1491,18 +1728,25 @@ function recipe(s){
     ? `${r.recipe} — ${r.state}${r.phase ? " · " + r.phase : ""}`
       + (r.error ? ` · ${r.error}` : (r.message ? ` · ${r.message}` : ""))
     : "No run in progress.";
-  $("recipeBar").style.width =
-    ((r.cycles_total ? r.cycle / r.cycles_total : 0)*100).toFixed(1) + "%";
+  // A run that ENDED leaves nothing behind here except a finished one's final
+  // tally: an abort used to leave the bar part-filled and the cycle/step/
+  // remaining frozen at whatever they were when it was pressed, which reads
+  // like a run still going (2026-09-09). "done" keeps its numbers - they are
+  // the result; anything else (aborted, error, idle) clears.
+  const live = running || r.state === "done";
+  $("recipeBar").style.width = live
+    ? ((r.cycles_total ? r.cycle / r.cycles_total : 0)*100).toFixed(1) + "%" : "0%";
   updateEta(r, running);
-  $("rCycle").textContent  = r.cycles_total ? `${r.cycle} / ${r.cycles_total}` : "—";
-  $("rStep").textContent   = r.step_desc || "—";
-  $("rRemain").textContent = (r.step_remaining_s ?? null) === null
-    ? "—" : num(r.step_remaining_s, 2) + " s";
+  $("rCycle").textContent  = live && r.cycles_total
+    ? `${r.cycle} / ${r.cycles_total}` : "—";
+  $("rStep").textContent   = live ? (r.step_desc || "—") : "—";
+  $("rRemain").textContent = live && (r.step_remaining_s ?? null) !== null
+    ? num(r.step_remaining_s, 2) + " s" : "—";
 
   // --- phase strip: which cycle step is active ---
   // step_index is 1-based over the mode's own step list, so walking the
   // *visible* phases in order works for EE-ALD (4) and EE-CVD (2) alike.
-  const cycling = running && r.phase === "cycling";
+  const cycling = running && r.phase === "cycling";   // cleared when not
   const activeIdx = cycling ? r.step_index : 0;
   const phases = [...document.querySelectorAll("#phaseStrip .phase")]
                    .filter(el => !el.classList.contains("hidden"));
@@ -1555,17 +1799,56 @@ function fmtDur(s){
   return h ? `${h}h ${String(m).padStart(2,"0")}m`
            : `${m}m ${String(sec).padStart(2,"0")}s`;
 }
+function clockAt(s){
+  return new Date(Date.now() + s*1000)
+    .toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+}
+/* Between runs the same three slots show the run the parameters DESCRIBE, so
+   "how long is 150 cycles of this?" is answered without starting one - it used
+   to read "—" until Start was pressed. The number comes from the server
+   (POST /api/run/estimate), which builds the very recipe the run would use and
+   returns its length: one piece of arithmetic, not a browser copy of it that
+   can drift from what the countdown will actually start at. */
+let plannedRunS = null;     // seconds, or null while unknown / un-buildable
+let etaLive = false;        // is a run driving these fields right now?
+function renderIdleEta(){
+  $("rEtaLbl").textContent = "est. duration";
+  $("rFinishLbl").textContent = "finish if started now";
+  $("rElapsed").textContent = "—";
+  $("rEta").textContent    = plannedRunS == null ? "—" : fmtDur(plannedRunS);
+  $("rFinish").textContent = plannedRunS == null ? "—" : clockAt(plannedRunS);
+}
+let estimateTimer = null;
+function refreshEstimate(){
+  // Debounced like saveParams, just tighter - this one is what the operator is
+  // watching while they type, so it should land as soon as they stop.
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(async () => {
+    try{
+      const r = await fetch("/api/run/estimate", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({...runParams(), mode: runMode()}),
+      });
+      plannedRunS = r.ok ? ((await r.json()).total_s ?? null) : null;
+    }catch(_){ plannedRunS = null; }    // server unreachable - show "—"
+    if(!etaLive) renderIdleEta();
+  }, 250);
+}
 function updateEta(r, running){
   const showing = running || r.state === "paused";
-  const elapsed = (showing && r.started_at) ? (Date.now()/1000 - r.started_at) : null;
+  etaLive = showing;
+  if(!showing){ renderIdleEta(); return; }
+
+  $("rEtaLbl").textContent = "est. remaining";
+  $("rFinishLbl").textContent = "finish";
+  const elapsed = r.started_at ? (Date.now()/1000 - r.started_at) : null;
   $("rElapsed").textContent = elapsed == null ? "—" : fmtDur(elapsed);
 
-  const eta = showing ? (r.run_remaining_s ?? null) : null;
-  const held = showing && r.paused;
+  const eta = r.run_remaining_s ?? null;
+  const held = r.paused;
   $("rEta").textContent = eta == null ? "—"
     : fmtDur(eta) + (held ? " (held)" : "");
-  $("rFinish").textContent = eta == null ? "—"
-    : new Date(Date.now() + eta*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  $("rFinish").textContent = eta == null ? "—" : clockAt(eta);
 }
 
 // ------------------------------------------------ run recording + auto-download
@@ -1643,24 +1926,22 @@ function conns(s){
       m.connected ? "OK" : "FAIL", m.error || m.device_info || ""));
   for(const i of s.instruments)
     rows.push(tr(i.label || i.id, "SCPI · VISA", i.resource,
-      i.connected ? "OK" : "FAIL", i.error || i.identity || ""));
+      ...connState(i, i.identity || "")));
   for(const p of (s.power_supplies || [])){
     if(p.driver === "keithley_2260b"){
       // Address column shows the USB serial, not just the port: the port is
       // resolved FROM the serial and can move, the serial cannot.
       rows.push(tr(p.label || p.id, "Keithley 2260B · SCPI over USB serial",
         `${p.port || "?"} · serial ${p.usb_serial || "?"}`,
-        p.connected ? "OK" : "FAIL",
-        p.error
-          || (p.questionable
-                ? `questionable status 0x${(p.questionable).toString(16)}`
-                : (p.output_on ? "output ON" : "output off"))));
+        ...connState(p, p.questionable
+                        ? `questionable status 0x${(p.questionable).toString(16)}`
+                        : (p.output_on ? "output ON" : "output off"))));
     } else {
       rows.push(tr(p.label || p.id, "Glassman ASCII · serial · monitor + HV off",
         `${p.port || "?"} ${p.baud || "?"} addr ${p.address}`,
-        p.connected ? "OK" : "FAIL",
-        p.error || ((p.faults && p.faults.length) ? "FAULT: " + p.faults.join(", ")
-                    : (p.firmware ? "firmware " + p.firmware : ""))));
+        ...connState(p, (p.faults && p.faults.length)
+                        ? "FAULT: " + p.faults.join(", ")
+                        : (p.firmware ? "firmware " + p.firmware : ""))));
     }
   }
   const e = s.ellipsometer;
@@ -1710,12 +1991,36 @@ function ellipsometer(s){
     }
   }
 }
+/* One connection row. `state` is "OK", "FAIL", or "RETRY" - the third exists
+   because a dropped instrument or supply is retried every few seconds and a
+   flat red FAIL said nothing about whether the program had given up. The
+   Detail cell is ellipsised by the fixed table layout, so the full text also
+   goes in a title, and the stable part (attempt count, how long ago) leads. */
 function tr(a,b,c,state,detail){
-  const color = state === "OK" ? "var(--ok)" : "var(--bad)";
-  return `<tr><td>${esc(a)}</td><td>${esc(b)}</td>
-    <td style="font-family:var(--mono)">${esc(c||"—")}</td>
+  const color = state === "OK" ? "var(--ok)"
+              : state === "RETRY" ? "var(--warn)" : "var(--bad)";
+  return `<tr><td title="${esc(a)}">${esc(a)}</td><td>${esc(b)}</td>
+    <td style="font-family:var(--mono)" title="${esc(c||"")}">${esc(c||"—")}</td>
     <td style="color:${color};font-weight:600">${esc(state)}</td>
-    <td style="color:var(--dim)">${esc(detail||"")}</td></tr>`;
+    <td style="color:var(--dim)" title="${esc(detail||"")}">${esc(detail||"")}</td></tr>`;
+}
+
+/* State + detail for a device the reconnect loop looks after (instruments and
+   power supplies). `retry` is {attempts, first, last, error} from the server,
+   present only while the device is down and has been tried at least once. */
+function connState(dev, whenOk){
+  if(dev.connected) return ["OK", whenOk];
+  const r = dev.retry;
+  if(!r) return ["FAIL", dev.error || ""];
+  const ago = Math.max(0, Math.round(Date.now()/1000 - (r.last || 0)));
+  const down = Math.max(0, Math.round(Date.now()/1000 - (r.first || 0)));
+  return ["RETRY",
+    `try ${r.attempts}, ${ago}s ago · down ${fmtSpan(down)} · ${r.error || ""}`];
+}
+function fmtSpan(sec){
+  if(sec < 60) return `${sec}s`;
+  if(sec < 3600) return `${Math.floor(sec/60)}m${String(sec%60).padStart(2,"0")}s`;
+  return `${Math.floor(sec/3600)}h${String(Math.floor(sec%3600/60)).padStart(2,"0")}m`;
 }
 
 // The event log lives on the Diagnostics tab, so a condition that needs seeing
@@ -1740,6 +2045,16 @@ function liveAlerts(s){
     out.push({msg: `precursor fill pressure out of bounds (target ${num(g.target_torr,3)} Torr)`,
               bad: false});
 
+  /* Every other commanded value its own measurement disagrees with, on the
+     same rule (Supervisor.setpoint_flags). Added 2026-09-01 after the N2 line
+     on Mo-017 sat at a setpoint it never reached with nothing to say so: "All
+     params should be monitored like the precursor pressure." Warn-only - the
+     setpoint is still written exactly as typed. */
+  for(const f of (s.setpoint_flags || []))
+    out.push({msg: `${f.label} ${num(f.measured,2)} ${f.unit} vs setpoint `
+                   + `${num(f.commanded,2)} ${f.unit} (${(f.off_frac*100).toFixed(0)}% off)`,
+              bad: false});
+
   // Plasma out mid-beam, while it is out.
   if(r.beam && r.beam.lit === false)
     out.push({msg: "plasma out — reigniting", bad: false});
@@ -1761,6 +2076,27 @@ function liveAlerts(s){
   out.sort((a, b) => (b.bad ? 1 : 0) - (a.bad ? 1 : 0));   // errors first
   return out;
 }
+//: How many conditions are shown at once before the rest collapse into a
+//: "+N more" chip. The operator asked for four.
+const MAX_CHIPS = 4;
+
+/* Repaints only when the set of conditions actually changes - this runs at
+   5 Hz, and rebuilding the header every frame made the chips flicker and stole
+   any text selection in them. */
+let LAST_CHIP_SIG = "";
+function renderAlertChips(live){
+  const sig = live.map(a => `${a.bad ? "!" : "."}${a.msg}`).join("|");
+  if(sig === LAST_CHIP_SIG) return;
+  LAST_CHIP_SIG = sig;
+  const shown = live.slice(0, MAX_CHIPS);
+  const rest = live.length - shown.length;
+  setHtml($("alertChips"),
+    shown.map(a => `<div class="alertchip${a.bad ? " bad" : ""}" title="${esc(a.msg)}"
+                     >⚠ ${esc(a.msg)}</div>`).join("")
+    + (rest > 0 ? `<div class="alertchip more" title="click for the event log"
+                    >+${rest} more</div>` : ""));
+}
+
 /* The event log the panel renders. Seeded once from /api/events (the server
    keeps 20000) and then appended from each telemetry frame, which carries only
    the last 200 - shipping the whole buffer 5x a second would be about a MB/s of
@@ -1769,51 +2105,70 @@ function liveAlerts(s){
    Keyed by timestamp+message to drop the overlap between the seed and the first
    few frames. Two genuinely identical events in the same millisecond would
    collapse into one; that is a fair trade for not double-printing every reload. */
-let EVENTS = [];
-let EVENT_SEEN = new Set();
+const LOG_CAP = 200000;          // matches the server's own buffer
 
-function pushEvents(list){
+/* Two panels, one mechanism: an event list and the errors-only subset. Both
+   are seeded once and tailed from every frame, and both dedupe on
+   timestamp+message so the seed and the first frames do not double-print. */
+function makeLog(){ return {rows: [], seen: new Set()}; }
+const EVENT_LOG = makeLog();
+const ERROR_LOG = makeLog();
+
+function pushLog(log, list){
   let added = 0;
   for(const e of list || []){
     const key = `${e.t}|${e.message}`;
-    if(EVENT_SEEN.has(key)) continue;
-    EVENT_SEEN.add(key);
-    EVENTS.push(e);
+    if(log.seen.has(key)) continue;
+    log.seen.add(key);
+    log.rows.push(e);
     added++;
   }
-  if(EVENTS.length > 20000){
-    EVENTS = EVENTS.slice(-20000);
-    EVENT_SEEN = new Set(EVENTS.map(e => `${e.t}|${e.message}`));
+  if(log.rows.length > LOG_CAP){
+    log.rows = log.rows.slice(-LOG_CAP);
+    log.seen = new Set(log.rows.map(e => `${e.t}|${e.message}`));
   }
   return added;
 }
 
+function renderLog(el, rows){
+  setHtml(el, rows.slice().reverse().map(e =>
+    `<div><span class="t">${clock(e.t)}</span>
+     <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
+}
+
 async function seedEvents(){
-  try{
-    const r = await fetch("/api/events");
-    if(!r.ok) return;
-    pushEvents((await r.json()).events || []);
-  }catch(_){ /* the live tail alone still works */ }
+  for(const [url, key, log] of [["/api/events", "events", EVENT_LOG],
+                                ["/api/errors", "errors", ERROR_LOG]]){
+    try{
+      const r = await fetch(url);
+      if(!r.ok) continue;
+      pushLog(log, (await r.json())[key] || []);
+    }catch(_){ /* the live tail alone still works */ }
+  }
+  renderLog($("errors"), ERROR_LOG.rows);
+  updateErrCount();
+}
+
+function updateErrCount(){
+  const n = ERROR_LOG.rows.length;
+  $("errCount").textContent = n ? `${n} logged this session` : "";
+  if(!n) setHtml($("errors"),
+    `<div class="quiet">Nothing yet. Errors and flags land here as they
+     happen, and in the run's own <code>_errors.log</code>.</div>`);
 }
 
 function events(s){
   // Only re-render when something actually arrived - this runs at 5 Hz and the
-  // log can be twenty thousand rows.
-  if(pushEvents(s.events)){
-    setHtml($("events"), EVENTS.slice().reverse().map(e =>
-      `<div><span class="t">${clock(e.t)}</span>
-       <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
+  // log can be two hundred thousand rows.
+  if(pushLog(EVENT_LOG, s.events)) renderLog($("events"), EVENT_LOG.rows);
+  if(pushLog(ERROR_LOG, s.errors)){
+    renderLog($("errors"), ERROR_LOG.rows);
+    updateErrCount();
   }
 
   const live = liveAlerts(s);
-  const chip = $("alertChip");
-  cls(chip, "hidden", !live.length);
   cls($("diagDot"), "on", !!live.length);
-  if(live.length){
-    const more = live.length > 1 ? `  (+${live.length - 1} more)` : "";
-    chip.textContent = `⚠ ${live[0].msg}${more}`;
-    cls(chip, "bad", live[0].bad);
-  }
+  renderAlertChips(live);
 }
 
 // ---------------------------------------------------------------- chart
@@ -1826,6 +2181,33 @@ function events(s){
 let RUN_PLASMA = "plasma_ground";
 let MFC_IDS = [];        // populated from live state each frame
 let MFC_LABELS = {};     // id -> current display label (tracks renames)
+let MFC_GAS = {};        // id -> short gas name, resolved server-side
+let LAST_MFC_LABEL_SIG = "";   // so a rename repaints once, not every frame
+
+/* Short display name for a gas, used everywhere the RUN page names one.
+
+   The server resolves this (Supervisor._gas_name): the MFC's OWN gas selection
+   wins - switch the unit from H2 to NH3 and it reports "2: NH3" - with an
+   operator rename (the ✎ button on the Hardware tab) ahead of it and the
+   reactor.yaml label behind it. Either way a gas scheduler still saying "H2"
+   when the line is running NH3 is worse than useless.
+
+   The fallbacks cover the first frames before any telemetry has arrived: the
+   config labels are written "<gas> - <what it is for>" ("H2 - reactive
+   background") and only the head of that belongs in a table cell. */
+function gasName(id){
+  if(MFC_GAS[id]) return MFC_GAS[id];
+  const full = MFC_LABELS[id] || String(id).toUpperCase();
+  return full.split(" - ")[0].trim() || full;
+}
+
+/** Push the current MFC labels into every [data-gas-name] slot on the page. */
+function applyGasNames(){
+  for(const el of document.querySelectorAll("[data-gas-name]")){
+    const name = gasName(el.dataset.gasName);
+    if(el.textContent !== name) el.textContent = name;
+  }
+}
 let CUR_UNIT = {mul:1e6, unit:"µA", dp:2};         // current panel's display unit
 
 function makeChartCtl(defaultWindowS){
@@ -2017,12 +2399,14 @@ function drawMfcChart(){
   g.fillText(clock(t0), PADL+26, h-4);
   g.fillText(clock(t1), PADL+W-26, h-4);
 
-  drawOverlaysFor(g, w, h, ctl, s => [clock(s.t), ...series.map(ser =>
-    `${(MFC_LABELS[ser.key.slice(4)]||ser.key).slice(0,14)} `
-    + (typeof s[ser.key]==="number" ? num(s[ser.key],2) : "—") + " sccm")]);
+  drawOverlaysFor(g, w, h, ctl, s => [clock(s.t), ...series.map(ser => ({
+    color: ser.color,
+    text: `${gasName(ser.key.slice(4)).slice(0,14)} `
+      + (typeof s[ser.key]==="number" ? num(s[ser.key],2) : "—") + " sccm",
+  }))]);
 
   setHtml($("mfcLegend"), series.map(s =>
-    `<span><i style="background:${s.color}"></i>${esc(MFC_LABELS[s.key.slice(4)]||s.key)}</span>`
+    `<span><i style="background:${s.color}"></i>${esc(gasName(s.key.slice(4)))}</span>`
   ).join("") + (ctl.view.follow ? "" : `<span style="color:var(--warn)">paused — press Follow live</span>`));
 }
 
@@ -2122,18 +2506,33 @@ function drawOverlaysFor(g, w, h, ctl, lineBuilder){
     }
   }
 
-  const lines = lineBuilder(s);
+  /* A line is either a plain string or {text, color}. A coloured line gets a
+     short rule of that colour in front of it, so "which trace is this number
+     from" is answerable without counting series (operator, 2026-08-26 - the
+     MFC flow plot has three lines and the names alone did not say which). */
+  const lines = lineBuilder(s).map(l => typeof l === "string" ? {text: l} : l);
   g.font = "11px system-ui"; g.textBaseline = "top";
-  const padB = 6, lh = 14;
-  const bw = Math.max(...lines.map(l => g.measureText(l).width)) + padB*2;
+  const padB = 6, lh = 14, swW = 11, swGap = 5;
+  const indent = lines.some(l => l.color) ? swW + swGap : 0;
+  const bw = Math.max(...lines.map(
+    l => g.measureText(l.text).width + (l.color ? indent : 0))) + padB*2;
   const bh = lines.length*lh + padB*2;
   let bx = x + 10; if(bx + bw > w - 4) bx = x - 10 - bw;
   const by = GEOM.top + 4;
   g.save();
   g.fillStyle = "rgba(13,17,23,0.92)"; g.strokeStyle = "#2a323d";
   g.fillRect(bx, by, bw, bh); g.strokeRect(bx, by, bw, bh);
-  g.fillStyle = "#e6edf3"; g.textAlign = "left";
-  lines.forEach((l,i) => g.fillText(l, bx + padB, by + padB + i*lh));
+  g.textAlign = "left";
+  lines.forEach((l,i) => {
+    const ty = by + padB + i*lh;
+    if(l.color){
+      g.fillStyle = l.color;
+      // Same 11x3 rule the static legend uses, centred on the text.
+      g.fillRect(bx + padB, ty + 5, swW, 3);
+    }
+    g.fillStyle = "#e6edf3";
+    g.fillText(l.text, bx + padB + (l.color ? indent : 0), ty);
+  });
   g.restore();
 }
 
@@ -2226,7 +2625,7 @@ window.addEventListener("resize", drawAllCharts);
     drawAllCharts();
   }
   for(const b of btns) b.onclick = () => show(b.dataset.tab);
-  $("alertChip").onclick = () => show("diag");
+  $("alertChips").onclick = () => show("diag");
   show(localStorage.getItem("activeTab") || "run");
 })();
 
@@ -2343,12 +2742,14 @@ document.addEventListener("click", async ev => {
 // runParams(), not this list.
 const ALD_KEYS = ["cycles","dose_pressure_torr","dose_s","pump_a_s","beam_s",
   "pump_b_s","min_current_ua","sample_bias_v","sample_bias_polarity",
+  "sample_bias_lead_s","sample_bias_trail_s",
   "fill_pulse_on_s","fill_pulse_off_s","tolerance_pct",
   "reignite_pulse_s","reignite_settle_s","ar_close_delay_s",
+  "ar_soft_open_pulses","ar_soft_open_on_s","ar_soft_open_gap_s",
   "pre_ar_sccm","pre_valve_delay_s","pre_hold_s",
   "gas_overlap_s","smooth_on","smooth_n",
-  "h2_gas_enable","h2_gas_order","h2_gas_pct","h2_gas_flow_sccm",
-  "n2_gas_enable","n2_gas_order","n2_gas_pct","n2_gas_flow_sccm"];
+  "mfc1_gas_enable","mfc1_gas_order","mfc1_gas_pct","mfc1_gas_flow_sccm",
+  "mfc2_gas_enable","mfc2_gas_order","mfc2_gas_pct","mfc2_gas_flow_sccm"];
 
 /* EE-ALD vs EE-CVD. EE-CVD holds the beam on for the whole run, so it has no
    beam-exposure or pump-B parameter and only two cycle phases. Elements tagged
@@ -2362,6 +2763,7 @@ function applyMode(){
   $("gasWindowWord").textContent = m === "cvd" ? "cycle" : "exposure";
   localStorage.setItem("runMode", m);
   updateGasSchedHint();
+  refreshEstimate();          // EE-CVD has no beam or pump B, so it is shorter
 }
 
 function updateSmoothHint(){
@@ -2405,12 +2807,35 @@ async function loadParams(){
   updateReigniteHint();
   updateGasSchedHint();
   updateSmoothHint();
+  refreshEstimate();
+}
+
+/* Push the edited parameters at the RUN IN PROGRESS, not just at the next one
+   (operator, 2026-09-01: "I need to be able to change parameters mid run").
+   The fields were always editable during a run - they just went nowhere, which
+   is why an N2 flow that was wrong on Mo-017 stayed wrong for the whole run.
+
+   Same body a run is started with, so the server can diff it against what the
+   run is actually using. Fire-and-forget and debounced with the save below: a
+   409 just means the run ended between keystrokes. */
+let liveParamsTimer = null;
+function pushLiveParams(){
+  if(!RUN_ACTIVE) return;
+  clearTimeout(liveParamsTimer);
+  liveParamsTimer = setTimeout(() => {
+    if(!RUN_ACTIVE) return;
+    fetch("/api/run/params", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(runParams()),
+    }).catch(() => {});
+  }, 800);
 }
 
 let saveParamsTimer = null;
 function saveParams(){
   const p={}; for(const k of ALD_KEYS) p[k]=paramGet(k);
   localStorage.setItem("aldParams", JSON.stringify(p));
+  pushLiveParams();
   /* Debounced: saveParams() fires on every keystroke in the params grid, and
      one POST per character would be silly. Fire-and-forget - a failed save
      leaves the local cache correct and is not worth interrupting the operator
@@ -2481,11 +2906,20 @@ function updateGasSchedHint(){
     : (parseFloat($("p_beam_s").value) || 0);
   const anchor = cvd ? "cycle" : "beam";
   const ov = parseFloat($("p_gas_overlap_s").value) || 0;
-  const gases = ["h2","n2"].map(readGasField).filter(g => g.enable);
+  const gases = ["mfc1","mfc2"].map(readGasField).filter(g => g.enable);
   const first = gases.find(g => g.order === "first");
   const second = gases.find(g => g.order === "second");
+  // Simultaneous is the one order two gases may share, so it is excluded from
+  // the collision check — and needs its own, since exactly one is refused.
+  const simul = gases.filter(g => g.order === "simultaneous");
   const collision = gases.filter(g=>g.order==="first").length > 1
                   || gases.filter(g=>g.order==="second").length > 1;
+  // % is meaningless for a gas that covers the whole window.
+  for(const g of ["mfc1","mfc2"]){
+    const pct = $("p_"+g+"_gas_pct");
+    pct.disabled = $("p_"+g+"_gas_order").value === "simultaneous";
+    pct.style.opacity = pct.disabled ? 0.4 : "";
+  }
   const handoff = first ? first.pct/100*span : 0;
   const secondOff = Math.min(span, handoff + (second ? second.pct/100*span : 0));
   const lines = [];
@@ -2495,21 +2929,38 @@ function updateGasSchedHint(){
     const on = cvd
       ? `on ${anchor}+0s (re-arms +${Math.max(0, secondOff-ov).toFixed(2)}s)`
       : `on ${anchor}−${ov.toFixed(2)}s`;
-    lines.push(`${first.id.toUpperCase()} ${on}`
+    lines.push(`${gasName(first.id)} ${on}`
       + ` · off ${anchor}+${handoff.toFixed(2)}s (${first.pct}% @ ${first.flow}sccm)`);
   }
   if(second){
     const onAt = Math.max(0, handoff - ov);
-    lines.push(`${second.id.toUpperCase()} on ${anchor}+${onAt.toFixed(2)}s`
+    lines.push(`${gasName(second.id)} on ${anchor}+${onAt.toFixed(2)}s`
       + ` · off ${anchor}+${secondOff.toFixed(2)}s (${second.pct}% @ ${second.flow}sccm)`);
   }
+  if(simul.length){
+    // No windows to report: every simultaneous gas is on for the whole thing.
+    lines.length = 0;
+    const on = cvd ? `on ${anchor}+0s` : `on ${anchor}−${ov.toFixed(2)}s`;
+    for(const g of simul)
+      lines.push(`${gasName(g.id)} ${on} · off ${anchor}+${span.toFixed(2)}s`
+        + ` (whole ${anchor} @ ${g.flow}sccm)`);
+  }
   const el = $("gasSchedHint");
-  el.textContent = collision
+  const problem = collision
     ? "Both gases set to the same order — pick First for one, Second for the other."
-    : (gases.length ? lines.join("   ") : "no gas scheduled — H2/N2 stay off all run");
-  el.style.color = collision ? "var(--warn)" : "var(--dim)";
+    : (simul.length === 1
+        ? `${gasName(simul[0].id)} is Simultaneous on its own — set the `
+          + `other gas to Simultaneous too, or put this one back to First or `
+          + `Second. The run will not start like this.`
+        : "");
+  el.textContent = problem
+    || (gases.length ? lines.join("   ")
+        : `no gas scheduled — ${gasName("mfc1")}/${gasName("mfc2")} stay off all run`);
+  el.style.color = problem ? "var(--warn)" : "var(--dim)";
 }
-$("aldParams").addEventListener("input", () => { saveParams(); updateReigniteHint(); updateGasSchedHint(); });
+$("aldParams").addEventListener("input", () => {
+  saveParams(); updateReigniteHint(); updateGasSchedHint(); refreshEstimate();
+});
 $("gasSchedSection").addEventListener("input", () => { saveParams(); updateGasSchedHint(); });
 $("gasSchedSection").addEventListener("change", () => { saveParams(); updateGasSchedHint(); });
 $("advSection").addEventListener("input", () => { saveParams(); updateReigniteHint(); });
@@ -2536,6 +2987,16 @@ function runParams(){
     // Supervisor.supplies_output_on.
     sample_bias_v: Math.abs(P("sample_bias_v") || 0),
     sample_bias_polarity: parseInt($("p_sample_bias_polarity").value, 10) || 1,
+    // How far the bias brackets the beam. Scheduled inside pump A / pump B, so
+    // these never lengthen a cycle - see RecipeRunner._schedule_bias.
+    sample_bias_lead_s: P("sample_bias_lead_s") || 0,
+    sample_bias_trail_s: P("sample_bias_trail_s") || 0,
+    // Not used by the recipe builders - the server applies these as they are
+    // saved, because a manual open carries no run params. They ride along so
+    // the run's parameters file records the soft open it actually ran with.
+    ar_soft_open_pulses: parseInt($("p_ar_soft_open_pulses").value, 10) || 0,
+    ar_soft_open_on_s: P("ar_soft_open_on_s") || 0,
+    ar_soft_open_gap_s: P("ar_soft_open_gap_s") || 0,
     fill_pulse_on_s: P("fill_pulse_on_s"), fill_pulse_off_s: P("fill_pulse_off_s"),
     tolerance_frac: (P("tolerance_pct")||20)/100,
     reignite_pulse_s: P("reignite_pulse_s"), reignite_settle_s: P("reignite_settle_s"),
@@ -2544,7 +3005,7 @@ function runParams(){
   };
   if(!cvd){ params.beam_s = P("beam_s"); params.pump_b_s = P("pump_b_s"); }
   params.gas_overlap_s = P("gas_overlap_s") || 0;
-  for(const gas of ["h2","n2"]){
+  for(const gas of ["mfc1","mfc2"]){
     const g = readGasField(gas);
     params[gas+"_gas_enable"] = g.enable;
     params[gas+"_gas_order"] = g.order;
@@ -2554,8 +3015,25 @@ function runParams(){
   return params;
 }
 
+/** The one gas-schedule rule that stops a run, checked here so it lands as a
+    modal before the confirm dialog rather than as a toast after the POST. The
+    server enforces it too (recipe._build_gas_schedules raises, and the API
+    turns that into a 409) - this is the friendlier half, not the real one. */
+function gasScheduleError(){
+  const simul = ["mfc1","mfc2"].map(readGasField)
+    .filter(g => g.enable && g.order === "simultaneous");
+  if(simul.length !== 1) return "";
+  const other = gasName(simul[0].id === "mfc1" ? "mfc2" : "mfc1");
+  return `${gasName(simul[0].id)} is set to Simultaneous on its own.\n\n`
+    + `Simultaneous means two or more gases flow together for the whole `
+    + `window, so set ${other} to Simultaneous as well (and switch it on), or `
+    + `put ${simul[0].id.toUpperCase()} back to First or Second.`;
+}
+
 $("aldStart").onclick = async () => {
   saveParams();
+  const gasErr = gasScheduleError();
+  if(gasErr){ alert(gasErr); $("gasSchedSection").open = true; return; }
   const cvd = runMode() === "cvd";
   const params = runParams();
   const what = cvd
@@ -2577,20 +3055,22 @@ $("aldStart").onclick = async () => {
 // commands hardware that cannot respond.
 $("preStartBtn").onclick = async () => {
   saveParams();
-  // The bias is the one output here that energises the sample, so the dialog
-  // states it explicitly rather than leaving the operator to remember what is
-  // in the field.
+  // The bias is the one output that energises the sample, so the dialog states
+  // it explicitly rather than leaving the operator to remember what is in the
+  // field - including the fact that pre-start now only ARMS it.
   const biasV = Math.abs(parseFloat($("p_sample_bias_v").value) || 0);
   const biasSign = parseInt($("p_sample_bias_polarity").value, 10) < 0 ? "−" : "+";
   const biasLine = biasV > 0
-    ? `Sample bias: ${biasSign}${biasV} V — the stage WILL be energised.`
+    ? `Sample bias: armed at ${biasSign}${biasV} V, output OFF — the stage is `
+      + `energised only around each beam, once the run starts.`
     : "Sample bias: 0 V — stage bias stays off.";
   if(!confirm("Set Ar Pneumatic, Plasma Ground, and Precursor Fill to Remote.\n"
     + "Turn on HV at the Glassman front panel if you want plasma.\n\n"
     + "Pre-start will switch ON the steering, grid and collimating supply "
-    + "outputs — they stay on for the whole run — then open the Ar pneumatic, "
-    + "flow Ar, start the precursor fill pulse, and strike the plasma and hold "
-    + "it. It retries the strike until you press Stop pre-start.\n\n"
+    + "outputs — they stay on for the whole run — then soft-open the Ar "
+    + "pneumatic (pulsed in, not one flip), flow Ar, start the precursor fill "
+    + "pulse, and strike the plasma and hold it. It retries the strike until "
+    + "you press Abort pre-start.\n\n"
     + biasLine)) return;
   const P = k => parseFloat($("p_"+k).value);
   const p = runParams();
@@ -2650,13 +3130,17 @@ $("shutdownBtn").onclick = async () => {
 
   const btn = $("shutdownBtn");
   btn.disabled = true;
-  $("shutdownHint").textContent = "Shutting down… this page will go offline. "
-    + "Start the server again from the Reactor Interface shortcut.";
+  $("shutdownHint").style.color = "";
+  $("shutdownHint").textContent = "Releasing the DAQ and the serial ports…";
   try{
+    // This response now arrives AFTER the teardown has run, and carries a
+    // receipt of what was let go - so there is something real to show rather
+    // than "the page went offline, probably fine".
     const r = await post("/api/server/shutdown");
     setLink("shutting down", "warn");
     if(r && r.also_killed && r.also_killed.length)
       toast(`Also killed ${r.also_killed.length} other server instance(s)`, true);
+    watchShutdown(r);
   }catch(_){
     // A 501 means this server cannot stop itself; post() already toasted.
     btn.disabled = false;
@@ -2664,7 +3148,78 @@ $("shutdownBtn").onclick = async () => {
   }
 };
 
-$("preStopBtn").onclick = () => post("/api/prestart/stop");
+/* Did it actually stop, and is the tool ready to start again?
+
+   Reported 2026-08-27: the button greyed out, the server stayed up holding the
+   DAQ and the COM ports, and the page said nothing. The first version of this
+   watcher answered that by polling until the port went quiet - but the port
+   going quiet was never the question. uvicorn releases the listening socket
+   BEFORE the lifespan teardown, so "not responding" arrives while the DAQ and
+   COM8-COM12 may still be held, and the page was reporting success on the one
+   fact that was never in doubt.
+
+   Zach, 2026-09-10: "there is no way for me to know if it worked or not. I
+   need some confirmation things are shut down and ready to be booted again,
+   and it needs to be a lot faster."
+
+   So the server now tears down INSIDE the request and answers with a receipt
+   (see /api/server/shutdown). `receipt` here is that answer, and it is the
+   real confirmation - by the time it arrives every port has already been let
+   go. All this loop adds is the second half of "ready to be booted again": the
+   process is gone, so the shortcut will not hit "port already in use".
+
+   250 ms, not 1500: the whole stop is now ~1 s, and a 1.5 s poll turned that
+   into a wait that LOOKED like a hang. */
+async function watchShutdown(receipt){
+  const hint = $("shutdownHint");
+  const released = (receipt && receipt.released) || [];
+  const failed   = (receipt && receipt.failed)   || [];
+  const killed   = (receipt && receipt.also_killed) || [];
+
+  // What was released, stated before the process is even gone.
+  const parts = [];
+  if(released.length) parts.push(`Released ${released.join(", ")}`);
+  if(killed.length)   parts.push(`killed ${killed.length} other instance(s)`);
+  const summary = parts.join(" · ");
+
+  const deadline = Date.now() + 8000;    // the server's own fallback is 3 s
+  while(Date.now() < deadline){
+    await new Promise(r => setTimeout(r, 250));
+    let alive = false;
+    try{
+      // no-store: a cached 200 would read as "still up" forever.
+      const r = await fetch("/api/state", {cache: "no-store"});
+      alive = r.ok;
+    }catch(_){ alive = false; }
+    if(!alive){
+      if(failed.length){
+        // Released most of it, but not all - name what did not let go, because
+        // that is exactly what the next server will fail to open.
+        hint.textContent = `Server stopped, but ${failed.length} teardown step`
+          + `(s) failed: ${failed.map(f => f.what).join(", ")}. `
+          + `${summary}. Check server.log before starting again.`;
+        hint.style.color = "var(--warn)";
+        toast("Server stopped, but not everything was released", true);
+      }else{
+        hint.textContent = `✓ Stopped and released — ready to start again from `
+          + `the Reactor Interface shortcut.${summary ? "  " + summary + "." : ""}`;
+        hint.style.color = "var(--ok)";
+      }
+      return;
+    }
+  }
+  // Still answering past the server's own hard deadline. The teardown receipt
+  // above still stands - the devices ARE released - but the process is lingering,
+  // and a lingering process still owns port 8000.
+  btn().disabled = false;
+  hint.textContent = "Devices were released, but the PROCESS is still running "
+    + "— it still holds port 8000, so starting from the shortcut will fail to "
+    + "bind. End it from Task Manager (pythonw.exe), then start again.";
+  hint.style.color = "var(--bad)";
+  toast("Shutdown released the hardware but the process did not exit");
+}
+function btn(){ return $("shutdownBtn"); }
+
 $("preAbortBtn").onclick = () => post("/api/prestart/abort");
 
 $("pauseBtn").onclick  = () => post("/api/recipe/pause");
