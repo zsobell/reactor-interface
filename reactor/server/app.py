@@ -516,13 +516,13 @@ def create_app(cfg: ReactorConfig | None = None) -> FastAPI:
 
     @app.post("/api/log/start")
     async def log_start(label: str | None = Body(default=None, embed=True)) -> dict[str, Any]:
-        path = await sup.recording.call("start", label)
+        path = await sup.recording.start_manual_log(label)
         sup._event("log", f"logging to {path.name}")
         return sup.recording.status()
 
     @app.post("/api/log/stop")
     async def log_stop() -> dict[str, Any]:
-        await sup.recording.call("stop")
+        await sup.recording.stop_manual_log()
         sup._event("log", "logging stopped")
         return sup.recording.status()
 

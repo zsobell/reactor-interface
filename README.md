@@ -192,6 +192,7 @@ config/recipes/*.yaml         optional file-based recipes
 config/{labels,valve_state,last_run,run_params}.json  operator metadata/settings
 reactor/
   __main__.py                 CLI and single-process Uvicorn lifecycle
+  dependencies.py             device factories and per-instance persistence paths
   config.py                   validated hardware/configuration models
   supervisor.py               hardware ownership, polling, commands and run admission
   telemetry.py                stable snapshots and bounded WebSocket fan-out
@@ -199,9 +200,15 @@ reactor/
   datalog.py                  manual/run/by-cycle CSVs and ellipsometer sidecars
   run_report.py               pure formatting of readable run parameters
   control/
+    clock.py                  injected elapsed and wall-clock sources
     recipe_model.py           recipe schema and pure ALD/CVD builders
     recipe.py                 recipe execution, gas schedules and exposure clocks
     prestart.py               pre-start sequence, stop and abort lifecycle
+    run_coordinator.py        run admission, immutable session metadata and cleanup lifecycle
+    contracts.py              typed capabilities consumed by controllers
+    parameters.py             typed run and staged pre-start parameters
+    fill.py                   fill regulation task and pressure flags
+    sweep.py                  valve identification task and markers
   devices/
     base.py                   Reading and device lifecycle contract
     nidaq.py                  DAQ inputs; one output task per valve line
@@ -216,12 +223,17 @@ reactor/
     data.py                   analysis/file routes, with worker-based file operations
     static/index.html         control page markup
     static/control.css        control-page styles
-    static/control.js         controls, parameters and telemetry rendering
+    static/control.js         page composition and telemetry rendering
+    static/control-transport.js  HTTP and WebSocket connection lifecycle
+    static/control-run-forms.js  run parameters, persistence and mode hints
+    static/control-device-panels.js  supply/MFC/valve panels and commands
     static/live-charts.js     live plotting and chart interaction
     static/analysis.html      analysis page markup
     static/analysis.css       analysis-page styles
     static/analysis.js        finished-run and Auger analysis
   testing/virtual_reactor.py   fake hardware, real application/controllers, temporary files
+  testing/validate.py          focused/full cross-platform Python and Node validation
+  testing/timing_prototype.py  isolated event-driven ALD exposure experiment
 tools/
   discover_hardware.py         read-only hardware enumeration and identification
   probe_glassman.py            read-only HV supply port/baud/address probe

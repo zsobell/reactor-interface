@@ -36,6 +36,18 @@ from tests._support import Checker
 DOC_PATHS = [Path("README.md"), Path("CLAUDE.md")] + sorted(Path("docs").glob("*.md"))
 
 
+def missing_local_links(path: Path, text: str) -> list[str]:
+    """Check navigation without fetching external resources or importing code."""
+    missing = []
+    for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
+        if "://" in target or target.startswith("#"):
+            continue
+        relative = target.split("#", 1)[0]
+        if relative and not (path.parent / relative).exists():
+            missing.append(target)
+    return missing
+
+
 def read(p: Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
@@ -121,6 +133,20 @@ async def main() -> int:
     for suf in ("_run.csv", "_bycycle.csv", "_run_params.txt",
                 "_ellipsometer.csv", "_reactor_synced.csv"):
         c.check(f"{suf} is documented", suf in ALL)
+
+    c.section("9. agent navigation and focused test commands resolve")
+    for path in (Path("AGENTS.md"), Path("CLAUDE.md"), Path("docs/DEVELOPMENT.md")):
+        missing = missing_local_links(path, read(path))
+        c.check(f"{path} local links exist", not missing, str(missing))
+    guide = read(Path("docs/DEVELOPMENT.md"))
+    for module in set(re.findall(r"`(test_\w+)`", guide)):
+        c.check(f"focused test {module} exists", Path("tests", module + ".py").is_file())
+    c.check("link checker detects broken navigation",
+            missing_local_links(Path("AGENTS.md"), "[bad](absent-navigation-target.md)")
+            == ["absent-navigation-target.md"])
+    c.check("link checker ignores external URLs and local anchors",
+            not missing_local_links(Path("AGENTS.md"),
+                                    "[web](https://example.com) [section](#heading)"))
 
     return c.summary()
 

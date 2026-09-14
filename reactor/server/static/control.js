@@ -1,4 +1,7 @@
 import {createLiveCharts} from "./live-charts.js";
+import {createControlTransport, SHUTDOWN_HINT} from "./control-transport.js";
+import {createRunForms} from "./control-run-forms.js";
+import {createDevicePanels} from "./control-device-panels.js";
 "use strict";
 
 /* ---------------------------------------------------------------------------
@@ -110,73 +113,12 @@ async function seedTrend(){
   }catch(_){ /* no history is survivable - the charts just start empty */ }
 }
 
-// ---------------------------------------------------------------- transport
-const SHUTDOWN_HINT = "Stops this server and any other reactor server still "
-  + "running, then start it again from the shortcut. Aborts a running recipe, "
-  + "and gas stops either way — read the prompt.";
-
-function connect(){
-  const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
-  ws.onopen  = () => {
-    setLink("live", "live");
-    // If we are talking to a server again, no shutdown is in progress - so
-    // whatever disabled the button (a shutdown that failed, or a server that
-    // came back some other way) should not leave the control dead.
-    const sb = $("shutdownBtn"), sh = $("shutdownHint");
-    if(sb && sb.disabled){
-      sb.disabled = false;
-      if(sh) sh.textContent = SHUTDOWN_HINT;
-    }
-  };
-  ws.onclose = () => { setLink("disconnected", "bad"); setTimeout(connect, 1500); };
-  ws.onerror = () => setLink("error", "bad");
-  ws.onmessage = ev => render(JSON.parse(ev.data));
-}
-function setLink(text, kind){
-  const b = $("linkBadge"); b.textContent = text; b.className = "badge " + (kind||"");
-}
-
-async function post(url, body){
-  const r = await fetch(url, {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: body === undefined ? "{}" : JSON.stringify(body)
-  });
-  if(!r.ok){
-    let msg = r.statusText;
-    try { msg = (await r.json()).detail || msg; } catch(_){}
-    toast(msg); throw new Error(msg);
-  }
-  return r.json();
-}
-
-let toastTimer = null;
-function toast(msg, ok){
-  document.querySelectorAll(".toast").forEach(t => t.remove());
-  const el = document.createElement("div");
-  el.className = "toast" + (ok ? " ok" : "");
-  el.textContent = msg;
-  document.body.appendChild(el);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.remove(), ok ? 2500 : 7000);
-}
-
-/** Read a numeric input, complaining rather than silently doing nothing. */
-function readNum(sel, what){
-  const el = document.querySelector(sel);
-  if(!el) return null;
-  const raw = el.value.trim();
-  if(raw === ""){ toast(`Enter a value for ${what} first.`); el.focus(); return null; }
-  const v = parseFloat(raw);
-  if(!Number.isFinite(v)){ toast(`"${raw}" is not a number.`); el.focus(); return null; }
-  return v;
-}
-
 // ---------------------------------------------------------------- render
 function render(s){
   $("siteName").textContent = s.site;
   banners(s); pressure(s); stage(s); hero(s); gauges(s); instruments(s); aux(s);
-  supplies(s);
-  mfcs(s); valves(s); valveId(s); recipe(s); logging(s); conns(s);
+  devicePanels.supplies(s);
+  devicePanels.mfcs(s); devicePanels.valves(s); valveId(s); recipe(s); logging(s); conns(s);
   ellipsometer(s); events(s);
 
   charts.update(s);
@@ -314,164 +256,6 @@ function instruments(s){
   }
 }
 
-/* Power supplies (the Glassman HV plasma supply).
-   MONITOR ONLY — no setpoint inputs, no HV button, nothing that writes. Zach
-   drives this supply from its front panel; the program reads and logs it.
-   Adding controls here is a change to reactor behaviour (docs/CONTROL_MODEL.md)
-   and needs his explicit go-ahead, not just a code change. */
-function supplies(s){
-  const box = $("supplies");
-  const list = s.power_supplies || [];
-  const isK = p => p.driver === "keithley_2260b";
-  /* Two shapes on one card grid. The Glassman is monitor-only and reports arc
-     count / HV status / fault flags; the Keithley DC supplies report measured
-     V and I and an output state this program switches. Neither has a setpoint
-     input: the Glassman is set by hand, and the Keithleys take only their
-     output enable plus (bias unit only) a voltage from the run parameters. */
-  reconcile(box, list, p => p.id, p => isK(p) ? `
-    <div class="tile psu" data-id="${esc(p.id)}">
-      <div class="top">
-        <span class="name">${esc(p.label || p.id)}</span>
-        <span class="mode" data-f="mode" title="constant-voltage / constant-current"></span>
-        <div style="flex:1"></div>
-        <span class="read"><span data-f="v">—</span><span class="unit">V</span></span>
-      </div>
-      <div class="kv"><span>Current</span><span><span data-f="i">—</span> A</span></div>
-      <div class="row" style="margin-top:6px">
-        <input type="number" step="0.1" min="0" placeholder="V"
-               id="psuv_${esc(p.id)}" data-f="vin" style="flex:1;min-width:64px">
-        <input type="number" step="0.01" min="0" placeholder="A"
-               id="psui_${esc(p.id)}" data-f="iin" style="flex:1;min-width:64px">
-        <button data-act="psuset" data-id="${esc(p.id)}">Set</button>
-      </div>
-      <div class="row" style="margin-top:6px">
-        <button data-act="psuout" data-id="${esc(p.id)}" data-f="outbtn"
-                style="flex:1">Output</button>
-      </div>
-      <div class="kv" style="margin-top:6px"><span>Setpoint (device)</span>
-        <span data-f="sp">—</span></div>
-      <div class="chips">
-        <span class="chip" data-f="chipOut">output</span>
-        <span class="chip" data-f="chipRole"></span>
-        <span class="chip" data-f="chipQues"></span>
-      </div>
-      <div class="kv"><span>Model</span><span data-f="model">—</span></div>
-      <div class="kv"><span>Rated</span><span data-f="rated">—</span></div>
-      <div class="kv"><span>Link</span><span data-f="link">—</span></div>
-      <div class="note" data-f="err"></div>
-      <div class="hint" data-f="hint"></div>
-    </div>` : `
-    <div class="tile" data-id="${esc(p.id)}">
-      <div class="top">
-        <span class="name">${esc(p.label || p.id)}</span>
-        <div style="flex:1"></div>
-        <span class="read"><span data-f="v">—</span
-          ><span class="unit">${esc(p.unit_v || "V")}</span></span>
-      </div>
-      <div class="kv"><span>Current</span>
-        <span><span data-f="i">—</span> ${esc(p.unit_i || "mA")}</span></div>
-      <div class="kv"><span>Arc count</span><span data-f="arcs">—</span></div>
-      <div class="chips">
-        <span class="chip" data-f="chipHv">HV</span>
-        <span class="chip" data-f="chipMode">mode</span>
-        <span class="chip" data-f="chipRem">local</span>
-        <span class="chip" data-f="chipTrip">I-trip</span>
-      </div>
-      <div class="kv"><span>Model</span><span data-f="model">—</span></div>
-      <div class="kv"><span>Link</span><span data-f="link">—</span></div>
-      <div class="note" data-f="faults"></div>
-      <div class="note" data-f="err"></div>
-      <div class="hint">Monitor only — set voltage and current on the supply's
-        front panel. HV is commanded off at the end of a run.</div>
-    </div>`);
-
-  for(const p of list){
-    const el = box.querySelector(`[data-id="${CSS.escape(p.id)}"]`);
-    if(!el) continue;
-    const pre = isK(p) ? "psu." : "hv.";
-    const rd = s.readings[pre+p.id+".voltage"];
-    const bad = !!(rd && !rd.ok);
-    const chip = (field, text, on, hot) => {
-      const c = put(el, field, text);
-      if(c){ cls(c, "on", !!on && !hot); cls(c, "hot", !!hot); }
-    };
-
-    const v = put(el, "v", sci(s.snapshot[pre+p.id+".voltage"], 4));
-    if(v) cls(v, "stale", bad);
-    put(el, "i", sci(s.snapshot[pre+p.id+".current"], 4));
-    put(el, "model", p.model || p.driver || "—");
-    put(el, "err", bad ? rd.detail : (p.error || ""));
-
-    if(isK(p)){
-      /* Red border for a dead link only. An energised output is normal here —
-         these run for the whole deposition — so it is flagged green, not red,
-         and the questionable-status chip carries the alarm. */
-      cls(el, "trip", !p.connected);
-      chip("chipOut", p.output_on === null || p.output_on === undefined
-                        ? "output —"
-                        : (p.output_on ? "OUTPUT ON" : "output off"),
-                      p.output_on, false);
-      const sign = p.polarity < 0 ? "−" : "+";
-      chip("chipRole", p.is_sample_bias ? `sample bias  ${sign}` : "", false, false);
-      /* Non-zero questionable-status register: the bit map is not documented
-         in anything we have, so show the raw value rather than inventing a
-         meaning for it. */
-      chip("chipQues", p.questionable ? `status 0x${(p.questionable).toString(16)}` : "",
-                       false, !!p.questionable);
-      put(el, "rated", (p.max_voltage != null && p.max_current != null)
-        ? `${(+p.max_voltage).toFixed(1)} V · ${(+p.max_current).toFixed(3)} A max`
-        : "—");
-      /* Port is REPORTED, not configured — resolved from the USB serial. */
-      put(el, "link", `${p.port || "?"} · USB serial ${p.usb_serial || "?"}`);
-      put(el, "sp", (p.voltage_setpoint != null && p.current_setpoint != null)
-        ? `${(+p.voltage_setpoint).toFixed(3)} V · ${(+p.current_setpoint).toFixed(3)} A`
-        : "—");
-
-      /* CV/CC light. Blank while the output is off - the mode has no meaning
-         then, and the raw-value decoding is provisional (see OUTPUT_MODES in
-         the driver), so not claiming anything is the honest default. */
-      const md = put(el, "mode", p.mode || "");
-      if(md){ cls(md, "cv", p.mode === "CV"); cls(md, "cc", p.mode === "CC"); }
-
-      const ob = el.querySelector('[data-f="outbtn"]');
-      if(ob){
-        ob.textContent = p.output_on ? "Output ON — click to turn off"
-                                     : "Output off — click to turn on";
-        cls(ob, "danger", !!p.output_on);
-        ob.dataset.state = p.output_on ? "1" : "0";
-        ob.disabled = !p.connected;
-      }
-      for(const f of ["vin", "iin"]){
-        const inp = el.querySelector(`[data-f="${f}"]`);
-        if(inp) inp.disabled = !p.connected;
-      }
-      const sb = el.querySelector('[data-act="psuset"]');
-      if(sb) sb.disabled = !p.connected;
-
-      put(el, "hint", p.is_sample_bias
-        ? "Pre-start sets this from the run's Sample bias field and switches it "
-          + "on only when that is non-zero. Fields above override it by hand."
-        : "Output switched on at pre-start, off at run end. Fields above set it "
-          + "by hand.");
-    } else {
-      cls(el, "trip", !p.connected || !!p.faulted);
-      const arcs = s.snapshot["hv."+p.id+".arc_count"];
-      put(el, "arcs", (arcs === null || arcs === undefined) ? "—" : String(arcs));
-      chip("chipHv",   p.hv_on ? "HV ON" : "HV off", p.hv_on, p.hv_on);
-      chip("chipMode", p.voltage_mode === null || p.voltage_mode === undefined
-                         ? "mode —"
-                         : (p.voltage_mode ? "V mode" : "I mode"), false, false);
-      chip("chipRem",  p.remote ? "remote" : "local", false, false);
-      chip("chipTrip", p.current_trip_enabled ? "I-trip on" : "I-trip off",
-                       p.current_trip_enabled, false);
-      put(el, "link", `${p.port || "?"} · ${p.baud || "?"} 8N1 · addr ${p.address}`
-                      + (p.firmware ? ` · fw ${p.firmware}` : ""));
-      put(el, "faults", (p.faults && p.faults.length)
-        ? "FAULT: " + p.faults.join(", ") : "");
-    }
-  }
-}
-
 function gauges(s){
   const list = s.gauges || [];
   cls($("gaugeCard"), "hidden", !list.length);
@@ -522,119 +306,6 @@ function aux(s){
     put(el, "val", sci(a.value, 4));
     put(el, "volts", a.volts === undefined || a.volts === null
       ? "—" : num(a.volts,4) + " V");
-  }
-}
-
-function mfcs(s){
-  const box = $("mfcs");
-  reconcile(box, s.mfcs, m => m.id, m => `
-    <div class="tile" data-id="${esc(m.id)}">
-      <div class="top">
-        <span class="name" data-f="name">${esc(m.label || m.id)}</span>
-        <button class="rename" data-rename="mfc" data-id="${esc(m.id)}"
-                title="Rename MFC">✎</button>
-        <span class="src" data-f="gas"></span>
-        <div style="flex:1"></div>
-        <span class="read"><span data-f="flow">—</span
-          ><span class="unit">sccm</span></span>
-      </div>
-      <div class="bar"><i data-f="bar" style="width:0"></i></div>
-      <div class="row" style="margin-top:0">
-        <input type="number" step="0.01" min="0" placeholder="sccm"
-               id="mfc_${esc(m.id)}" data-f="input" style="flex:1;min-width:80px">
-        <button data-act="mfc" data-id="${esc(m.id)}">Set flow</button>
-      </div>
-      <div class="kv" style="margin-top:6px"><span>Setpoint (device)</span><span data-f="sp">—</span></div>
-      <div class="kv"><span>Full scale</span><span data-f="fs">—</span></div>
-      <div class="kv"><span>Body temp</span><span data-f="temp">—</span></div>
-      <div class="kv"><span>Device mode</span><span data-f="mode">—</span></div>
-      <div class="note" data-f="health"></div>
-      <div class="note" data-f="err"></div>
-      <div class="note" data-f="iso"></div>
-    </div>`);
-
-  const valveById = {}; for(const v of s.valves) valveById[v.id] = v;
-
-  for(const m of s.mfcs){
-    const el = box.querySelector(`[data-id="${CSS.escape(m.id)}"]`);
-    if(!el) continue;
-    cls(el, "trip", !m.connected);
-    const flow = s.snapshot[`mfc.${m.id}.flow`];
-    const pct  = s.snapshot[`mfc.${m.id}.flow_pct`];
-    put(el, "name", m.label || m.id);
-    put(el, "gas", m.gas || "");
-    put(el, "flow", (flow===null||flow===undefined) ? "—" : Number(flow).toFixed(3));
-    put(el, "sp", num(s.snapshot[`mfc.${m.id}.setpoint`],3) + " sccm");
-    // Full scale is read from the instrument, not configured - it moves with gas.
-    put(el, "fs", m.full_scale_sccm === null || m.full_scale_sccm === undefined
-      ? "—" : `${num(m.full_scale_sccm,1)} sccm`
-        + (typeof pct === "number" ? `  (${pct.toFixed(1)}%)` : ""));
-    put(el, "temp", num(s.snapshot[`mfc.${m.id}.temp`],1) + " °C");
-    put(el, "mode", m.device_mode || "—");
-    const bad = m.health
-      ? Object.entries(m.health).filter(([, v]) => v && v !== "No")
-      : [];
-    put(el, "health", bad.length
-      ? "device reports: " + bad.map(([k, v]) => `${k}=${v}`).join(", ") : "");
-    put(el, "err", m.error || "");
-    const bar = el.querySelector('[data-f="bar"]');
-    if(bar) bar.style.width =
-      Math.max(0, Math.min(100, typeof pct === "number" ? pct : 0)) + "%";
-
-    // Requested by operator: gate the setpoint on the MFC's isolation valve.
-    const iso = m.isolation_valve ? valveById[m.isolation_valve] : null;
-    const isoClosed = !!(iso && !iso.open);
-    put(el, "iso", isoClosed
-      ? `${iso.label} is closed — open it to set flow above 0`
-      : "");
-    el.querySelector('[data-act="mfc"]').disabled = !m.connected || isoClosed;
-    el.querySelector('[data-f="input"]').disabled = !m.connected || isoClosed;
-  }
-}
-
-function valves(s){
-  const box = $("valves");
-  // One header row per control box, then that box's valves. Grouping is by the
-  // `bank` field; anything without a bank falls into an "ungrouped" section.
-  // The headers span the full grid width so each bank reads as its own block.
-  const banks = (s.valve_banks || []).slice();
-  if(s.valves.some(v => !v.bank)) banks.push({id:"", label:"Ungrouped", note:""});
-
-  const rows = [];
-  for(const b of banks){
-    const members = s.valves.filter(v => (v.bank || "") === b.id);
-    if(!members.length) continue;
-    rows.push({kind:"bank", id:"bank:"+b.id, bank:b});
-    for(const v of members) rows.push({kind:"valve", id:"valve:"+v.id, valve:v});
-  }
-
-  reconcile(box, rows, r => r.id, r => r.kind === "bank" ? `
-    <div class="bankhdr" data-id="${esc(r.id)}">
-      <div class="bankname">${esc(r.bank.label)}</div>
-      <div class="banknote">${esc(r.bank.note || "")}</div>
-    </div>` : `
-    <div class="valve" data-id="${esc(r.id)}">
-      <div class="lbl">
-        <strong data-f="label">${esc(r.valve.label)}</strong>
-        <span class="sub" data-f="sub"></span>
-      </div>
-      <button class="rename" data-rename="valve" data-id="${esc(r.valve.id)}"
-              title="Rename valve">✎</button>
-      <button data-act="valve" data-id="${esc(r.valve.id)}" data-f="btn">—</button>
-    </div>`);
-
-  for(const r of rows){
-    if(r.kind !== "valve") continue;
-    const v = r.valve;
-    const el = box.querySelector(`[data-id="${CSS.escape(r.id)}"]`);
-    if(!el) continue;
-    cls(el, "open", v.open);
-    put(el, "label", v.label);
-    put(el, "sub", `${v.line || "no line"} · ${v.open ? "OPEN" : "closed"}`);
-    const btn = el.querySelector('[data-f="btn"]');
-    btn.textContent = v.open ? "Close" : "Open";
-    btn.dataset.state = v.open ? "0" : "1";
-    btn.disabled = !v.line;   // only a valve with no DAQ line can't be driven
   }
 }
 
@@ -1046,6 +717,15 @@ function events(s){
 const charts = createLiveCharts({$, trend, num, clock, sci, fmtCurrent,
                                   currentUnit, esc, setHtml});
 const {drawAllCharts, drawChart, smoothing} = charts;
+const transport = createControlTransport({$, document, fetchImpl:fetch,
+  WebSocketCtor:WebSocket, location, render});
+const {dispose:disposeTransport, post, resume:resumeTransport,
+  setLink, suspend:suspendTransport, toast} = transport;
+const devicePanels = createDevicePanels({$, document, cssEscape:value => CSS.escape(value),
+  esc, num, sci, put, cls, reconcile, post, toast,
+  confirmImpl:(...args) => confirm(...args), promptImpl:(...args) => prompt(...args)});
+const runForms = createRunForms({$, document, storage:localStorage, fetchImpl:fetch,
+  cls, smoothing, drawChart});
 
 // ---------------------------------------------------------------- tabs
 // Panes are display:none when inactive, which zeroes the canvases' size - so
@@ -1098,302 +778,11 @@ document.addEventListener("click", async ev => {
   try { await post("/api/valve_id/mark", {valve, note}); } catch(_){}
 });
 
-document.addEventListener("click", async ev => {
-  const b = ev.target.closest("button[data-act]");
-  if(!b) return;
-  const id = b.dataset.id;
-  try{
-    if(b.dataset.act === "valve"){
-      await post(`/api/valve/${id}`, {state: b.dataset.state === "1"});
-    } else if(b.dataset.act === "mfc"){
-      const v = readNum(`#mfc_${CSS.escape(id)}`, `${id} flow`);
-      if(v === null) return;
-      const res = await post(`/api/mfc/${id}/setpoint`, {sccm: v});
-      toast(`${id} setpoint set to ${res.setpoint_sccm} sccm`, true);
-    } else if(b.dataset.act === "psuset"){
-      /* Either field on its own is a valid edit - blank means "leave it".
-         Voltage first, so raising both never briefly runs at the old (lower)
-         current limit against the new voltage. */
-      const vEl = document.querySelector(`#psuv_${CSS.escape(id)}`);
-      const iEl = document.querySelector(`#psui_${CSS.escape(id)}`);
-      const vRaw = (vEl && vEl.value.trim()) || "";
-      const iRaw = (iEl && iEl.value.trim()) || "";
-      if(!vRaw && !iRaw){ toast(`Enter a voltage or a current for ${id} first.`); return; }
-      const done = [];
-      if(vRaw){
-        const v = readNum(`#psuv_${CSS.escape(id)}`, `${id} voltage`);
-        if(v === null) return;
-        await post(`/api/supply/${id}/voltage`, {volts: v});
-        done.push(`${v} V`);
-      }
-      if(iRaw){
-        const a = readNum(`#psui_${CSS.escape(id)}`, `${id} current`);
-        if(a === null) return;
-        await post(`/api/supply/${id}/current`, {amps: a});
-        done.push(`${a} A`);
-      }
-      toast(`${id} set to ${done.join(" · ")}`, true);
-    } else if(b.dataset.act === "psuout"){
-      /* Turning an output ON is the one click here that energises something,
-         so it asks first. Turning off never does. */
-      const on = b.dataset.state !== "1";
-      if(on && !confirm(`Turn ON the ${id} output?
-
-`
-          + `It will source at whatever this supply's setpoints currently are.`))
-        return;
-      await post(`/api/supply/${id}/output`, {on});
-      toast(`${id} output ${on ? "ON" : "off"}`, true);
-    }
-  }catch(_){ /* toast already shown */ }
-});
-
-document.addEventListener("keydown", ev => {
-  if(ev.key !== "Enter") return;
-  const input = ev.target.closest('input[data-f="input"]');
-  if(!input) return;
-  const btn = input.parentElement.querySelector("button[data-act]");
-  if(btn && !btn.disabled) btn.click();
-});
-
-// Rename a valve / MFC / gauge (e.g. when swapping precursors). Display-only;
-// persisted server-side. Blank reverts to the reactor.yaml name.
-document.addEventListener("click", async ev => {
-  const b = ev.target.closest("button[data-rename]");
-  if(!b) return;
-  const kind = b.dataset.rename, id = b.dataset.id;
-  const tile = b.closest(".valve, .tile");
-  const cur = (tile && tile.querySelector('[data-f="label"],[data-f="name"]')
-                ?.textContent || "").trim();
-  const next = prompt(`Rename this ${kind} (blank = default name):`, cur);
-  if(next === null) return;                       // cancelled
-  try{
-    const r = await post("/api/label", {kind, id, label: next});
-    toast(`Renamed to "${r.label || "(default)"}"`, true);
-  }catch(_){ /* toast already shown */ }
-});
-
-// ALD run params: persist to localStorage, launch via /api/run/ald
-// Every p_* field persisted between sessions - run parameters plus the display
-// preferences that sit alongside them. What actually gets sent to the server is
-// runParams(), not this list.
-const ALD_KEYS = ["cycles","dose_pressure_torr","dose_s","pump_a_s","beam_s",
-  "pump_b_s","min_current_ua","sample_bias_v","sample_bias_polarity",
-  "fill_pulse_on_s","fill_pulse_off_s","tolerance_pct",
-  "reignite_pulse_s","reignite_settle_s","ar_close_delay_s",
-  "pre_ar_sccm","pre_valve_delay_s","pre_hold_s",
-  "gas_overlap_s","smooth_on","smooth_n",
-  "h2_gas_enable","h2_gas_order","h2_gas_pct","h2_gas_flow_sccm",
-  "n2_gas_enable","n2_gas_order","n2_gas_pct","n2_gas_flow_sccm"];
-
-/* EE-ALD vs EE-CVD. EE-CVD holds the beam on for the whole run, so it has no
-   beam-exposure or pump-B parameter and only two cycle phases. Elements tagged
-   data-mode="<mode>" are shown only in that mode. */
-function runMode(){ return $("modeSel").value === "cvd" ? "cvd" : "ald"; }
-function applyMode(){
-  const m = runMode();
-  for(const el of document.querySelectorAll("[data-mode]"))
-    cls(el, "hidden", el.dataset.mode !== m);
-  $("runTitle").textContent = m === "cvd" ? "EE-CVD run" : "EE-ALD run";
-  $("gasWindowWord").textContent = m === "cvd" ? "cycle" : "exposure";
-  localStorage.setItem("runMode", m);
-  updateGasSchedHint();
-}
-
-function updateSmoothHint(){
-  const sm = smoothing();
-  const el = $("smoothHint");
-  el.textContent = sm.on
-    ? `${sm.n}-point centred average on chamber pressure (~${(sm.n/5).toFixed(1)} s)`
-    : "off — chamber pressure drawn raw";
-  el.style.color = sm.on ? "var(--accent)" : "var(--dim)";
-}
-function paramGet(k){
-  const el = $("p_"+k);
-  return el ? (el.type === "checkbox" ? el.checked : el.value) : undefined;
-}
-function paramSet(k, v){
-  const el = $("p_"+k);
-  if(!el) return;
-  if(el.type === "checkbox") el.checked = !!v; else el.value = v;
-}
-/* Run parameters are owned by the SERVER, with localStorage as a per-browser
-   cache. They used to be localStorage-only, so every machine had its own set
-   and a Tailscale view showed defaults instead of what the reactor PC had
-   configured. One reactor, one set of parameters.
-
-   Load order: local cache first (instant, and works if the server is
-   unreachable), then the server's copy on top of it. */
-async function loadParams(){
-  try{
-    const p = JSON.parse(localStorage.getItem("aldParams")||"{}");
-    for(const k of ALD_KEYS) if(p[k]!=null) paramSet(k, p[k]);
-  }catch(_){}
-  try{
-    const r = await fetch("/api/run_params");
-    if(r.ok){
-      const p = (await r.json()).params || {};
-      for(const k of ALD_KEYS) if(p[k]!=null) paramSet(k, p[k]);
-      // Mirror the server's copy locally so the next load starts from it.
-      if(Object.keys(p).length) localStorage.setItem("aldParams", JSON.stringify(p));
-    }
-  }catch(_){ /* server copy unavailable - the cache above already applied */ }
-  updateReigniteHint();
-  updateGasSchedHint();
-  updateSmoothHint();
-}
-
-let saveParamsTimer = null;
-function saveParams(){
-  const p={}; for(const k of ALD_KEYS) p[k]=paramGet(k);
-  localStorage.setItem("aldParams", JSON.stringify(p));
-  /* Debounced: saveParams() fires on every keystroke in the params grid, and
-     one POST per character would be silly. Fire-and-forget - a failed save
-     leaves the local cache correct and is not worth interrupting the operator
-     over. */
-  clearTimeout(saveParamsTimer);
-  saveParamsTimer = setTimeout(() => {
-    fetch("/api/run_params", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(p)
-    }).catch(() => {});
-  }, 800);
-}
-
-/* Run name. Deliberately NOT persisted in localStorage with the other params:
-   it is owned by the server, which records the name of each run as it actually
-   starts, so the sequence follows real runs and is the same on every browser
-   that connects. `force` overwrites whatever is in the box (used after a run
-   starts, when the old name has just been consumed); otherwise a name the
-   operator has typed is left alone. */
-let suggestedRunName = "";
-async function refreshRunName(force){
-  try{
-    const r = await fetch("/api/run/next-name");
-    if(!r.ok) return;
-    const d = await r.json();
-    const el = $("p_run_name");
-    const untouched = !el.value.trim() || el.value.trim() === suggestedRunName;
-    suggestedRunName = d.suggested || "";
-    if(force || untouched) el.value = suggestedRunName;
-  }catch(_){ /* naming is a convenience; a failed fetch must not block a run */ }
-}
-// Shows the achieved retry rate so it's obvious whether the two fields above
-// meet "at least twice a second" without doing the arithmetic by hand. A full
-// attempt is the 0.2s current-check poll plus these two, not just the two.
-// It sits in the collapsed section's summary so it stays readable when the
-// advanced fields are folded away.
-const REIGNITE_POLL_S = 0.2;
-function updateReigniteHint(){
-  const pulse = parseFloat($("p_reignite_pulse_s").value)||0;
-  const settle = parseFloat($("p_reignite_settle_s").value)||0;
-  const total = REIGNITE_POLL_S + pulse + settle;
-  const hz = total > 0 ? 1/total : Infinity;
-  const el = $("reigniteHint");
-  el.textContent = `reignite ${total.toFixed(2)}s/attempt = ${hz.toFixed(1)}/s`
-    + (hz < 2 ? "  (slower than 2/s)" : "");
-  el.style.color = hz < 2 ? "var(--warn)" : "var(--dim)";
-}
-// Live plain-English timeline for the gas schedule, mirroring exactly what
-// RecipeRunner._electron_beam computes at run time (see recipe.py) - and
-// flags the same order collision the server will otherwise reject with a 409.
-function readGasField(id){
-  return {
-    id, enable: $("p_"+id+"_gas_enable").checked,
-    order: $("p_"+id+"_gas_order").value,
-    pct: parseFloat($("p_"+id+"_gas_pct").value) || 0,
-    flow: parseFloat($("p_"+id+"_gas_flow_sccm").value) || 0,
-  };
-}
-function updateGasSchedHint(){
-  // EE-ALD measures against the beam exposure and reports offsets from beam
-  // start; EE-CVD measures against the whole cycle (dose + pump A) and reports
-  // offsets from cycle start. Mirrors _electron_beam and _beam_watch in
-  // recipe.py respectively.
-  const cvd = runMode() === "cvd";
-  const span = cvd
-    ? (parseFloat($("p_dose_s").value) || 0) + (parseFloat($("p_pump_a_s").value) || 0)
-    : (parseFloat($("p_beam_s").value) || 0);
-  const anchor = cvd ? "cycle" : "beam";
-  const ov = parseFloat($("p_gas_overlap_s").value) || 0;
-  const gases = ["h2","n2"].map(readGasField).filter(g => g.enable);
-  const first = gases.find(g => g.order === "first");
-  const second = gases.find(g => g.order === "second");
-  const collision = gases.filter(g=>g.order==="first").length > 1
-                  || gases.filter(g=>g.order==="second").length > 1;
-  const handoff = first ? first.pct/100*span : 0;
-  const secondOff = Math.min(span, handoff + (second ? second.pct/100*span : 0));
-  const lines = [];
-  if(first){
-    // EE-CVD has no run-up before a cycle, so "first" re-arms by the overlap
-    // before the cycle ends instead — the same handoff, wrapped.
-    const on = cvd
-      ? `on ${anchor}+0s (re-arms +${Math.max(0, secondOff-ov).toFixed(2)}s)`
-      : `on ${anchor}−${ov.toFixed(2)}s`;
-    lines.push(`${first.id.toUpperCase()} ${on}`
-      + ` · off ${anchor}+${handoff.toFixed(2)}s (${first.pct}% @ ${first.flow}sccm)`);
-  }
-  if(second){
-    const onAt = Math.max(0, handoff - ov);
-    lines.push(`${second.id.toUpperCase()} on ${anchor}+${onAt.toFixed(2)}s`
-      + ` · off ${anchor}+${secondOff.toFixed(2)}s (${second.pct}% @ ${second.flow}sccm)`);
-  }
-  const el = $("gasSchedHint");
-  el.textContent = collision
-    ? "Both gases set to the same order — pick First for one, Second for the other."
-    : (gases.length ? lines.join("   ") : "no gas scheduled — H2/N2 stay off all run");
-  el.style.color = collision ? "var(--warn)" : "var(--dim)";
-}
-$("aldParams").addEventListener("input", () => { saveParams(); updateReigniteHint(); updateGasSchedHint(); });
-$("gasSchedSection").addEventListener("input", () => { saveParams(); updateGasSchedHint(); });
-$("gasSchedSection").addEventListener("change", () => { saveParams(); updateGasSchedHint(); });
-$("advSection").addEventListener("input", () => { saveParams(); updateReigniteHint(); });
-$("preSection").addEventListener("input", saveParams);
-$("modeSel").onchange = applyMode;
-// The toggle lives in the <summary> so it stays reachable while collapsed, so
-// its clicks must not also open/close the panel.
-$("p_smooth_on").addEventListener("click", e => e.stopPropagation());
-$("smoothSection").addEventListener("input", () => {
-  saveParams(); updateSmoothHint(); drawChart();
-});
-
-/** Everything the run builders accept, for whichever mode is selected. */
-function runParams(){
-  const P = k => parseFloat($("p_"+k).value);
-  const cvd = runMode() === "cvd";
-  const params = {
-    cycles: parseInt($("p_cycles").value,10)||1,
-    dose_pressure_torr: P("dose_pressure_torr"),
-    dose_s: P("dose_s"), pump_a_s: P("pump_a_s"),
-    min_current_a: (P("min_current_ua")||500)*1e-6,
-    // Magnitude and lead orientation. The supply is single-quadrant, so the
-    // sign only ever reaches the LOG, never the instrument - see
-    // Supervisor.supplies_output_on.
-    sample_bias_v: Math.abs(P("sample_bias_v") || 0),
-    sample_bias_polarity: parseInt($("p_sample_bias_polarity").value, 10) || 1,
-    fill_pulse_on_s: P("fill_pulse_on_s"), fill_pulse_off_s: P("fill_pulse_off_s"),
-    tolerance_frac: (P("tolerance_pct")||20)/100,
-    reignite_pulse_s: P("reignite_pulse_s"), reignite_settle_s: P("reignite_settle_s"),
-    ar_close_delay_s: P("ar_close_delay_s"),
-    run_name: ($("p_run_name").value || "").trim(),
-  };
-  if(!cvd){ params.beam_s = P("beam_s"); params.pump_b_s = P("pump_b_s"); }
-  params.gas_overlap_s = P("gas_overlap_s") || 0;
-  for(const gas of ["h2","n2"]){
-    const g = readGasField(gas);
-    params[gas+"_gas_enable"] = g.enable;
-    params[gas+"_gas_order"] = g.order;
-    params[gas+"_gas_pct"] = g.pct;
-    params[gas+"_gas_flow_sccm"] = g.flow;
-  }
-  return params;
-}
 
 $("aldStart").onclick = async () => {
-  saveParams();
-  const cvd = runMode() === "cvd";
-  const params = runParams();
+  runForms.saveParams();
+  const cvd = runForms.runMode() === "cvd";
+  const params = runForms.runParams();
   const what = cvd
     ? `This doses precursor every cycle with the electron beam held on for the `
       + `whole run.`
@@ -1404,7 +793,7 @@ $("aldStart").onclick = async () => {
   try{
     await post(cvd ? "/api/run/cvd" : "/api/run/ald", params);
     iStartedThisRun = true;       // so only this browser saves the CSV at the end
-    await refreshRunName(true);   // this name is now used; offer the next one
+    await runForms.refreshRunName(true); // this name is now used; offer the next one
   }catch(_){}
 };
 
@@ -1412,7 +801,7 @@ $("aldStart").onclick = async () => {
 // the three valves have to be in REMOTE and the supplies on, or the sequence
 // commands hardware that cannot respond.
 $("preStartBtn").onclick = async () => {
-  saveParams();
+  runForms.saveParams();
   // The bias is the one output here that energises the sample, so the dialog
   // states it explicitly rather than leaving the operator to remember what is
   // in the field.
@@ -1429,7 +818,7 @@ $("preStartBtn").onclick = async () => {
     + "it. It retries the strike until you press Stop pre-start.\n\n"
     + biasLine)) return;
   const P = k => parseFloat($("p_"+k).value);
-  const p = runParams();
+  const p = runForms.runParams();
   try{
     await post("/api/prestart/start", {
       ar_sccm: P("pre_ar_sccm"),
@@ -1526,14 +915,40 @@ $("logStart").onclick  = () => post("/api/log/start", {label: $("logLabel").valu
 $("logStop").onclick   = () => post("/api/log/stop");
 
 // ---------------------------------------------------------------- bootstrap
+let pageDisposed = false;
+let pageVisible = true;
+let bootstrapComplete = false;
 (async () => {
   try{ CFG = await (await fetch("/api/config")).json(); }catch(_){ CFG = {}; }
-  $("modeSel").value = localStorage.getItem("runMode") || "ald";
-  await loadParams();
-  applyMode();
-  refreshRunName(false);
+  if(pageDisposed) return;
+  devicePanels.mount();
+  runForms.mount();
+  await runForms.loadParams();
+  if(pageDisposed) return;
+  runForms.applyMode();
+  runForms.refreshRunName(false);
   $("shutdownHint").textContent = SHUTDOWN_HINT;
   await seedTrend();
+  if(pageDisposed) return;
   await seedEvents();
-  connect();
+  if(pageDisposed) return;
+  bootstrapComplete = true;
+  if(pageVisible) resumeTransport();
 })();
+
+window.addEventListener("pagehide", event => {
+  pageVisible = false;
+  if(event.persisted){
+    suspendTransport();
+    return;
+  }
+  pageDisposed = true;
+  devicePanels.dispose();
+  runForms.dispose();
+  disposeTransport();
+});
+window.addEventListener("pageshow", event => {
+  if(!event.persisted || pageDisposed) return;
+  pageVisible = true;
+  resumeTransport(bootstrapComplete);
+});

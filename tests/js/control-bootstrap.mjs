@@ -11,6 +11,7 @@ function element(tag, attrs = '') {
     clientWidth: 0, clientHeight: 0, classList: {toggle() {}, add() {}, remove() {}},
     style: {setProperty() {}},
     addEventListener(name, fn) {this.events[name] = fn;},
+    removeEventListener(name) {delete this.events[name];},
     querySelectorAll() {return [];}, querySelector() {return null;},
     appendChild() {}, setAttribute() {}, getBoundingClientRect() {return {left: 0};},
   };
@@ -20,10 +21,11 @@ for (const match of html.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
 }
 globalThis.document = {
   getElementById: id => elements.get(id) || null,
-  querySelectorAll: () => [], addEventListener() {},
+  querySelectorAll: () => [], addEventListener() {}, removeEventListener() {},
   createElement: tag => element(tag), documentElement: element('html'),
 };
-globalThis.window = {addEventListener() {}, devicePixelRatio: 1};
+const windowEvents = {};
+globalThis.window = {addEventListener(name, fn) {windowEvents[name] = fn;}, devicePixelRatio: 1};
 globalThis.location = {protocol: 'https:', host: 'reactor.test'};
 const stored = new Map();
 globalThis.localStorage = {getItem: k => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v)};
@@ -32,12 +34,25 @@ globalThis.fetch = async url => {
   requested.push(url);
   return {ok: true, json: async () => ({params: {}, samples: [], events: []})};
 };
-let connected = null;
-globalThis.WebSocket = class {constructor(url) {connected = url;}};
+const sockets = [];
+globalThis.WebSocket = class {
+  constructor(url) {this.url = url; sockets.push(this);}
+  close() {this.closed = true;}
+};
 await import('../../reactor/server/static/control.js');
 await new Promise(resolve => setTimeout(resolve, 20));
-assert.equal(connected, 'wss://reactor.test/ws', 'bootstrap reaches secure telemetry connection');
+assert.equal(sockets[0].url, 'wss://reactor.test/ws', 'bootstrap reaches secure telemetry connection');
 assert.ok(requested.includes('/api/run_params'), 'server settings loaded');
 assert.ok(requested.includes('/api/events'), 'event history loaded');
 assert.match(elements.get('smoothHint').textContent, /off/, 'page reads extracted chart settings during bootstrap');
-console.log('PASS control-page module bootstrap, shared settings, chart integration and HTTPS WebSocket');
+const formHandler = elements.get('aldParams').events.input;
+windowEvents.pagehide({persisted:true});
+assert.equal(sockets[0].closed, true, 'cached navigation suspends telemetry');
+windowEvents.pageshow({persisted:true});
+assert.equal(sockets.length, 2, 'back-forward cache restore reconnects telemetry');
+assert.equal(elements.get('aldParams').events.input, formHandler,
+  'cached navigation preserves the mounted form handlers');
+windowEvents.pagehide({persisted:false});
+windowEvents.pageshow({persisted:true});
+assert.equal(sockets.length, 2, 'permanently disposed page cannot reconnect');
+console.log('PASS control bootstrap, settings, chart integration and cached-page reconnect');

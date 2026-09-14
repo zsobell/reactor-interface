@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
-import time
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +43,7 @@ class Telemetry:
 
     def state(self) -> dict[str, Any]:
         return copy.deepcopy({
-            "t": time.time(),
+            "t": self.sup.clock.wall(),
             "site": self.sup.cfg.site.name,
             "cycle_count": self.sup._cycle_count,
             "loop_hz": self.sup.cfg.site.loop_hz,
@@ -110,9 +109,9 @@ class Telemetry:
             "power_supplies": [p.status() for p in self.sup.supplies.values()],
             "regulator": self.sup.regulator,
             "prestart": self.sup.prestart,
-            "marks": [m for m in self.sup.marks if time.time() - m["t"] <= 900][-500:],
-            "run_valves": {"dose": self.sup._run_dose_valve,
-                           "plasma": self.sup._run_plasma_switch},
+            "marks": [m for m in self.sup.marks if self.sup.clock.wall() - m["t"] <= 900][-500:],
+            "run_valves": {"dose": self.sup.runs.session.dose_valve,
+                           "plasma": self.sup.runs.session.plasma_switch},
             "valve_id": {
                 **self.sup.sweep,
                 "groups": self.groups,

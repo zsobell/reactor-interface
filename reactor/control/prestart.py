@@ -5,20 +5,24 @@ only its task, parameters and progress; it does not own device connections.
 """
 from __future__ import annotations
 
+from .contracts import PrestartHost
+from .clock import Clock
+from .parameters import PrestartParameters
+
 import asyncio
 import contextlib
-import time
 
 
 class PrestartController:
-    def __init__(self, supervisor):
+    def __init__(self, supervisor: PrestartHost, *, clock: Clock | None = None):
+        self.clock = clock or Clock()
         self.sup = supervisor
         self.state = {"running": False}
         self.params = {}
         self.task = None
         self.stop_event = asyncio.Event()
 
-    async def start(self, params: dict) -> None:
+    async def start(self, params: dict | PrestartParameters) -> None:
         """Bring the tool up to a struck, primed, beam-off state.
 
         Exactly the sequence the operator specified (2026-08-05):
@@ -34,20 +38,21 @@ class PrestartController:
         """
         if self.state.get("running"):
             raise RuntimeError("pre-start is already running")
-        if self.sup.recipes.busy or self.sup._run_start_lock.locked():
+        if self.sup.run_in_progress:
             raise RuntimeError("a run is in progress - abort it first")
 
         self.stop_event.clear()
         # Kept so abort_prestart can undo exactly what this sequence turned on,
         # rather than guessing at the default valve/MFC ids.
-        self.params = dict(params)
+        params = PrestartParameters.normalize(params)
+        self.params = params.raw
         self.state = {
             "running": True, "phase": "starting", "lit": False,
             "current": None, "held_s": 0.0, "hold_target_s": 0.0, "strikes": 0,
         }
         self.task = asyncio.create_task(
             self._run(params), name="prestart")
-        self.sup._event("recipe", "pre-start sequence started")
+        self.sup.report_event("recipe", "pre-start sequence started")
 
     async def stop(self) -> None:
         if self.task is not None and not self.task.done():
@@ -58,7 +63,7 @@ class PrestartController:
                 self.task.cancel()
         self.task = None
         if self.state.get("running"):
-            self.sup._event("recipe", "pre-start stopped by operator")
+            self.sup.report_event("recipe", "pre-start stopped by operator")
         # _run_prestart's own finally already set running=False/done/phase/
         # strikes in place by the time the wait above returns - merge, don't
         # replace, or an operator-initiated stop always reports back as bare
@@ -124,24 +129,24 @@ class PrestartController:
         self.state["phase"] = ("aborted - Ar and fill off, relay at rest, "
                                   "HV off, DC supplies off")
         if errors:
-            self.sup._event("error", "pre-start abort: " + "; ".join(errors))
+            self.sup.report_event("error", "pre-start abort: " + "; ".join(errors))
         else:
-            self.sup._event("recipe", "pre-start aborted: Ar off, fill off, "
+            self.sup.report_event("recipe", "pre-start aborted: Ar off, fill off, "
                                   "beam relay de-energised, HV off, "
                                   "DC supply outputs off")
 
-    async def _run(self, p: dict) -> None:
-        g = lambda k, d: p.get(k, d)  # noqa: E731
-        ar_valve = g("ar_valve", "ar_pneumatic")
-        ar_mfc = g("ar_mfc", "ar")
-        ar_sccm = float(g("ar_sccm", 4.0))
-        valve_delay_s = float(g("valve_delay_s", 1.0))
-        hold_s = float(g("hold_s", 5.0))
-        switch = g("plasma_switch", "plasma_ground")
-        ammeter = g("ammeter", "inst.ammeter")
-        min_current = float(g("min_current_a", 5.0e-4))
-        pulse_s = float(g("reignite_pulse_s", 0.10))
-        settle_s = float(g("reignite_settle_s", 0.15))
+    async def _run(self, p: PrestartParameters) -> None:
+        try:
+            opening = p.opening()  # no hardware command has been issued yet
+        except Exception as exc:
+            self.state.update(running=False, done=False, phase=f"error: {exc}")
+            self.sup.report_event("error", f"pre-start failed: {exc}")
+            return
+        ar_valve, ar_mfc, ar_sccm = opening.ar_valve, opening.ar_mfc, opening.ar_sccm
+        valve_delay_s, hold_s = opening.valve_delay_s, opening.hold_s
+        switch, ammeter = opening.beam.switch, opening.beam.ammeter
+        min_current = opening.beam.min_current
+        pulse_s, settle_s = opening.beam.pulse_s, opening.beam.settle_s
 
         async def nap(dur: float) -> bool:      # True if asked to stop
             try:
@@ -162,9 +167,10 @@ class PrestartController:
             # These stay on for the whole run and are never cycled with the
             # beam - see supplies_output_on.
             phase("switching on DC supplies")
+            supplies = p.supplies()
             await self.sup.supplies_output_on(
-                sample_bias_v=float(g("sample_bias_v", 0.0)),
-                polarity=int(g("sample_bias_polarity", 1)),
+                sample_bias_v=supplies.sample_bias_v,
+                polarity=supplies.polarity,
                 reason="pre-start")
 
             phase("opening Ar isolation valve")
@@ -176,13 +182,14 @@ class PrestartController:
             await self.sup.set_mfc_setpoint(ar_mfc, ar_sccm)
 
             phase("starting precursor fill pulse")
+            fill = p.fill()
             await self.sup.start_fill_regulation(
-                valve=g("fill_valve", "rpm_top"),
-                gauge=g("gauge", "gauge.prec1_dose"),
-                target_torr=float(g("dose_pressure_torr", 0.02)),
-                pulse_on_s=float(g("fill_pulse_on_s", 0.10)),
-                pulse_off_s=float(g("fill_pulse_off_s", 0.30)),
-                tolerance_frac=float(g("tolerance_frac", 0.20)),
+                valve=fill.valve,
+                gauge=fill.gauge,
+                target_torr=fill.target_torr,
+                pulse_on_s=fill.pulse_on_s,
+                pulse_off_s=fill.pulse_off_s,
+                tolerance_frac=fill.tolerance_frac,
             )
 
             # Strike, then hold. A drop-out during the hold sends it straight
@@ -195,10 +202,10 @@ class PrestartController:
 
             held = 0.0
             while not self.stop_event.is_set():
-                t0 = time.time()
+                t0 = self.clock.elapsed()
                 if await nap(0.2):
                     return
-                dt = time.time() - t0
+                dt = self.clock.elapsed() - t0
                 cur = self.sup.snapshot.get(ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= min_current
                 self.state["current"] = (
@@ -207,7 +214,7 @@ class PrestartController:
 
                 if not lit:
                     if held > 0.0:
-                        self.sup._event("flag", "pre-start: plasma dropped out, restriking")
+                        self.sup.report_event("flag", "pre-start: plasma dropped out, restriking")
                     held = 0.0
                     self.state["held_s"] = 0.0
                     phase("striking plasma")
@@ -230,12 +237,12 @@ class PrestartController:
 
             if struck:
                 phase("done - beam grounded, Ar and fill running")
-                self.sup._event("recipe",
+                self.sup.report_event("recipe",
                             "pre-start complete: plasma struck and held "
                             f"{hold_s:g} s, beam grounded")
         except Exception as exc:
             self.state["phase"] = f"error: {exc}"
-            self.sup._event("error", f"pre-start failed: {exc}")
+            self.sup.report_event("error", f"pre-start failed: {exc}")
         finally:
             # The sequence's declared end state is beam OFF, and that applies
             # however it ends - including an operator stop mid-strike.
@@ -243,4 +250,3 @@ class PrestartController:
                 await self.sup.set_valve(switch, True, reason="pre-start end - beam off")
             self.state["running"] = False
             self.state["done"] = struck
-

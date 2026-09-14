@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 import yaml
+
+from .parameters import GAS_SCHEDULE_MFCS, GasParameters, RunParameters
 from pydantic import BaseModel, Field
 
 class Step(BaseModel):
@@ -152,22 +154,13 @@ BEAM_TICK_S = 0.2
 #: MFCs eligible for beam-proximal gas scheduling. Ar is excluded - it's
 #: regulated separately (see the isolation-valve interlock), not gated to the
 #: beam exposure.
-GAS_SCHEDULE_MFCS = ("h2", "n2")
 
 
-def _build_gas_schedules(p: dict) -> list[GasSchedule]:
-    schedules = []
-    for mfc in GAS_SCHEDULE_MFCS:
-        if not p.get(f"{mfc}_gas_enable"):
-            continue
-        order = p.get(f"{mfc}_gas_order", "first")
-        if order not in ("first", "second"):
-            raise ValueError(f"{mfc}: gas order must be 'first' or 'second'")
-        schedules.append(GasSchedule(
-            mfc=mfc, order=order,
-            pct=float(p.get(f"{mfc}_gas_pct", 100.0)),
-            flow_sccm=float(p.get(f"{mfc}_gas_flow_sccm", 0.0)),
-        ))
+
+def _build_gas_schedules(p: dict | RunParameters) -> list[GasSchedule]:
+    gases = p.gases if isinstance(p, RunParameters) else GasParameters.enabled(p)
+    schedules = [GasSchedule(mfc=g.mfc, order=g.order, pct=g.pct, flow_sccm=g.flow_sccm)
+                 for g in gases]
 
     for order in ("first", "second"):
         n = sum(1 for s in schedules if s.order == order)
@@ -179,7 +172,7 @@ def _build_gas_schedules(p: dict) -> list[GasSchedule]:
     return schedules
 
 
-def build_ald_recipe(p: dict) -> Recipe:
+def build_ald_recipe(p: dict | RunParameters) -> Recipe:
     """Build an e-beam ALD recipe from UI parameters (no YAML file).
 
     Keys (all optional, with defaults): cycles, dose_s, pump_a_s, beam_s,
@@ -189,45 +182,42 @@ def build_ald_recipe(p: dict) -> Recipe:
     GAS_SCHEDULE_MFCS: {gas}_gas_enable, {gas}_gas_order, {gas}_gas_pct,
     {gas}_gas_flow_sccm, plus the shared gas_overlap_s - see GasSchedule.
     """
-    g = lambda k, d: p.get(k, d)  # noqa: E731
-    fill_valve = g("fill_valve", "rpm_top")
-    dose_valve = g("dose_valve", "prec1")
-    plasma = g("plasma_switch", "plasma_ground")
-    gauge = g("gauge", "gauge.prec1_dose")
-    ammeter = g("ammeter", "inst.ammeter")
+    p = RunParameters.normalize(p, mode="ald")
+    fill_valve, dose_valve = p.fill.valve, p.dose_valve
+    plasma, gauge, ammeter = p.beam.switch, p.fill.gauge, p.beam.ammeter
     gas_schedules = _build_gas_schedules(p)
 
     return Recipe(
-        name=g("name", "ALD + e-beam (precursor 1)"),
-        cycles=int(g("cycles", 100)),
+        name=p.name,
+        cycles=p.cycles,
         setup=[
             Step(op="valve", valve=plasma, state=True),   # beam off to start
             Step(op="start_fill", valve=fill_valve, gauge=gauge,
-                 target_torr=float(g("dose_pressure_torr", 0.02)),
-                 pulse_on_s=float(g("fill_pulse_on_s", 0.10)),
-                 pulse_off_s=float(g("fill_pulse_off_s", 0.30)),
-                 tolerance_frac=float(g("tolerance_frac", 0.20))),
+                 target_torr=p.fill.target_torr,
+                 pulse_on_s=p.fill.pulse_on_s,
+                 pulse_off_s=p.fill.pulse_off_s,
+                 tolerance_frac=p.fill.tolerance_frac),
             # Scheduled gases start OFF - they only turn on proximal to the
             # beam exposure, never for the whole run.
             *[Step(op="set_flow", mfc=gs.mfc, sccm=0.0) for gs in gas_schedules],
         ],
         steps=[
-            Step(op="dose", valve=dose_valve, seconds=float(g("dose_s", 0.05))),
-            Step(op="wait", seconds=float(g("pump_a_s", 10.0))),
+            Step(op="dose", valve=dose_valve, seconds=p.dose_s),
+            Step(op="wait", seconds=p.pump_a_s),
             Step(op="electron_beam", switch=plasma, ammeter=ammeter,
-                 min_current=float(g("min_current_a", 5.0e-4)),
-                 seconds=float(g("beam_s", 5.0)),
-                 reignite_pulse_s=float(g("reignite_pulse_s", 0.10)),
-                 reignite_settle_s=float(g("reignite_settle_s", 0.15))),
-            Step(op="wait", seconds=float(g("pump_b_s", 10.0))),
+                 min_current=p.beam.min_current,
+                 seconds=p.beam_s,
+                 reignite_pulse_s=p.beam.pulse_s,
+                 reignite_settle_s=p.beam.settle_s),
+            Step(op="wait", seconds=p.pump_b_s),
         ],
-        teardown=_end_of_run(g, plasma),
+        teardown=_end_of_run(p, plasma),
         gas_schedules=gas_schedules,
-        gas_overlap_s=float(g("gas_overlap_s", 0.0)),
+        gas_overlap_s=p.gas_overlap_s,
     )
 
 
-def _end_of_run(g, plasma: str) -> list[Step]:
+def _end_of_run(p: RunParameters, plasma: str) -> list[Step]:
     """The operator's end-of-run sequence, shared by EE-ALD and EE-CVD.
 
     Requested behaviour, in this order: zero the Ar setpoint, hold the Ar
@@ -246,15 +236,15 @@ def _end_of_run(g, plasma: str) -> list[Step]:
     already cleared `_beam_switch`, which the EE-CVD teardown does first.
     """
     return [
-        Step(op="set_flow", mfc=g("ar_mfc", "ar"), sccm=0.0),
-        Step(op="wait", seconds=float(g("ar_close_delay_s", 10.0))),
-        Step(op="valve", valve=g("ar_valve", "ar_pneumatic"), state=False),
+        Step(op="set_flow", mfc=p.ar_mfc, sccm=0.0),
+        Step(op="wait", seconds=p.ar_close_delay_s),
+        Step(op="valve", valve=p.ar_valve, state=False),
         Step(op="valve", valve=plasma, state=False),   # beam ON mode
         Step(op="message", text="run complete"),
     ]
 
 
-def build_cvd_recipe(p: dict) -> Recipe:
+def build_cvd_recipe(p: dict | RunParameters) -> Recipe:
     """Build an electron-enhanced CVD run from UI parameters (no YAML file).
 
     Same parameters as build_ald_recipe minus beam_s and pump_b_s, which do not
@@ -274,47 +264,44 @@ def build_cvd_recipe(p: dict) -> Recipe:
       chamber; the pulse runs on wall clock and closes its valve on the way out
       whatever else is happening.
     """
-    g = lambda k, d: p.get(k, d)  # noqa: E731
-    fill_valve = g("fill_valve", "rpm_top")
-    dose_valve = g("dose_valve", "prec1")
-    plasma = g("plasma_switch", "plasma_ground")
-    gauge = g("gauge", "gauge.prec1_dose")
-    ammeter = g("ammeter", "inst.ammeter")
+    p = RunParameters.normalize(p, mode="cvd")
+    fill_valve, dose_valve = p.fill.valve, p.dose_valve
+    plasma, gauge, ammeter = p.beam.switch, p.fill.gauge, p.beam.ammeter
     gas_schedules = _build_gas_schedules(p)
 
     beam = dict(
         switch=plasma, ammeter=ammeter,
-        min_current=float(g("min_current_a", 5.0e-4)),
-        reignite_pulse_s=float(g("reignite_pulse_s", 0.10)),
-        reignite_settle_s=float(g("reignite_settle_s", 0.15)),
+        min_current=p.beam.min_current,
+        reignite_pulse_s=p.beam.pulse_s,
+        reignite_settle_s=p.beam.settle_s,
     )
     return Recipe(
-        name=g("name", "EE-CVD (precursor 1)"),
+        name=p.name,
         mode="cvd",
-        cycles=int(g("cycles", 100)),
+        cycles=p.cycles,
         setup=[
             Step(op="valve", valve=plasma, state=True),   # beam off to start
             Step(op="start_fill", valve=fill_valve, gauge=gauge,
-                 target_torr=float(g("dose_pressure_torr", 0.02)),
-                 pulse_on_s=float(g("fill_pulse_on_s", 0.10)),
-                 pulse_off_s=float(g("fill_pulse_off_s", 0.30)),
-                 tolerance_frac=float(g("tolerance_frac", 0.20))),
+                 target_torr=p.fill.target_torr,
+                 pulse_on_s=p.fill.pulse_on_s,
+                 pulse_off_s=p.fill.pulse_off_s,
+                 tolerance_frac=p.fill.tolerance_frac),
             *[Step(op="set_flow", mfc=gs.mfc, sccm=0.0) for gs in gas_schedules],
             # Beam on for the rest of the run, with the reignite watchdog.
             Step(op="beam_start", **beam),
         ],
         steps=[
             # Dose on wall clock - never gated (see the docstring).
-            Step(op="dose", valve=dose_valve, seconds=float(g("dose_s", 0.05))),
+            Step(op="dose", valve=dose_valve, seconds=p.dose_s),
             # Pump A freezes with the plasma, in lockstep with the gas clock.
-            Step(op="wait", seconds=float(g("pump_a_s", 10.0)), lit_gated=True),
+            Step(op="wait", seconds=p.pump_a_s, lit_gated=True),
         ],
         # beam_stop first: it kills the watchdog (and grounds the beam) so the
         # shared end-of-run sequence can leave the switch where the operator
         # wants it without the watchdog fighting it.
-        teardown=[Step(op="beam_stop", switch=plasma), *_end_of_run(g, plasma)],
+        teardown=[Step(op="beam_stop", switch=plasma), *_end_of_run(p, plasma)],
         gas_schedules=gas_schedules,
-        gas_overlap_s=float(g("gas_overlap_s", 0.0)),
+        gas_overlap_s=p.gas_overlap_s,
     )
 
 

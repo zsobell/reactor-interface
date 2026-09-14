@@ -3,23 +3,25 @@
 Recipes are YAML, not code, so changing a dose time is not a programming task.
 
 Timing runs on its own cooperative asyncio task. Timed waits use the event
-loop, while exposure/cycle bookkeeping also uses wall-clock measurements. The original program timed steps with a 1 s Express-VI delay inside
+loop, while exposure/cycle bookkeeping uses monotonic measurements. The original
+program timed steps with a 1 s Express-VI delay inside
 the same loop that redrew the front panel, so step length drifted whenever the UI
 got busy. Worker-based recording and analysis keep their disk waits off this event loop;
 other blocking work and scheduler jitter can still delay it.
 
-Honest limit: software timing on Windows has roughly 1-15 ms of jitter. Fine for
-doses of tens of milliseconds and up, and better than the original, but not
-deterministic. If you need tighter than ~10 ms, the answer is a hardware-timed
-DAQmx digital output task, which this structure can accommodate without changing
-the recipe format.
+Software timing is cooperative, with no verified upper bound on scheduling
+lateness. Duration accounting uses an injected monotonic clock; experiment
+labels use wall time. Physical deadlines require measured sensor/driver/actuator
+latency and suitable hardware, independently of this software model.
 """
 
 from __future__ import annotations
 
+from .contracts import RecipeHost
+from .clock import Clock
+
 import asyncio
 import contextlib
-import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -52,7 +54,9 @@ class RecipeProgress:
     step_total: int = 0
     step_op: str = ""
     step_desc: str = ""
-    step_started: float | None = None
+    step_started: float | None = None  # wall timestamp for compatibility
+    step_elapsed_started: float | None = None
+    clock: Clock = field(default_factory=Clock, repr=False, compare=False)
     step_duration: float | None = None
     started_at: float | None = None
     message: str = ""
@@ -95,8 +99,8 @@ class RecipeProgress:
         remaining = None
         if self.step_remaining_hint is not None:
             remaining = max(0.0, self.step_remaining_hint)
-        elif self.step_started and self.step_duration:
-            remaining = max(0.0, self.step_duration - (time.time() - self.step_started))
+        elif self.step_elapsed_started is not None and self.step_duration is not None:
+            remaining = max(0.0, self.step_duration - (self.clock.elapsed() - self.step_elapsed_started))
         return {
             "state": self.state,
             "recipe": self.recipe,
@@ -126,9 +130,10 @@ class RecipeRunner:
     every dose valve is commanded closed on the way out.
     """
 
-    def __init__(self, supervisor) -> None:
+    def __init__(self, supervisor: RecipeHost, *, clock: Clock | None = None) -> None:
+        self.clock = clock or Clock()
         self.sup = supervisor
-        self.progress = RecipeProgress()
+        self.progress = RecipeProgress(clock=self.clock)
         self._task: asyncio.Task | None = None
         self._pause = asyncio.Event()
         self._pause.set()               # set == not paused
@@ -153,12 +158,12 @@ class RecipeRunner:
         self._gas_on: dict[str, bool | None] = {"first": None, "second": None}
         self._gas_overlap_s = 0.0
         # Fractional-cycle bookkeeping for property-vs-cycle plotting. Progress
-        # through a cycle is wall time since the cycle began MINUS time spent
+        # through a cycle is elapsed time since the cycle began MINUS time spent
         # frozen (reignite or operator pause) - computable at any log instant,
         # and correct for both ALD (beam exposure freezes on a dead plasma) and
         # CVD (the lit-gated pump A freezes). Pauses are reference-counted so
         # overlapping reasons nest cleanly.
-        self._cycle_start_wall: float | None = None
+        self._cycle_start_elapsed: float | None = None
         self._cycle_paused_accum = 0.0
         self._pause_start: float | None = None
         self._pause_reasons: set[str] = set()
@@ -180,20 +185,20 @@ class RecipeRunner:
             self._pause_reasons.discard(reason)
         now_active = bool(self._pause_reasons)
         if now_active and not was:
-            self._pause_start = time.time()
+            self._pause_start = self.clock.elapsed()
         elif was and not now_active and self._pause_start is not None:
-            self._cycle_paused_accum += time.time() - self._pause_start
+            self._cycle_paused_accum += self.clock.elapsed() - self._pause_start
             self._pause_start = None
 
     def _begin_cycle_clock(self) -> None:
         """Reset the cycle-progress clock at the start of a cycle."""
-        self._cycle_start_wall = time.time()
+        self._cycle_start_elapsed = self.clock.elapsed()
         self._cycle_paused_accum = 0.0
-        self._pause_start = self._cycle_start_wall if self._pause_reasons else None
+        self._pause_start = self._cycle_start_elapsed if self._pause_reasons else None
 
     @property
     def cycle_paused(self) -> bool:
-        return bool(self._pause_reasons) and self._cycle_start_wall is not None
+        return bool(self._pause_reasons) and self._cycle_start_elapsed is not None
 
     @property
     def pause_reason(self) -> str:
@@ -212,17 +217,17 @@ class RecipeRunner:
         return ""
 
     def cycle_fraction(self, now: float | None = None) -> float | None:
-        """Fractional cycle number at `now`, or None outside the cycling phase.
+        """Fractional cycle number at elapsed-clock `now`, or None outside the cycling phase.
         Whole part = completed cycles; fraction = frozen-adjusted progress
         through the current cycle's predicted length (Recipe.cycle_seconds)."""
         if (self.progress.phase != "cycling" or self.progress.cycle <= 0
-                or self._cycle_len <= 0 or self._cycle_start_wall is None):
+                or self._cycle_len <= 0 or self._cycle_start_elapsed is None):
             return None
-        now = time.time() if now is None else now
+        now = self.clock.elapsed() if now is None else now
         paused = self._cycle_paused_accum
         if self._pause_start is not None:
             paused += now - self._pause_start
-        prog = max(0.0, (now - self._cycle_start_wall) - paused)
+        prog = max(0.0, (now - self._cycle_start_elapsed) - paused)
         # The actual cycle can run a little longer than its predicted length
         # (per-step overhead, reignites already removed above). Cap progress at
         # the predicted length so cycle N's samples stay in [N-1, N] and the
@@ -286,13 +291,14 @@ class RecipeRunner:
         self._gas_plan = None
         self._gas_on = {"first": None, "second": None}
         self._gas_overlap_s = recipe.gas_overlap_s
-        self._cycle_start_wall = None
+        self._cycle_start_elapsed = None
         self._cycle_paused_accum = 0.0
         self._pause_start = None
         self._pause_reasons = set()
         self.progress = RecipeProgress(
             state="running", recipe=recipe.name,
-            cycles_total=recipe.cycles, started_at=time.time() if started_at is None else started_at,
+            cycles_total=recipe.cycles, started_at=self.clock.wall() if started_at is None else started_at,
+            clock=self.clock,
         )
         self._task = asyncio.create_task(self._run(recipe), name="recipe")
 
@@ -358,7 +364,7 @@ class RecipeRunner:
                         self._fire_gas_lead(first_gas, delay), name="gas-lead-in"))
                 await self._run_steps(recipe.steps)
 
-            self._cycle_start_wall = None       # cycle progress stops after cycling
+            self._cycle_start_elapsed = None       # cycle progress stops after cycling
             if not self._abort.is_set():
                 self.progress.phase = "teardown"
                 await self._run_steps(recipe.teardown)
@@ -406,11 +412,13 @@ class RecipeRunner:
             self.progress.step_op = step.op
             self.progress.step_desc = step.describe()
             self.progress.step_duration = step.seconds
-            self.progress.step_started = time.time()
+            self.progress.step_started = self.clock.wall()
+            self.progress.step_elapsed_started = self.clock.elapsed()
             self.progress.step_remaining_hint = None
             await self._exec(step)
         self.progress.step_duration = None
         self.progress.step_started = None
+        self.progress.step_elapsed_started = None
 
     async def _exec(self, step: Step) -> None:
         sup = self.sup
@@ -487,7 +495,7 @@ class RecipeRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.sup._event("error", f"gas lead-in ({schedule.mfc}): {exc}")
+            self.sup.report_event("error", f"gas lead-in ({schedule.mfc}): {exc}")
 
     async def _electron_beam(self, step: Step) -> None:
         """Beam ON (plasma ground OFF), hold `seconds` of exposure with current.
@@ -532,8 +540,8 @@ class RecipeRunner:
         # for - 10.2 s of beam for a 10 s step, every cycle. It is now a grace
         # WINDOW inside the loop (the `t0 - strike_at` branch below): the same
         # protection from a premature reignite, but current that appears during
-        # it counts as the exposure it is, so `seconds` is honest wall time.
-        strike_at = time.time()
+        # it counts as exposure, so `seconds` includes that elapsed interval.
+        strike_at = self.clock.elapsed()
         try:
             if first is not None:
                 # Defensive re-assert: the lead-in task should already have
@@ -545,12 +553,12 @@ class RecipeRunner:
             remaining = total
             while remaining > 0 and not self._abort.is_set():
                 await self._pause.wait()
-                t0 = time.time()
+                t0 = self.clock.elapsed()
                 # Clamp the last tick to what is actually left. A fixed 0.2 s
                 # tick overshot the step by up to a full tick every time it ran
                 # (0.1 s on average), which across 150 cycles is minutes.
                 await asyncio.sleep(min(BEAM_TICK_S, remaining))
-                dt = time.time() - t0            # unaffected by pausing
+                dt = self.clock.elapsed() - t0            # unaffected by pausing
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
                 cur_val = float(cur) if isinstance(cur, (int, float)) else None
@@ -574,7 +582,7 @@ class RecipeRunner:
                     continue
                 else:
                     self.progress.message = "plasma out - reigniting"
-                    sup._event("flag", "plasma extinguished during beam - reigniting")
+                    sup.report_event("flag", "plasma extinguished during beam - reigniting")
                     await self._reignite(step)
                     continue    # consumed (below) is unchanged - gas state can't have crossed
 
@@ -662,7 +670,7 @@ class RecipeRunner:
         try:
             await self.sup.set_mfc_setpoint(schedule.mfc, sccm)
         except Exception as exc:
-            self.sup._event("error", f"gas schedule ({schedule.mfc}): {exc}")
+            self.sup.report_event("error", f"gas schedule ({schedule.mfc}): {exc}")
 
     async def _apply_cvd_gas(self, in_cycle: float) -> None:
         """Drive both scheduled gases to the state `in_cycle` calls for.
@@ -745,9 +753,9 @@ class RecipeRunner:
         try:
             while True:
                 await self._pause.wait()
-                t0 = time.time()
+                t0 = self.clock.elapsed()
                 await asyncio.sleep(BEAM_TICK_S)
-                dt = time.time() - t0
+                dt = self.clock.elapsed() - t0
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
                 self.progress.beam = {
@@ -763,7 +771,7 @@ class RecipeRunner:
                     self._lit_s += dt
                 else:
                     self.progress.message = "plasma out - reigniting"
-                    sup._event("flag", "plasma extinguished during EE-CVD - reigniting")
+                    sup.report_event("flag", "plasma extinguished during EE-CVD - reigniting")
 
                 # The cycle clock tracks whatever the running step's own clock
                 # is doing: always during an ungated step (the dose), only while
@@ -795,8 +803,8 @@ class RecipeRunner:
     async def _wait_for_pressure(self, step: Step) -> None:
         if step.below_torr is None and step.above_torr is None:
             raise ValueError("wait_for_pressure needs 'below_torr' or 'above_torr'")
-        deadline = time.time() + step.timeout_s
-        while time.time() < deadline:
+        deadline = self.clock.elapsed() + step.timeout_s
+        while self.clock.elapsed() < deadline:
             if self._abort.is_set():
                 return
             await self._pause.wait()

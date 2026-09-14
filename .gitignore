@@ -1,4 +1,3 @@
-
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
@@ -8,15 +7,32 @@
 # Python
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local environment values; keep a shareable example
+.env
+.env.*
+!.env.example
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
 
 # Machine-local Claude Code settings (permissions, not shared config)
 .claude/settings.local.json
 
 # Experimental run data. Each run writes several MB into data/<run name>/ and
 # those files are the experiment's record, not the program's source - they do
-# not belong in the control software's history. One params file from the very
-# first commit was tracked by accident and is dropped here; it stays on disk.
-data/
-server.log
-config/run_params.json
+# not belong in the control software's history. Anchor these to the project
+# root so similarly named test fixtures can still be tracked.
+/data/
+/server.log
+/server.log.*
+/config/run_params.json

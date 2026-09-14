@@ -60,6 +60,12 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Generated exports and audit logs. Dolt is the source of truth; sync its
+# database separately with bd dolt push/pull. Keep these files local.
+issues.jsonl
+interactions.jsonl
+events.jsonl
+
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 

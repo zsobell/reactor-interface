@@ -14,7 +14,7 @@ async def main():
     c = Checker("test_recording_worker")
     async with VirtualReactor() as vr:
         sup = vr.sup
-        manual = await sup.recording.call("start")
+        manual = await sup.recording.start_manual_log()
         manual_stamp = sup.logger.started_at + 1.0
         await sup.start_recipe(Recipe(steps=[Step(op="wait", seconds=20)]))
         path = sup.logger.run_path
@@ -30,15 +30,15 @@ async def main():
             c.check("writer stalled", await asyncio.to_thread(entered.wait, 2))
             progress = SimpleNamespace(cycle_fraction=0.25, paused=False, step_desc="original")
             sample = {"t": sup.recipes.progress.started_at + 1, "pressure": 12.0}
-            worker.submit("write_run_sample", sample, progress)
-            worker.submit("write_sample", {"pressure": 42}, sampled_at=manual_stamp)
+            worker.submit_run_sample(sample, progress)
+            worker.submit_manual_sample({"pressure": 42}, sampled_at=manual_stamp)
             sample["pressure"] = 999
             progress.step_desc = "mutated"
             await asyncio.wait_for(sup._current_cycle(), 0.5)
             await asyncio.wait_for(sup.set_valve("prec1", True), 0.5)
             c.check("control and telemetry advance while disk stalls",
                     sup._cycle_count == 1 and vr.daq.do_state["prec1"])
-            c.check("backlog is bounded", not worker.submit("write_run_sample", sample, progress))
+            c.check("backlog is bounded", not worker.submit_run_sample(sample, progress))
             c.check("overflow is visible", "queue" in worker.status()["errors"])
             abort = asyncio.create_task(sup.abort_recipe())
             c.check("hardware cleanup does not wait for stalled recording",
@@ -53,7 +53,7 @@ async def main():
         c.check("recipe progress copied at submission", rows[0]["recipe_step"] == "original")
         c.check("close drains accepted rows", len(rows) == 2)
         c.check("overflow remains visible after draining", "queue" in worker.status()["errors"])
-        await worker.call("stop")
+        await worker.stop_manual_log()
         manual_rows = list(csv.DictReader(manual.open(), delimiter="\t"))
         c.check("manual log uses measurement time, not worker time",
                 float(manual_rows[0]["Time"]) == 1.0)

@@ -43,13 +43,14 @@ Usage:
 
 from __future__ import annotations
 
+from reactor.dependencies import DeviceFactory, StatePaths
+
 import contextlib
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from .. import supervisor as supervisor_module
 from ..config import load_config
 from ..devices.base import Device, Reading
 from ..supervisor import Supervisor
@@ -83,6 +84,7 @@ class FakeDaq:
         self.do_writes: list[tuple[float, str, bool]] = []
         self.id_state: dict[str, bool] = {}
         self.last_error = ""
+        self.close_count = 0
 
     @property
     def input_count(self) -> int:
@@ -113,7 +115,7 @@ class FakeDaq:
         self.id_state.clear()
 
     async def close(self) -> None:
-        pass
+        self.close_count += 1
 
 
 class FakeMfc(Device):
@@ -431,108 +433,47 @@ class FakeKeithley(Device):
 
 
 class VirtualReactor:
-    """A real Supervisor wired to fake devices instead of real hardware.
+    """Real application startup/shutdown with fake adapters and isolated paths.
 
-    Two safety guarantees, both load-bearing - a test that forgets everything
-    else still cannot damage the real project state:
-
-    - `cfg.site.data_dir` is redirected to a throwaway temp directory, so
-      DataLogger and the automatic run-export never touch the project's real
-      `data/`.
-    - `VALVE_STATE_PATH` / `LABELS_PATH` (hardcoded in supervisor.py as
-      module-level constants, not per-instance - there is no constructor
-      argument for them) are monkeypatched to that same temp directory for
-      the life of this object and restored on exit, so a test can never
-      overwrite the real `config/valve_state.json` or `config/labels.json`.
-
-    Background loops (`_control_loop`, `_current_loop`, `_reconnect_loop`)
-    are deliberately NOT started - a real timer racing test assertions would
-    make tests flaky for no benefit. Call `await vr.tick()` to advance
-    telemetry by exactly one sample, on your own schedule.
-
-    Always use as an async context manager so teardown (including restoring
-    the monkeypatched paths) is guaranteed:
-
-        async with VirtualReactor() as vr:
-            ...
+    By default polling is manual through tick(). Set background_tasks=True to
+    exercise production polling and reconnect tasks without hardware access.
     """
 
-    def __init__(self, config_path: Path | str | None = None) -> None:
+    def __init__(self, config_path: Path | str | None = None, *, background_tasks=False, clock=None):
         self.config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
-        self._tmpdir: tempfile.TemporaryDirectory | None = None
-        self._orig_valve_state_path = None
-        self._orig_labels_path = None
-        self._orig_run_name_path = None
-        self.sup: Supervisor | None = None
-        self.daq: FakeDaq | None = None
-        self.mfcs: dict[str, FakeMfc] = {}
-        self.instruments: dict[str, FakeInstrument] = {}
-        self.supplies: dict[str, FakeSupply] = {}
+        self.background_tasks = background_tasks
+        self.clock = clock
+        self._tmpdir = None
+        self.sup = None
 
     async def __aenter__(self) -> "VirtualReactor":
         self._tmpdir = tempfile.TemporaryDirectory(prefix="virtual_reactor_")
         tmp = Path(self._tmpdir.name)
-
-        # Must happen before Supervisor(cfg) - __init__ itself reads these to
-        # restore last-commanded valve state.
-        self._orig_valve_state_path = supervisor_module.VALVE_STATE_PATH
-        self._orig_labels_path = supervisor_module.LABELS_PATH
-        self._orig_run_name_path = supervisor_module.RUN_NAME_PATH
-        supervisor_module.VALVE_STATE_PATH = tmp / "valve_state.json"
-        supervisor_module.LABELS_PATH = tmp / "labels.json"
-        supervisor_module.RUN_NAME_PATH = tmp / "last_run.json"
-
         cfg = load_config(self.config_path)
         cfg.site.data_dir = str(tmp / "data")
-
-        sup = Supervisor(cfg)
-        self.daq = FakeDaq()
-        sup._plan = sup._build_plan()
-        await self.daq.configure(sup._plan)
-        sup.daq = self.daq
-
-        for m in cfg.mfcs:
-            dev = FakeMfc(m)
-            await dev.connect()
-            sup.mfcs[m.id] = dev
-            self.mfcs[m.id] = dev
-
-        for i in cfg.instruments:
-            if not i.enabled:
-                continue
-            dev = FakeInstrument(i)
-            await dev.connect()
-            sup.instruments[i.id] = dev
-            self.instruments[i.id] = dev
-
-        for ps in cfg.power_supplies:
-            if not ps.enabled:
-                continue
-            dev = (FakeSupply(ps) if ps.driver == "glassman_fl"
-                   else FakeKeithley(ps))
-            await dev.connect()
-            sup.supplies[ps.id] = dev
-            self.supplies[ps.id] = dev
-
-        sup._running = True     # so abort()/etc behave; background loops NOT started
-        self.sup = sup
+        factory = DeviceFactory(
+            daq=FakeDaq, mfc=FakeMfc, instrument=FakeInstrument,
+            supply=lambda ps: FakeSupply(ps) if ps.driver == "glassman_fl" else FakeKeithley(ps),
+            ellipsometer=lambda *args, **kwargs: None)
+        self.sup = Supervisor(cfg, devices=factory, paths=StatePaths.in_directory(tmp), clock=self.clock)
+        try:
+            await self.sup.start(background_tasks=self.background_tasks)
+        except BaseException:
+            await self.__aexit__(None, None, None)
+            raise
+        self.daq = self.sup.daq
+        self.mfcs = self.sup.mfcs
+        self.instruments = self.sup.instruments
+        self.supplies = self.sup.supplies
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
-        if self.sup is not None:
-            with contextlib.suppress(Exception):
-                await self.sup.recipes.abort()
-            with contextlib.suppress(Exception):
-                await self.sup.stop_fill_regulation()
-            with contextlib.suppress(Exception):
-                await self.sup.stop_prestart()
-            await self.sup.recording.close()
-        if self._orig_valve_state_path is not None:
-            supervisor_module.VALVE_STATE_PATH = self._orig_valve_state_path
-            supervisor_module.LABELS_PATH = self._orig_labels_path
-            supervisor_module.RUN_NAME_PATH = self._orig_run_name_path
-        if self._tmpdir is not None:
-            self._tmpdir.cleanup()
+        try:
+            if self.sup is not None:
+                await self.sup.stop()
+        finally:
+            if self._tmpdir is not None:
+                self._tmpdir.cleanup()
 
     async def tick(self) -> None:
         """Advance telemetry by exactly one sample: one slow-loop DAQ read

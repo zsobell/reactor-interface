@@ -10,9 +10,9 @@ than the parameters typed into the UI: 16.41 s per cycle against a nominal
   * its current-check tick was a fixed 0.2 s, so the last tick of a step
     overshot by up to a full tick.
 
-The budget below is per cycle and deliberately tight. Timing on Windows has
-1-15 ms of jitter and the virtual reactor adds its own, so this asserts
-"accurate to a tenth of a second", which is the requirement, not "exact".
+The budget below is per cycle and deliberately tight. These real-asyncio tests
+check software timing within a tenth of a second on the test machine. They do
+not establish a Windows jitter bound or a physical actuator timing guarantee.
 
 Run directly: python -m tests.test_run_timing
 """

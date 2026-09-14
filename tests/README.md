@@ -32,7 +32,7 @@ that reimplements what `set_valve`/`set_mfc_setpoint`/etc. are supposed to
 do. That tests your understanding of the code, not the code — and it can
 pass while the real thing is broken, or fail while the real thing is fine,
 because "the fake's `finish_run` zeroes every MFC" and "the real
-`finish_run` zeroes every MFC only if `_run_end_cleanup` was armed" are two
+`finish_run` zeroes every MFC only if `RunSession.end_cleanup` was armed" are two
 different claims that happen to look similar from the outside. (This
 happened during this project's own development: an earlier ad hoc harness
 faked `Supervisor.finish_run()` directly, and every "MFCs zeroed at run
@@ -97,7 +97,7 @@ treated as a substitute for that, and it shouldn't be.
 2. Drive the real entry points, not internals — `vr.sup.start_cvd_run(...)`,
    `vr.sup.set_valve(...)`, `vr.sup.start_prestart(...)`. Going in through
    the same door the UI uses is what makes a test trustworthy; see the
-   `finish_run`/`_run_end_cleanup` story above.
+   `finish_run`/`RunSession.end_cleanup` story above.
 3. If the thing you're testing needs telemetry to flow (the trend buffer,
    the run-export CSV, anything read from `vr.sup.snapshot`), start
    `tests._support.autotick(vr)` — a background task standing in for the
@@ -143,19 +143,17 @@ else still can't damage the real project:
 - `cfg.site.data_dir` is redirected to a throwaway temp directory, so the
   data logger and the automatic run-export never touch the project's real
   `data/`.
-- `VALVE_STATE_PATH` / `LABELS_PATH` — hardcoded module-level constants in
-  `supervisor.py`, not per-instance, so there's no constructor argument to
-  redirect them — are monkeypatched to that same temp directory for the
-  life of the `VirtualReactor` and restored on exit. A test can never
-  overwrite the real `config/valve_state.json` or `config/labels.json`.
-  Always use `async with VirtualReactor() as vr:` so this restoration is
-  guaranteed even if the test raises.
+- Each Supervisor receives its own `StatePaths` and `DeviceFactory`. VirtualReactor
+  supplies temporary paths and fake factories through the real startup/shutdown
+  lifecycle, without monkeypatching global paths. Two instances can coexist.
+  Manual polling is the default; `VirtualReactor(background_tasks=True)` exercises
+  the production polling and reconnect tasks. Context-manager exit disconnects
+  devices and removes temporary files even after a test failure.
 
 ## What's covered today
 
-Eight files, all run by `python -m tests.run_all`. The first five drive a real
-`Supervisor` against the virtual reactor; the last two are pure-function tests
-needing no reactor at all.
+The runner discovers `tests/test_*.py` automatically. Tests below include real
+Supervisor integration with fake devices and isolated file/number processing.
 
 | File | Covers |
 |---|---|
@@ -223,3 +221,31 @@ format tests may call its synchronous methods directly when no worker is active.
 `node tests/js/control-bootstrap.mjs` also loads the real control page's ES
 modules against its actual HTML element IDs, checks server-setting/history
 bootstrap and chart integration, and verifies the HTTPS WebSocket URL.
+
+`test_dependencies.py` checks simultaneous instance isolation, read-only startup,
+real polling task startup/shutdown, and fake-device disconnection.
+
+## Maintenance regression checks
+
+- `test_controller_contracts.py`: recipe execution and admission against minimal hosts.
+- `test_fill_controller.py`: pulses, warnings, recovery and stop through real commands.
+- `test_sweep_controller.py`: identification order, marking, bounded stop/error release,
+  and ownership retained while adapter calls resist cancellation.
+- `test_validation.py`: focused groups, discovered JS checks and failure reporting.
+- `test_timing_prototype.py`: deterministic comparison with production exposure traces.
+
+`python -m reactor.testing.validate full` runs the Python suite and all discovered
+`tests/js/*.mjs` harnesses. Focus with `control`, `recording`, `api` or `frontend`.
+Missing Node is reported as a skip locally; `--require-node` makes it a failure
+for full/frontend checks. CI runs full strict checks on Linux and Windows.
+
+- `test_parameters.py`: typed input defaults, coercions, raw report payloads and pre-start stages.
+- `test_clock_domains.py`: monotonic duration/deadline clocks remain independent of
+  forward/backward wall jumps, including CVD plasma-loss gating and overlapping pauses.
+- `test_prestart_invalid.py`: invalid staged inputs clean up without commands and allow a later start.
+- `test_recording_api.py`: explicit recording operations, copied data and ordered lifecycle.
+
+- `test_run_lifecycle.py`: explicit admission/session phases, primed handover and cleanup before disk drain.
+
+`node tests/js/control-modules.mjs` covers transport reconnect/disposal, forms,
+ordered device commands and browser back-forward-cache lifecycle.

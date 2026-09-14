@@ -15,7 +15,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import time
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,10 @@ from typing import Any
 from .config import ReactorConfig
 from .control.recipe import Recipe, RecipeRunner
 from .control.prestart import PrestartController
+from .control.fill import FillController
+from .control.sweep import SweepController
+from .control.run_coordinator import RunCoordinator, RunSession
+from .control.clock import Clock
 from . import datalog
 from .datalog import DataLogger
 from .recording import RecordingService
@@ -32,7 +35,7 @@ from .devices.ellipsometer import EllipsometerClient, EllipsometerPoint
 from .devices.glassman_fl import GlassmanFL
 from .devices.keithley_2260b import Keithley2260B
 from .devices.instrument import ScpiInstrument
-from .devices.mks_mfc import MfcRegisters, MksMfc
+from .dependencies import DeviceFactory, StatePaths
 from .devices.nidaq import AiSpec, DaqPlan, DoSpec, NiDaqBackend
 
 log = logging.getLogger("reactor.supervisor")
@@ -72,15 +75,18 @@ DO_LINE_GROUPS: dict[str, list[str]] = {
 
 
 class Supervisor:
-    def __init__(self, cfg: ReactorConfig) -> None:
+    def __init__(self, cfg: ReactorConfig, *, devices: DeviceFactory | None = None,
+                 paths: StatePaths | None = None, clock: Clock | None = None) -> None:
+        self.clock = clock or Clock()
         self.cfg = cfg
-        self.recipes = RecipeRunner(self)
-        self._run_start_lock = asyncio.Lock()
-        self._start_cancelled = False
+        self.devices = devices or DeviceFactory()
+        self.paths = paths or StatePaths(LABELS_PATH, VALVE_STATE_PATH, RUN_NAME_PATH)
+        self.recipes = RecipeRunner(self, clock=self.clock)
         self.logger = DataLogger(cfg)
         self.recording = RecordingService(
             self.logger, lambda message: self._event("error", message),
             on_capture=lambda name: self._event("ellipsometer", f"acquisition start -> {name}"))
+        self.runs = RunCoordinator(self, self.recipes, self.recording, clock=self.clock)
 
         self.snapshot: dict[str, Any] = {}
         self.readings: dict[str, Reading] = {}
@@ -120,10 +126,8 @@ class Supervisor:
         #: measurements, not carried-forward copies of them. See
         #: DataLogger.write_run_sample's `blank`.
         #:
-        #: A counter rather than a wall-clock stamp because time.time() has
-        #: ~16 ms resolution on Windows: two reads inside one clock tick would
-        #: compare equal and a genuinely fresh reading would be dropped as
-        #: stale.
+        #: A counter rather than a wall-clock stamp: equal timestamps or clock
+        #: adjustments must not make a newly acquired reading appear stale.
         self._read_seq = 0
         self.snapshot_seq: dict[str, int] = {}
         #: _read_seq as of the last run-export row: the cutoff for "fresh since"
@@ -138,41 +142,22 @@ class Supervisor:
         # Valve flip markers (for the current-trace overlay). Every set_valve is
         # recorded with its reason so the UI can mark scheduled vs reignite flips.
         self.marks: deque[dict[str, Any]] = deque(maxlen=3000)
-        # Which valves the current run treats as the dose valve and plasma switch
-        # (recorded into each trend sample). Defaults match the identified valves.
-        self._run_dose_valve = "prec1"
-        self._run_plasma_switch = "plasma_ground"
-        # When an ALD run ends (completion or abort), leave the tool in a quiet
-        # state: zero every MFC, stop the fill pulsing, close the fill valve.
-        # Requested by the operator; only armed for ALD runs, not file recipes.
-        self._run_fill_valve = "rpm_top"
-        self._run_end_cleanup = False
-
         # Valve identification sweep
-        self._sweep_task: asyncio.Task | None = None
-        self._sweep_abort = asyncio.Event()
-        self.sweep: dict[str, Any] = {"running": False}
+        self._sweep = SweepController(self)
 
-        self._prestart = PrestartController(self)
+        self._prestart = PrestartController(self, clock=self.clock)
 
         # Background fill-pressure regulation
-        self._reg_task: asyncio.Task | None = None
-        self._reg_stop = asyncio.Event()
-        self.regulator: dict[str, Any] = {"running": False}
+        self._fill = FillController(self)
 
         # In-situ ellipsometer (FS-1) live stream: a read-only subscriber that
         # timestamps each streamed measurement with the reactor clock into a
         # per-acquisition sidecar, so a refit file downloaded afterwards can be
         # put back onto the reactor clock (reactor/analysis/ellipsometer_merge).
         # Created here, started in start(); None when disabled in config.
-        self.ellipsometer: EllipsometerClient | None = None
-        if cfg.ellipsometer.enabled and cfg.ellipsometer.host:
-            self.ellipsometer = EllipsometerClient(
-                cfg.ellipsometer.host,
-                cfg.ellipsometer.port,
-                on_point=self._on_ellipsometer_point,
-                on_state=self._on_ellipsometer_state,
-            )
+        self.ellipsometer = self.devices.ellipsometer(
+            cfg.ellipsometer, on_point=self._on_ellipsometer_point,
+            on_state=self._on_ellipsometer_state)
 
     # ====================================================================== #
     #  Startup / shutdown
@@ -238,7 +223,7 @@ class Supervisor:
 
         return plan
 
-    async def start(self) -> None:
+    async def start(self, *, background_tasks: bool = True) -> None:
         """Connect to everything and begin polling. Commands nothing.
 
         A device that fails to connect is recorded as failed and the rest of the
@@ -248,7 +233,7 @@ class Supervisor:
         cfg = self.cfg
         self._plan = self._build_plan()
 
-        self.daq = NiDaqBackend()
+        self.daq = self.devices.daq()
         try:
             await self.daq.configure(self._plan)
             self._event("startup",
@@ -258,12 +243,7 @@ class Supervisor:
             self._event("error", f"DAQ configure failed: {type(exc).__name__}: {exc}")
 
         for m in cfg.mfcs:
-            regs = MfcRegisters(
-                setpoint_read=m.register_map.setpoint_read,
-                setpoint_write=m.register_map.setpoint_write,
-                word_order=m.register_map.word_order,
-            )
-            dev = MksMfc(m, regs)
+            dev = self.devices.mfc(m)
             self.mfcs[m.id] = dev
             try:
                 await dev.connect()
@@ -275,7 +255,7 @@ class Supervisor:
         for i in cfg.instruments:
             if not i.enabled:
                 continue
-            inst = ScpiInstrument(i)
+            inst = self.devices.instrument(i)
             self.instruments[i.id] = inst
             try:
                 await inst.connect()
@@ -289,8 +269,7 @@ class Supervisor:
                 continue
             # The config's Literal already restricts `driver`, so an unknown
             # value cannot reach here.
-            dev = (GlassmanFL(ps) if ps.driver == "glassman_fl"
-                   else Keithley2260B(ps))
+            dev = self.devices.supply(ps)
             self.supplies[ps.id] = dev
             try:
                 await dev.connect()
@@ -317,12 +296,13 @@ class Supervisor:
                             f"{rated}{role}")
 
         self._running = True
-        self._loop_task = asyncio.create_task(self._control_loop(), name="control-loop")
-        self._current_task = asyncio.create_task(
-            self._current_loop(), name="current-loop")
-        self._mfc_task = asyncio.create_task(self._mfc_loop(), name="mfc-loop")
-        self._reconnect_task = asyncio.create_task(
-            self._reconnect_loop(), name="instrument-reconnect")
+        if background_tasks:
+            self._loop_task = asyncio.create_task(self._control_loop(), name="control-loop")
+            self._current_task = asyncio.create_task(
+                self._current_loop(), name="current-loop")
+            self._mfc_task = asyncio.create_task(self._mfc_loop(), name="mfc-loop")
+            self._reconnect_task = asyncio.create_task(
+                self._reconnect_loop(), name="instrument-reconnect")
 
         if self.ellipsometer is not None:
             self.ellipsometer.start()
@@ -373,7 +353,7 @@ class Supervisor:
 
         with contextlib.suppress(Exception):
             await self.stop_fill_regulation()
-        self._sweep_abort.set()
+        await self._sweep.shutdown()
 
         for task in (self._loop_task, self._current_task, self._mfc_task,
                      self._reconnect_task):
@@ -526,8 +506,9 @@ class Supervisor:
         self._read_seq += 1
         for k in snap:
             self.snapshot_seq[k] = self._read_seq
-        self.recording.submit("write_sample", self.snapshot, self.recipes.progress,
-                              sampled_at=time.time())
+        self.recording.submit_manual_sample(
+            self.snapshot, self.recipes.progress, sampled_at=self.clock.wall()
+        )
 
     async def _current_loop(self) -> None:
         """Fast loop: poll the bench instruments (the DMM6500 sample-current) at
@@ -615,7 +596,7 @@ class Supervisor:
             ))
 
         snap = self.snapshot
-        self._last_cycle = time.time()
+        self._last_cycle = self.clock.wall()
         self._cycle_count += 1
 
         # Column name -> the snapshot key it is measured from. Used both to
@@ -642,8 +623,8 @@ class Supervisor:
             "t": self._last_cycle,
             # Commanded valve state, not a measurement: always current, so it is
             # never blanked out of a row.
-            "dosing": bool(self.valve_state.get(self._run_dose_valve)),
-            "beam_on": not self.valve_state.get(self._run_plasma_switch, True),
+            "dosing": bool(self.valve_state.get(self.runs.session.dose_valve)),
+            "beam_on": not self.valve_state.get(self.runs.session.plasma_switch, True),
             **{col: snap.get(key) for col, key in src.items()},
         }
         # Channels NOT measured since the previous row: written blank rather
@@ -667,7 +648,7 @@ class Supervisor:
         # Only the file gets the blanks.
         self.history.append(sample)
         if self.recipes.busy:
-            self.recording.submit("write_run_sample", sample, prog, blank=stale)
+            self.recording.submit_run_sample(sample, prog, blank=stale)
         await self._publish()
 
     # ====================================================================== #
@@ -682,7 +663,7 @@ class Supervisor:
         await self.daq.write_do(valve_id, state)
         self.valve_state[valve_id] = state
         self._save_valve_state()
-        self.marks.append({"t": time.time(), "id": valve_id,
+        self.marks.append({"t": self.clock.wall(), "id": valve_id,
                            "state": bool(state), "reason": reason})
         self._event("valve", f"{valve_id} -> {'OPEN' if state else 'closed'}"
                              + (f" ({reason})" if reason else ""))
@@ -699,123 +680,39 @@ class Supervisor:
     # -- valve identification sweep ---------------------------------------- #
 
     @property
+    def sweep(self) -> dict:
+        return self._sweep.state
+
+    @property
     def sweep_running(self) -> bool:
-        return self._sweep_task is not None and not self._sweep_task.done()
+        return self._sweep.running
+
+    @property
+    def identification_available(self) -> bool:
+        return self.daq is not None
+
+    async def identify_write(self, line: str, state: bool) -> None:
+        await self.daq.id_write(line, state)
+
+    async def identify_release(self, line: str) -> None:
+        await self.daq.id_release(line)
+
+    async def identify_release_all(self) -> None:
+        await self.daq.id_release_all()
 
     async def start_valve_sweep(
         self, lines: list[str], *, reps: int = 3,
         on_s: float = 1.0, off_s: float = 1.0, gap_s: float = 3.0,
         start_index: int = 0,
     ) -> None:
-        """Pulse each line in turn so the operator can see which valve moves.
-
-        Per line: (on, off) x reps, then a gap, then the next line. The operator
-        watches the box and hits stop if anything is wrong.
-        """
-        if self.sweep_running:
-            raise RuntimeError("a valve-identification sweep is already running")
-        if self.daq is None:
-            raise RuntimeError("DAQ not started")
-
-        lines = [ln for ln in lines if ln]
-        if not lines:
-            raise ValueError("no lines to sweep")
-
-        reps = max(1, min(10, int(reps)))
-        on_s = max(0.1, min(5.0, float(on_s)))
-        off_s = max(0.1, min(5.0, float(off_s)))
-        gap_s = max(0.0, min(30.0, float(gap_s)))
-        start_index = max(0, min(len(lines) - 1, int(start_index)))
-
-        self._sweep_abort.clear()
-        self.sweep = {
-            "running": True, "lines": lines, "total": len(lines),
-            "index": start_index, "current_line": None, "line_state": False,
-            "rep": 0, "reps": reps, "phase": "starting",
-            "on_s": on_s, "off_s": off_s, "gap_s": gap_s,
-            "marks": [], "started_at": time.time(), "message": "",
-        }
-        self._sweep_task = asyncio.create_task(
-            self._run_sweep(lines, reps, on_s, off_s, gap_s, start_index),
-            name="valve-sweep",
-        )
-        self._event("valve-id",
-                    f"sweep started: {len(lines)} lines, {reps}x "
-                    f"{on_s:g}s on / {off_s:g}s off, {gap_s:g}s gap")
-
-    async def _run_sweep(self, lines, reps, on_s, off_s, gap_s, start_index) -> None:
-        try:
-            for idx in range(start_index, len(lines)):
-                if self._sweep_abort.is_set():
-                    break
-                line = lines[idx]
-                self.sweep.update(index=idx, current_line=line, phase="pulse", rep=0)
-                self._event("valve-id", f"pulsing {line}  ({idx + 1}/{len(lines)})")
-                for rep in range(reps):
-                    if self._sweep_abort.is_set():
-                        break
-                    self.sweep["rep"] = rep + 1
-                    await self.daq.id_write(line, True)
-                    self.sweep["line_state"] = True
-                    if await self._sweep_sleep(on_s):
-                        break
-                    await self.daq.id_write(line, False)
-                    self.sweep["line_state"] = False
-                    if await self._sweep_sleep(off_s):
-                        break
-                await self.daq.id_release(line)
-                if self._sweep_abort.is_set():
-                    break
-                self.sweep["phase"] = "gap"
-                if await self._sweep_sleep(gap_s):
-                    break
-            self.sweep["phase"] = "done" if not self._sweep_abort.is_set() else "stopped"
-            self.sweep["message"] = (
-                "sweep complete" if not self._sweep_abort.is_set()
-                else "sweep stopped"
-            )
-        except Exception as exc:
-            self.sweep["phase"] = "error"
-            self.sweep["message"] = f"{type(exc).__name__}: {exc}"
-            self._event("error", f"valve sweep: {exc}")
-        finally:
-            with contextlib.suppress(Exception):
-                await self.daq.id_release_all()
-            self.sweep["running"] = False
-            self.sweep["line_state"] = False
-
-    async def _sweep_sleep(self, seconds: float) -> bool:
-        """Sleep, returning True immediately if stop is hit."""
-        if seconds <= 0:
-            return self._sweep_abort.is_set()
-        try:
-            await asyncio.wait_for(self._sweep_abort.wait(), timeout=seconds)
-            return True
-        except asyncio.TimeoutError:
-            return False
+        await self._sweep.start(lines, reps=reps, on_s=on_s, off_s=off_s,
+                                gap_s=gap_s, start_index=start_index)
 
     async def stop_valve_sweep(self) -> None:
-        """Stop the sweep and drive every identification line low."""
-        self._sweep_abort.set()
-        if self.daq is not None:
-            with contextlib.suppress(Exception):
-                await self.daq.id_release_all()
-        self.sweep["running"] = False
-        self.sweep["phase"] = "stopped"
-        self.sweep["line_state"] = False
-        self._event("valve-id", "STOP - all identification lines low")
+        await self._sweep.stop()
 
     def mark_sweep_line(self, valve_id: str = "", note: str = "") -> dict:
-        """Bind the line being pulsed right now to a valve. Called when the
-        operator sees that valve move."""
-        line = self.sweep.get("current_line")
-        if not self.sweep.get("running") or not line:
-            raise RuntimeError("no line is being pulsed")
-        mark = {"line": line, "valve": valve_id, "note": note, "t": time.time()}
-        self.sweep.setdefault("marks", []).append(mark)
-        who = valve_id or note or "?"
-        self._event("valve-id", f"MARK: {line} -> {who}")
-        return mark
+        return self._sweep.mark(valve_id, note)
 
     async def set_mfc_setpoint(self, mfc_id: str, sccm: float) -> float:
         dev = self.mfcs.get(mfc_id)
@@ -840,7 +737,7 @@ class Supervisor:
 
     # -- background fill-pressure regulation ------------------------------- #
 
-    async def _drive_valve_quiet(self, valve_id: str, state: bool) -> None:
+    async def drive_fill_valve(self, valve_id: str, state: bool) -> None:
         """Drive a valve without emitting an event (used by the fast regulator
         pulsing, which would otherwise flood the event log)."""
         if self.daq is None:
@@ -848,86 +745,24 @@ class Supervisor:
         await self.daq.write_do(valve_id, state)
         self.valve_state[valve_id] = state
 
+    @property
+    def regulator(self) -> dict:
+        return self._fill.state
+
+    def has_valve(self, valve_id: str) -> bool:
+        return valve_id in self.valve_state
+
     async def start_fill_regulation(
         self, *, valve: str, gauge: str, target_torr: float,
         pulse_on_s: float = 0.1, pulse_off_s: float = 0.3,
         tolerance_frac: float = 0.2,
     ) -> None:
-        """Pulse `valve` to hold `gauge` (a snapshot key) at `target_torr`.
-
-        Runs in the background until stop_fill_regulation. Emits a gentle "flag"
-        event when the pressure drifts more than tolerance_frac off setpoint, and
-        another when it comes back - it never stops the run.
-        """
-        await self.stop_fill_regulation()
-        if valve not in self.valve_state:
-            raise KeyError(f"unknown valve '{valve}'")
-        self._reg_stop.clear()
-        self.regulator = {
-            "running": True, "valve": valve, "gauge": gauge,
-            "target_torr": target_torr, "tolerance_frac": tolerance_frac,
-            "pressure": None, "in_bounds": True, "duty": False,
-        }
-        self._reg_task = asyncio.create_task(
-            self._run_regulation(valve, gauge, target_torr, pulse_on_s,
-                                 pulse_off_s, tolerance_frac),
-            name="fill-regulation",
-        )
-        self._event("fill",
-                    f"regulating {gauge} to {target_torr:g} Torr via {valve} "
-                    f"(flag beyond +/-{tolerance_frac*100:.0f}%)")
+        await self._fill.start(valve=valve, gauge=gauge, target_torr=target_torr,
+                               pulse_on_s=pulse_on_s, pulse_off_s=pulse_off_s,
+                               tolerance_frac=tolerance_frac)
 
     async def stop_fill_regulation(self) -> None:
-        if self._reg_task is not None and not self._reg_task.done():
-            self._reg_stop.set()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(self._reg_task, timeout=5.0)
-            if not self._reg_task.done():
-                self._reg_task.cancel()
-        self._reg_task = None
-        if self.regulator.get("running"):
-            self._event("fill", "fill regulation stopped")
-        self.regulator = {"running": False}
-
-    async def _run_regulation(self, valve, gauge, target, on_s, off_s, tol) -> None:
-        async def nap(dur: float) -> bool:      # returns True if asked to stop
-            try:
-                await asyncio.wait_for(self._reg_stop.wait(), timeout=dur)
-                return True
-            except asyncio.TimeoutError:
-                return False
-
-        try:
-            while not self._reg_stop.is_set():
-                p = self.snapshot.get(gauge)
-                self.regulator["pressure"] = p
-                if isinstance(p, (int, float)) and target > 0:
-                    off = abs(p - target) / target
-                    inb = off <= tol
-                    if inb != self.regulator.get("in_bounds", True):
-                        self.regulator["in_bounds"] = inb
-                        if not inb:
-                            self._event("flag",
-                                        f"{gauge} {p:.3g} Torr is {off*100:.0f}% off "
-                                        f"setpoint {target:.3g} Torr")
-                        else:
-                            self._event("fill", f"{gauge} back within +/-{tol*100:.0f}%")
-                    if p < target:
-                        self.regulator["duty"] = True
-                        await self._drive_valve_quiet(valve, True)
-                        stop = await nap(on_s)
-                        await self._drive_valve_quiet(valve, False)
-                        if stop:
-                            break
-                        if await nap(off_s):
-                            break
-                        continue
-                self.regulator["duty"] = False
-                if await nap(off_s):
-                    break
-        finally:
-            with contextlib.suppress(Exception):
-                await self._drive_valve_quiet(valve, False)
+        await self._fill.stop()
 
     # ====================================================================== #
     #  Pre-start sequence
@@ -1131,46 +966,15 @@ class Supervisor:
     # ====================================================================== #
 
     async def start_recipe(self, recipe: Recipe) -> None:
-        async with self._run_start_lock:
-            self._check_run_start()
-            try:
-                await self._start_recipe(recipe)
-            except BaseException:
-                await self.recording.call("stop_run_export")
-                raise
-
-    def _check_run_start(self) -> None:
-        if not self._running:
-            raise RuntimeError("server is stopping or not started")
-        if self.recipes.busy:
-            raise RuntimeError("a recipe is already running")
-        if self.prestart.get("running"):
-            raise RuntimeError("pre-start is running - stop it before starting a run "
-                               "(both drive the plasma-ground relay)")
-        self._start_cancelled = False
-
-    async def _start_recipe(self, recipe: Recipe, params: dict | None = None) -> None:
-        # Prepare recording before the recipe task can execute even one step.
-        # The admission lock remains held across this off-thread file work.
-        started_at = time.time()
-        try:
-            run_path = await self.recording.call("start_run_export", recipe.name, started_at)
-            self._event("recipe", f"run data recording to {run_path.name}")
-            if params is not None:
-                await self.recording.call("write_run_params", params, recipe)
-        except Exception as exc:
-            self._event("error", f"could not prepare run recording: {exc}")
-        if self._start_cancelled or not self._running:
-            await self.recording.call("stop_run_export")
-            raise RuntimeError("run start cancelled")
-        await self.recipes.start(recipe, started_at=started_at)
-        self._event("recipe", f"started '{recipe.name}' ({recipe.cycles} cycles)")
+        await self.runs.start(recipe)
 
     async def start_ald_run(self, params: dict) -> Recipe:
         """Build and launch an e-beam ALD run from UI parameters."""
         from .control.recipe import build_ald_recipe
+        from .control.parameters import RunParameters
 
-        return await self._start_built_run(build_ald_recipe(params), params)
+        typed = RunParameters.normalize(params, mode="ald")
+        return await self._start_built_run(build_ald_recipe(typed), typed.raw)
 
     async def start_cvd_run(self, params: dict) -> Recipe:
         """Build and launch an electron-enhanced CVD run from UI parameters.
@@ -1179,42 +983,13 @@ class Supervisor:
         recipe (continuous beam, no pump B, cycle-anchored gas schedule).
         """
         from .control.recipe import build_cvd_recipe
+        from .control.parameters import RunParameters
 
-        return await self._start_built_run(build_cvd_recipe(params), params)
+        typed = RunParameters.normalize(params, mode="cvd")
+        return await self._start_built_run(build_cvd_recipe(typed), typed.raw)
 
     async def _start_built_run(self, recipe: Recipe, params: dict) -> Recipe:
-        async with self._run_start_lock:
-            self._check_run_start()
-            fields = ("_run_dose_valve", "_run_plasma_switch", "_run_fill_valve",
-                      "_run_end_cleanup")
-            previous = {field: getattr(self, field) for field in fields}
-            old_name = self.logger.run_name
-            try:
-                return await self._start_built_run_locked(recipe, params)
-            except BaseException:
-                # The start lock remains held while accepted disk work drains.
-                # A cancelled attempt must not arm cleanup for a later file recipe.
-                for field, value in previous.items():
-                    setattr(self, field, value)
-                await self.recording.call("stop_run_export")
-                await self.recording.call("set_run_name", old_name)
-                raise
-
-    async def _start_built_run_locked(self, recipe: Recipe, params: dict) -> Recipe:
-        self._run_dose_valve = params.get("dose_valve", "prec1")
-        self._run_plasma_switch = params.get("plasma_switch", "plasma_ground")
-        self._run_fill_valve = params.get("fill_valve", "rpm_top")
-        self._run_end_cleanup = True     # zero MFCs + close fill valve at run end
-        # Name this run before anything opens a file, so the trace, by-cycle,
-        # parameter report and ellipsometer sidecar all carry the same prefix. Only
-        # remembered once the run is actually starting, which is what makes the
-        # auto-increment track real runs rather than abandoned attempts.
-        run_name = await self.recording.call("set_run_name", str(params.get("run_name") or ""))
-        await self._start_recipe(recipe, params)
-        if run_name:
-            self._remember_run_name(run_name)
-            self._event("recipe", f"run name: {run_name}")
-        return recipe
+        return await self.runs.start(recipe, params)
 
     # -- operator run naming (see RUN_NAME_PATH) ---------------------------- #
 
@@ -1222,13 +997,13 @@ class Supervisor:
     def last_run_name(self) -> str:
         """Name of the last run that actually started, or "" if there is none."""
         try:
-            data = json.loads(RUN_NAME_PATH.read_text(encoding="utf-8"))
+            data = json.loads(self.paths.run_name.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return datalog.sanitize_run_name(str(data.get("name") or ""))
         except FileNotFoundError:
             pass
         except Exception as exc:
-            log.warning("could not read %s: %s", RUN_NAME_PATH, exc)
+            log.warning("could not read %s: %s", self.paths.run_name, exc)
         return ""
 
     def suggest_run_name(self) -> str:
@@ -1236,95 +1011,96 @@ class Supervisor:
         incremented. Purely a suggestion - the operator can type anything."""
         return datalog.next_run_name(self.last_run_name)
 
-    def _remember_run_name(self, name: str) -> None:
+    def remember_run_name(self, name: str) -> None:
         clean = datalog.sanitize_run_name(name)
         if not clean:
             return
         try:
-            RUN_NAME_PATH.parent.mkdir(parents=True, exist_ok=True)
-            RUN_NAME_PATH.write_text(
-                json.dumps({"name": clean, "started_at": time.time()}, indent=2),
+            self.paths.run_name.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.run_name.write_text(
+                json.dumps({"name": clean, "started_at": self.clock.wall()}, indent=2),
                 encoding="utf-8")
         except Exception as exc:
             log.warning("could not persist run name: %s", exc)
 
-    async def finish_run(self) -> None:
-        """Called by the recipe runner however a run ends (done or aborted).
+    @property
+    def server_running(self) -> bool:
+        return self._running
 
-        Always stops the background fill regulation so the fill valve is not left
-        pulsing, and always commands HV off (operator request, 2026-08-21 - a
-        run that ends must not leave the plasma supply energised). For an ALD
-        run it additionally returns the tool to a quiet state as the operator
-        requested: every MFC setpoint to zero and the precursor fill valve
-        closed. File recipes get only the fill stop and the HV off.
-        """
+    @property
+    def prestart_running(self) -> bool:
+        return bool(self.prestart.get("running"))
+
+    async def finish_run(self) -> None:
+        await self.runs.finish()
+
+    async def cleanup_run(self, session: RunSession) -> None:
+        """Existing hardware cleanup, with policy supplied by the run owner."""
         with contextlib.suppress(Exception):
             await self.stop_fill_regulation()
-        # Above the ALD/CVD gate below on purpose: these apply to EVERY run
-        # ending, file recipes included.
         await self.hv_off(reason="run end")
         await self.supplies_output_off(reason="run end")
-
-        if not self._run_end_cleanup:
-            await self.recording.call("stop_run_export")
+        if not session.end_cleanup:
             return
-        self._run_end_cleanup = False
-
-        if self._run_fill_valve in self.valve_state:
+        if session.fill_valve in self.valve_state:
             with contextlib.suppress(Exception):
-                await self.set_valve(self._run_fill_valve, False, reason="run end")
+                await self.set_valve(session.fill_valve, False, reason="run end")
         for mfc_id in list(self.mfcs):
             with contextlib.suppress(Exception):
                 await self.set_mfc_setpoint(mfc_id, 0.0)
         self._event("recipe", "run end: MFCs zeroed, fill stopped, "
                               "fill valve closed, HV off")
-        await self.recording.call("stop_run_export")
 
     async def abort_recipe(self) -> None:
-        self._start_cancelled = True
-        async with self._run_start_lock:
-            await self.recipes.abort()
-        self._event("recipe", "aborted by operator")
+        await self.runs.abort()
+
+    @property
+    def run_in_progress(self) -> bool:
+        return self.runs.in_progress
+
+    def report_event(self, kind: str, message: str) -> None:
+        """Publish controller events through the application event owner."""
+        self._event(kind, message)
 
     def _event(self, kind: str, message: str) -> None:
-        self.events.append({"t": time.time(), "kind": kind, "message": message})
+        self.events.append({"t": self.clock.wall(), "kind": kind, "message": message})
         log.info("[%s] %s", kind, message)
 
     # -- operator label overrides ------------------------------------------ #
 
     def _load_labels(self) -> dict[str, dict[str, str]]:
         try:
-            data = json.loads(LABELS_PATH.read_text(encoding="utf-8"))
+            data = json.loads(self.paths.labels.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return {k: dict(v) for k, v in data.items() if isinstance(v, dict)}
         except FileNotFoundError:
             pass
         except Exception as exc:
-            log.warning("could not read %s: %s", LABELS_PATH, exc)
+            log.warning("could not read %s: %s", self.paths.labels, exc)
         return {}
 
     def _label(self, kind: str, dev_id: str, default: str) -> str:
         return self.label_overrides.get(kind, {}).get(dev_id) or default
 
-    # -- valve state persistence (see VALVE_STATE_PATH) --------------------- #
+    # -- valve state persistence (see self.paths.valves) --------------------- #
 
     def _load_valve_state(self) -> dict[str, bool]:
         try:
-            data = json.loads(VALVE_STATE_PATH.read_text(encoding="utf-8"))
+            data = json.loads(self.paths.valves.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return {k: bool(v) for k, v in data.items()}
         except FileNotFoundError:
             pass
         except Exception as exc:
-            log.warning("could not read %s: %s", VALVE_STATE_PATH, exc)
+            log.warning("could not read %s: %s", self.paths.valves, exc)
         return {}
 
     def _save_valve_state(self) -> None:
         try:
-            VALVE_STATE_PATH.write_text(
+            self.paths.valves.write_text(
                 json.dumps(self.valve_state, indent=2), encoding="utf-8")
         except Exception as exc:
-            log.warning("could not save %s: %s", VALVE_STATE_PATH, exc)
+            log.warning("could not save %s: %s", self.paths.valves, exc)
 
     def set_label(self, kind: str, dev_id: str, label: str) -> str:
         """Rename a valve / MFC / gauge from the UI, persisted to labels.json.
@@ -1349,7 +1125,7 @@ class Supervisor:
         else:
             bucket.pop(dev_id, None)
         try:
-            LABELS_PATH.write_text(
+            self.paths.labels.write_text(
                 json.dumps(self.label_overrides, indent=2), encoding="utf-8")
         except Exception as exc:
             raise RuntimeError(f"could not save label: {exc}") from exc
@@ -1363,7 +1139,9 @@ class Supervisor:
         stamped with the reactor clock. A new sidecar opens when the point index
         resets to 1 or after an idle gap - the two ways one acquisition ends and
         the next begins (the stream carries no explicit start/stop marker)."""
-        self.recording.capture(point, self.cfg.ellipsometer.idle_gap_s)
+        self.recording.capture_ellipsometer_point(
+            point, self.cfg.ellipsometer.idle_gap_s
+        )
 
     def _on_ellipsometer_state(self, connected: bool, detail: str) -> None:
         self._event("ellipsometer",
