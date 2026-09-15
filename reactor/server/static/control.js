@@ -122,6 +122,7 @@ function render(s){
   ellipsometer(s); events(s);
 
   charts.update(s);
+  runForms.updateGasNames(s.mfcs || []);
   const rv = s.run_valves || {dose:"prec1", plasma:"plasma_ground"};
   const vopen = {};
   for(const v of s.valves) vopen[v.id] = v.open;
@@ -160,12 +161,21 @@ function pressure(s){
   const v = s.snapshot["pressure.volts"];
   $("pressureV").textContent = v === undefined ? "—" : num(v,4) + " V";
   const cf = CFG.pressure || {}, sc = cf.scaling || {};
+  // Same numbers as the Run tab's hero readout, on the card that describes the
+  // sensor - a channel and a curve with no reading next to them is a spec
+  // sheet, not an instrument panel (operator, 2026-08-27).
+  const hp = $("hwPressure");
+  if(hp){
+    hp.textContent = sci(p);
+    cls(hp, "stale", !!(r && !r.ok));
+    $("hwPressureV").textContent = v === undefined ? "—" : num(v,4) + " V";
+  }
   $("pressureChan").textContent = cf.channel || "—";
   $("pressureCurve").textContent = sc.preset || `${sc.type||"?"} g=${sc.gain} o=${sc.offset}`;
-  $("pressureWarn").textContent = sc.type === "log10"
-    ? "Log gauge: a 0.1 V offset is roughly a 30% pressure error. Confirm the "
-      + "curve against the gauge controller before trusting these numbers."
-    : "";
+  /* There used to be a warning here that a log gauge's 0.1 V offset is ~30%
+     of pressure and the curve should be confirmed against the controller.
+     It has been - the curve reads correctly - so the warning is gone
+     (2026-08-26). It was advice for bring-up, not a live condition. */
 }
 
 function stage(s){
@@ -176,7 +186,17 @@ function stage(s){
   cls(el, "stale", !!(rd && !rd.ok));
   const cf = CFG.stage_temp || {};
   $("stageChan").textContent = cf.channel || "—";
-  $("stageType").textContent = cf.tc_type || "—";
+  $("stageType").textContent = cf.tc_type ? `type ${cf.tc_type}` : "—";
+  const hs = $("hwStageTemp");
+  if(hs){
+    hs.textContent = st.enabled ? num(st.value, 1) : "off";
+    cls(hs, "stale", !!(rd && !rd.ok));
+    // Only ever a number if the channel is declared kind:"voltage"; a DAQmx
+    // thermocouple channel returns °C and no millivolts.
+    const mv = s.snapshot["stage.temp.volts"];
+    $("stageVolts").textContent = typeof mv === "number"
+      ? num(mv, 5) + " V" : "not measured";
+  }
 }
 
 /* Hero readouts that aren't already covered by pressure()/stage(): the
@@ -258,7 +278,9 @@ function instruments(s){
 
 function gauges(s){
   const list = s.gauges || [];
-  cls($("gaugeCard"), "hidden", !list.length);
+  // The CARD always shows now - it carries the chamber gauge's channel and
+  // curve as well as these tiles - so only the tile section is hidden.
+  cls($("gaugeSub"), "hidden", !list.length);
   if(!list.length) return;
   const box = $("gauges");
   reconcile(box, list, g => g.id, g => `
@@ -287,9 +309,14 @@ function gauges(s){
 }
 
 function aux(s){
-  cls($("auxCard"), "hidden", !s.aux.length);
+  // The CARD always shows - it carries the stage TC's channel and type as well
+  // as these tiles - so only the "Other" block is hidden when there are none.
+  cls($("auxSub"), "hidden", !s.aux.length);
   if(!s.aux.length) return;
   const box = $("aux");
+  /* Same shape as the Stage block above it: name, reading, channel, type,
+     voltage. Asked for 2026-08-27 - "Stage temp is the same as the other
+     thermocouples, so make the others have the same fields". */
   reconcile(box, s.aux, a => a.id, a => `
     <div class="tile" data-id="${esc(a.id)}">
       <div class="top">
@@ -298,15 +325,32 @@ function aux(s){
         <span class="read"><span data-f="val">—</span
           ><span class="unit">${esc(a.unit||"")}</span></span>
       </div>
-      <div class="kv"><span>Raw</span><span data-f="volts">—</span></div>
+      <div class="kv"><span>Channel</span><span data-f="chan">—</span></div>
+      <div class="kv"><span>Type</span><span data-f="kind">—</span></div>
+      <div class="kv"><span>Voltage</span><span data-f="volts">—</span></div>
     </div>`);
+  let anyTc = false;
   for(const a of s.aux){
     const el = box.querySelector(`[data-id="${CSS.escape(a.id)}"]`);
     if(!el) continue;
-    put(el, "val", sci(a.value, 4));
+    // A thermocouple reads in degrees, not decades - fixed 1 dp, like the
+    // stage TC, rather than the sci() the generic aux channel used to get.
+    const tc = a.kind === "thermocouple";
+    anyTc = anyTc || tc;
+    put(el, "val", tc ? num(a.value, 1) : sci(a.value, 4));
+    put(el, "chan", a.channel || "—");
+    put(el, "kind", tc ? `thermocouple, type ${a.tc_type || "?"}` : (a.kind || "—"));
     put(el, "volts", a.volts === undefined || a.volts === null
-      ? "—" : num(a.volts,4) + " V");
+      ? "not measured" : num(a.volts,5) + " V");
   }
+  // Said once for the card, not once per tile.
+  const hint = $("tcVoltHint");
+  if(hint) hint.textContent = anyTc
+    ? "No millivolts for a thermocouple channel: DAQmx does the cold-junction "
+      + "compensation and linearisation on the module and returns °C, so the "
+      + "raw signal never reaches this program. A channel declared "
+      + "kind: \"voltage\" in reactor.yaml does report volts."
+    : "";
 }
 
 let idGroupsLoaded = false;
@@ -357,6 +401,8 @@ function valveId(s){
 function recipe(s){
   const r = s.recipe;
   const running = ["running","paused","aborting"].includes(r.state);
+  runForms.setRunActive(running, r.started_at);
+  cls($("liveEditBadge"), "hidden", !running);
   const pre = s.prestart || {};
   // Pre-start and a run both drive the plasma-ground relay, so only one of them
   // can be armed at a time (the server refuses the overlap with a 409 too).
@@ -365,10 +411,11 @@ function recipe(s){
   $("resumeBtn").disabled = r.state !== "paused";
   $("abortBtn").disabled  = !running;
   $("preStartBtn").disabled = running || !!pre.running;
-  $("preStopBtn").disabled  = !pre.running;
-  // Stop only ends the SEQUENCE, so it greys out the moment the plasma has
-  // struck and held - exactly when the tool is primed and most likely to need
-  // backing out of. Abort stays live for that whole primed state.
+  // Abort is the only way out of a pre-start (2026-08-28). There used to be a
+  // Stop button beside it that ended the SEQUENCE and left the tool primed -
+  // Ar flowing, fill pulsing - so it greyed out at the moment the operator was
+  // most likely to want out, and Abort had to be pressed anyway. Abort stays
+  // live across the whole primed state, running or struck-and-held.
   $("preAbortBtn").disabled = running || !(pre.running || pre.done);
 
   const pEl = $("preStatus");
@@ -387,18 +434,25 @@ function recipe(s){
     ? `${r.recipe} — ${r.state}${r.phase ? " · " + r.phase : ""}`
       + (r.error ? ` · ${r.error}` : (r.message ? ` · ${r.message}` : ""))
     : "No run in progress.";
-  $("recipeBar").style.width =
-    ((r.cycles_total ? r.cycle / r.cycles_total : 0)*100).toFixed(1) + "%";
-  updateEta(r, running);
-  $("rCycle").textContent  = r.cycles_total ? `${r.cycle} / ${r.cycles_total}` : "—";
-  $("rStep").textContent   = r.step_desc || "—";
-  $("rRemain").textContent = (r.step_remaining_s ?? null) === null
-    ? "—" : num(r.step_remaining_s, 2) + " s";
+  // A run that ENDED leaves nothing behind here except a finished one's final
+  // tally: an abort used to leave the bar part-filled and the cycle/step/
+  // remaining frozen at whatever they were when it was pressed, which reads
+  // like a run still going (2026-09-09). "done" keeps its numbers - they are
+  // the result; anything else (aborted, error, idle) clears.
+  const live = running || r.state === "done";
+  $("recipeBar").style.width = live
+    ? ((r.cycles_total ? r.cycle / r.cycles_total : 0)*100).toFixed(1) + "%" : "0%";
+  runForms.updateEta(r, running);
+  $("rCycle").textContent  = live && r.cycles_total
+    ? `${r.cycle} / ${r.cycles_total}` : "—";
+  $("rStep").textContent   = live ? (r.step_desc || "—") : "—";
+  $("rRemain").textContent = live && (r.step_remaining_s ?? null) !== null
+    ? num(r.step_remaining_s, 2) + " s" : "—";
 
   // --- phase strip: which cycle step is active ---
   // step_index is 1-based over the mode's own step list, so walking the
   // *visible* phases in order works for EE-ALD (4) and EE-CVD (2) alike.
-  const cycling = running && r.phase === "cycling";
+  const cycling = running && r.phase === "cycling";   // cleared when not
   const activeIdx = cycling ? r.step_index : 0;
   const phases = [...document.querySelectorAll("#phaseStrip .phase")]
                    .filter(el => !el.classList.contains("hidden"));
@@ -451,18 +505,7 @@ function fmtDur(s){
   return h ? `${h}h ${String(m).padStart(2,"0")}m`
            : `${m}m ${String(sec).padStart(2,"0")}s`;
 }
-function updateEta(r, running){
-  const showing = running || r.state === "paused";
-  const elapsed = (showing && r.started_at) ? (Date.now()/1000 - r.started_at) : null;
-  $("rElapsed").textContent = elapsed == null ? "—" : fmtDur(elapsed);
 
-  const eta = showing ? (r.run_remaining_s ?? null) : null;
-  const held = showing && r.paused;
-  $("rEta").textContent = eta == null ? "—"
-    : fmtDur(eta) + (held ? " (held)" : "");
-  $("rFinish").textContent = eta == null ? "—"
-    : new Date(Date.now() + eta*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-}
 
 // ------------------------------------------------ run recording + auto-download
 let runData = null;     // {startT, rows:[...]} while a run is active
@@ -539,24 +582,22 @@ function conns(s){
       m.connected ? "OK" : "FAIL", m.error || m.device_info || ""));
   for(const i of s.instruments)
     rows.push(tr(i.label || i.id, "SCPI · VISA", i.resource,
-      i.connected ? "OK" : "FAIL", i.error || i.identity || ""));
+      ...connState(i, i.identity || "")));
   for(const p of (s.power_supplies || [])){
     if(p.driver === "keithley_2260b"){
       // Address column shows the USB serial, not just the port: the port is
       // resolved FROM the serial and can move, the serial cannot.
       rows.push(tr(p.label || p.id, "Keithley 2260B · SCPI over USB serial",
         `${p.port || "?"} · serial ${p.usb_serial || "?"}`,
-        p.connected ? "OK" : "FAIL",
-        p.error
-          || (p.questionable
-                ? `questionable status 0x${(p.questionable).toString(16)}`
-                : (p.output_on ? "output ON" : "output off"))));
+        ...connState(p, p.questionable
+                        ? `questionable status 0x${(p.questionable).toString(16)}`
+                        : (p.output_on ? "output ON" : "output off"))));
     } else {
       rows.push(tr(p.label || p.id, "Glassman ASCII · serial · monitor + HV off",
         `${p.port || "?"} ${p.baud || "?"} addr ${p.address}`,
-        p.connected ? "OK" : "FAIL",
-        p.error || ((p.faults && p.faults.length) ? "FAULT: " + p.faults.join(", ")
-                    : (p.firmware ? "firmware " + p.firmware : ""))));
+        ...connState(p, (p.faults && p.faults.length)
+                        ? "FAULT: " + p.faults.join(", ")
+                        : (p.firmware ? "firmware " + p.firmware : ""))));
     }
   }
   const e = s.ellipsometer;
@@ -607,11 +648,12 @@ function ellipsometer(s){
   }
 }
 function tr(a,b,c,state,detail){
-  const color = state === "OK" ? "var(--ok)" : "var(--bad)";
-  return `<tr><td>${esc(a)}</td><td>${esc(b)}</td>
-    <td style="font-family:var(--mono)">${esc(c||"—")}</td>
+  const color = state === "OK" ? "var(--ok)"
+              : state === "RETRY" ? "var(--warn)" : "var(--bad)";
+  return `<tr><td title="${esc(a)}">${esc(a)}</td><td>${esc(b)}</td>
+    <td style="font-family:var(--mono)" title="${esc(c||"")}">${esc(c||"—")}</td>
     <td style="color:${color};font-weight:600">${esc(state)}</td>
-    <td style="color:var(--dim)">${esc(detail||"")}</td></tr>`;
+    <td style="color:var(--dim)" title="${esc(detail||"")}">${esc(detail||"")}</td></tr>`;
 }
 
 // The event log lives on the Diagnostics tab, so a condition that needs seeing
@@ -627,7 +669,7 @@ function liveAlerts(s){
   const out = [];                            // {msg, bad} - bad = red, else amber
   const r = s.recipe || {};
   for(const [stream, error] of Object.entries(s.logging?.errors || {}))
-    out.push({msg: `Recording failure (${stream}): ${error}`, bad: true});
+    out.push({msg:`Recording failure (${stream}): ${error}`, bad:true});
 
   if(r.state === "error" && r.error) out.push({msg: r.error, bad: true});
 
@@ -636,6 +678,16 @@ function liveAlerts(s){
   const g = s.regulator || {};
   if(g.running && g.in_bounds === false)
     out.push({msg: `precursor fill pressure out of bounds (target ${num(g.target_torr,3)} Torr)`,
+              bad: false});
+
+  /* Every other commanded value its own measurement disagrees with, on the
+     same rule (Supervisor.setpoint_flags). Added 2026-09-01 after the N2 line
+     on Mo-017 sat at a setpoint it never reached with nothing to say so: "All
+     params should be monitored like the precursor pressure." Warn-only - the
+     setpoint is still written exactly as typed. */
+  for(const f of (s.setpoint_flags || []))
+    out.push({msg: `${f.label} ${num(f.measured,2)} ${f.unit} vs setpoint `
+                   + `${num(f.commanded,2)} ${f.unit} (${(f.off_frac*100).toFixed(0)}% off)`,
               bad: false});
 
   // Plasma out mid-beam, while it is out.
@@ -667,51 +719,98 @@ function liveAlerts(s){
    Keyed by timestamp+message to drop the overlap between the seed and the first
    few frames. Two genuinely identical events in the same millisecond would
    collapse into one; that is a fair trade for not double-printing every reload. */
-let EVENTS = [];
-let EVENT_SEEN = new Set();
+const MAX_CHIPS = 4;
 
-function pushEvents(list){
+/* Repaints only when the set of conditions actually changes - this runs at
+   5 Hz, and rebuilding the header every frame made the chips flicker and stole
+   any text selection in them. */
+let LAST_CHIP_SIG = "";
+function renderAlertChips(live){
+  const sig = live.map(a => `${a.bad ? "!" : "."}${a.msg}`).join("|");
+  if(sig === LAST_CHIP_SIG) return;
+  LAST_CHIP_SIG = sig;
+  const shown = live.slice(0, MAX_CHIPS);
+  const rest = live.length - shown.length;
+  setHtml($("alertChips"),
+    shown.map(a => `<div class="alertchip${a.bad ? " bad" : ""}" title="${esc(a.msg)}"
+                     >⚠ ${esc(a.msg)}</div>`).join("")
+    + (rest > 0 ? `<div class="alertchip more" title="click for the event log"
+                    >+${rest} more</div>` : ""));
+}
+
+/* The event log the panel renders. Seeded once from /api/events (the server
+   keeps 20000) and then appended from each telemetry frame, which carries only
+   the last 200 - shipping the whole buffer 5x a second would be about a MB/s of
+   repetition, which is precisely the wrong thing to do over Tailscale.
+
+   Keyed by timestamp+message to drop the overlap between the seed and the first
+   few frames. Two genuinely identical events in the same millisecond would
+   collapse into one; that is a fair trade for not double-printing every reload. */
+const LOG_CAP = 200000;          // matches the server's own buffer
+
+/* Two panels, one mechanism: an event list and the errors-only subset. Both
+   are seeded once and tailed from every frame, and both dedupe on
+   timestamp+message so the seed and the first frames do not double-print. */
+function makeLog(){ return {rows: [], seen: new Set()}; }
+const EVENT_LOG = makeLog();
+const ERROR_LOG = makeLog();
+
+function pushLog(log, list){
   let added = 0;
   for(const e of list || []){
     const key = `${e.t}|${e.message}`;
-    if(EVENT_SEEN.has(key)) continue;
-    EVENT_SEEN.add(key);
-    EVENTS.push(e);
+    if(log.seen.has(key)) continue;
+    log.seen.add(key);
+    log.rows.push(e);
     added++;
   }
-  if(EVENTS.length > 20000){
-    EVENTS = EVENTS.slice(-20000);
-    EVENT_SEEN = new Set(EVENTS.map(e => `${e.t}|${e.message}`));
+  if(log.rows.length > LOG_CAP){
+    log.rows = log.rows.slice(-LOG_CAP);
+    log.seen = new Set(log.rows.map(e => `${e.t}|${e.message}`));
   }
   return added;
 }
 
+function renderLog(el, rows){
+  setHtml(el, rows.slice().reverse().map(e =>
+    `<div><span class="t">${clock(e.t)}</span>
+     <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
+}
+
 async function seedEvents(){
-  try{
-    const r = await fetch("/api/events");
-    if(!r.ok) return;
-    pushEvents((await r.json()).events || []);
-  }catch(_){ /* the live tail alone still works */ }
+  for(const [url, key, log] of [["/api/events", "events", EVENT_LOG],
+                                ["/api/errors", "errors", ERROR_LOG]]){
+    try{
+      const r = await fetch(url);
+      if(!r.ok) continue;
+      pushLog(log, (await r.json())[key] || []);
+    }catch(_){ /* the live tail alone still works */ }
+  }
+  renderLog($("events"), EVENT_LOG.rows);
+  renderLog($("errors"), ERROR_LOG.rows);
+  updateErrCount();
+}
+
+function updateErrCount(){
+  const n = ERROR_LOG.rows.length;
+  $("errCount").textContent = n ? `${n} logged this session` : "";
+  if(!n) setHtml($("errors"),
+    `<div class="quiet">Nothing yet. Errors and flags land here as they
+     happen, and in the run's own <code>_errors.log</code>.</div>`);
 }
 
 function events(s){
   // Only re-render when something actually arrived - this runs at 5 Hz and the
-  // log can be twenty thousand rows.
-  if(pushEvents(s.events)){
-    setHtml($("events"), EVENTS.slice().reverse().map(e =>
-      `<div><span class="t">${clock(e.t)}</span>
-       <span class="k-${esc(e.kind)}">${esc(e.message)}</span></div>`).join(""));
+  // log can be two hundred thousand rows.
+  if(pushLog(EVENT_LOG, s.events)) renderLog($("events"), EVENT_LOG.rows);
+  if(pushLog(ERROR_LOG, s.errors)){
+    renderLog($("errors"), ERROR_LOG.rows);
+    updateErrCount();
   }
 
   const live = liveAlerts(s);
-  const chip = $("alertChip");
-  cls(chip, "hidden", !live.length);
   cls($("diagDot"), "on", !!live.length);
-  if(live.length){
-    const more = live.length > 1 ? `  (+${live.length - 1} more)` : "";
-    chip.textContent = `⚠ ${live[0].msg}${more}`;
-    cls(chip, "bad", live[0].bad);
-  }
+  renderAlertChips(live);
 }
 
 const charts = createLiveCharts({$, trend, num, clock, sci, fmtCurrent,
@@ -742,7 +841,7 @@ const runForms = createRunForms({$, document, storage:localStorage, fetchImpl:fe
     drawAllCharts();
   }
   for(const b of btns) b.onclick = () => show(b.dataset.tab);
-  $("alertChip").onclick = () => show("diag");
+  $("alertChips").onclick = () => show("diag");
   show(localStorage.getItem("activeTab") || "run");
 })();
 
@@ -781,6 +880,8 @@ document.addEventListener("click", async ev => {
 
 $("aldStart").onclick = async () => {
   runForms.saveParams();
+  const gasErr = runForms.gasScheduleError();
+  if(gasErr){ alert(gasErr); $("gasSchedSection").open = true; return; }
   const cvd = runForms.runMode() === "cvd";
   const params = runForms.runParams();
   const what = cvd
@@ -793,7 +894,7 @@ $("aldStart").onclick = async () => {
   try{
     await post(cvd ? "/api/run/cvd" : "/api/run/ald", params);
     iStartedThisRun = true;       // so only this browser saves the CSV at the end
-    await runForms.refreshRunName(true); // this name is now used; offer the next one
+    await runForms.refreshRunName(true);   // this name is now used; offer the next one
   }catch(_){}
 };
 
@@ -802,20 +903,22 @@ $("aldStart").onclick = async () => {
 // commands hardware that cannot respond.
 $("preStartBtn").onclick = async () => {
   runForms.saveParams();
-  // The bias is the one output here that energises the sample, so the dialog
-  // states it explicitly rather than leaving the operator to remember what is
-  // in the field.
+  // The bias is the one output that energises the sample, so the dialog states
+  // it explicitly rather than leaving the operator to remember what is in the
+  // field - including the fact that pre-start now only ARMS it.
   const biasV = Math.abs(parseFloat($("p_sample_bias_v").value) || 0);
   const biasSign = parseInt($("p_sample_bias_polarity").value, 10) < 0 ? "−" : "+";
   const biasLine = biasV > 0
-    ? `Sample bias: ${biasSign}${biasV} V — the stage WILL be energised.`
+    ? `Sample bias: armed at ${biasSign}${biasV} V, output OFF — the stage is `
+      + `energised only around each beam, once the run starts.`
     : "Sample bias: 0 V — stage bias stays off.";
   if(!confirm("Set Ar Pneumatic, Plasma Ground, and Precursor Fill to Remote.\n"
     + "Turn on HV at the Glassman front panel if you want plasma.\n\n"
     + "Pre-start will switch ON the steering, grid and collimating supply "
-    + "outputs — they stay on for the whole run — then open the Ar pneumatic, "
-    + "flow Ar, start the precursor fill pulse, and strike the plasma and hold "
-    + "it. It retries the strike until you press Stop pre-start.\n\n"
+    + "outputs — they stay on for the whole run — then soft-open the Ar "
+    + "pneumatic (pulsed in, not one flip), flow Ar, start the precursor fill "
+    + "pulse, and strike the plasma and hold it. It retries the strike until "
+    + "you press Abort pre-start.\n\n"
     + biasLine)) return;
   const P = k => parseFloat($("p_"+k).value);
   const p = runForms.runParams();
@@ -875,13 +978,17 @@ $("shutdownBtn").onclick = async () => {
 
   const btn = $("shutdownBtn");
   btn.disabled = true;
-  $("shutdownHint").textContent = "Shutting down… this page will go offline. "
-    + "Start the server again from the Reactor Interface shortcut.";
+  $("shutdownHint").style.color = "";
+  $("shutdownHint").textContent = "Releasing the DAQ and the serial ports…";
   try{
+    // This response now arrives AFTER the teardown has run, and carries a
+    // receipt of what was let go - so there is something real to show rather
+    // than "the page went offline, probably fine".
     const r = await post("/api/server/shutdown");
     setLink("shutting down", "warn");
     if(r && r.also_killed && r.also_killed.length)
       toast(`Also killed ${r.also_killed.length} other server instance(s)`, true);
+    transport.watchShutdown(r);
   }catch(_){
     // A 501 means this server cannot stop itself; post() already toasted.
     btn.disabled = false;
@@ -889,7 +996,31 @@ $("shutdownBtn").onclick = async () => {
   }
 };
 
-$("preStopBtn").onclick = () => post("/api/prestart/stop");
+/* Did it actually stop, and is the tool ready to start again?
+
+   Reported 2026-08-27: the button greyed out, the server stayed up holding the
+   DAQ and the COM ports, and the page said nothing. The first version of this
+   watcher answered that by polling until the port went quiet - but the port
+   going quiet was never the question. uvicorn releases the listening socket
+   BEFORE the lifespan teardown, so "not responding" arrives while the DAQ and
+   COM8-COM12 may still be held, and the page was reporting success on the one
+   fact that was never in doubt.
+
+   Zach, 2026-09-10: "there is no way for me to know if it worked or not. I
+   need some confirmation things are shut down and ready to be booted again,
+   and it needs to be a lot faster."
+
+   So the server now tears down INSIDE the request and answers with a receipt
+   (see /api/server/shutdown). `receipt` here is that answer, and it is the
+   real confirmation - by the time it arrives every port has already been let
+   go. All this loop adds is the second half of "ready to be booted again": the
+   process is gone, so the shortcut will not hit "port already in use".
+
+   250 ms, not 1500: the whole stop is now ~1 s, and a 1.5 s poll turned that
+   into a wait that LOOKED like a hang. */
+
+
+
 $("preAbortBtn").onclick = () => post("/api/prestart/abort");
 
 $("pauseBtn").onclick  = () => post("/api/recipe/pause");
@@ -952,3 +1083,18 @@ window.addEventListener("pageshow", event => {
   pageVisible = true;
   resumeTransport(bootstrapComplete);
 });
+
+function connState(dev, whenOk){
+  if(dev.connected) return ["OK", whenOk];
+  const r = dev.retry;
+  if(!r) return ["FAIL", dev.error || ""];
+  const ago = Math.max(0, Math.round(Date.now()/1000 - (r.last || 0)));
+  const down = Math.max(0, Math.round(Date.now()/1000 - (r.first || 0)));
+  return ["RETRY",
+    `try ${r.attempts}, ${ago}s ago · down ${fmtSpan(down)} · ${r.error || ""}`];
+}
+function fmtSpan(sec){
+  if(sec < 60) return `${sec}s`;
+  if(sec < 3600) return `${Math.floor(sec/60)}m${String(sec%60).padStart(2,"0")}s`;
+  return `${Math.floor(sec/3600)}h${String(Math.floor(sec%3600/60)).padStart(2,"0")}m`;
+}

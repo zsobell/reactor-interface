@@ -3,13 +3,14 @@
 The complete, honest answer. Read it before assuming the software will protect
 anything.
 
-## Only explicitly requested automatic behavior
+## Automatic actions follow the operator's specified behavior
 
-The program has no general chamber-pressure interlock, arm/disarm gate, or
-reactor-wide protective policy. It does implement the requested Ar isolation
-interlock, fill-pressure flag, recipe/pre-start automation and lifecycle cleanup
-specified below. Manual commands and these declared sequences determine what
-moves; a generic assertion that nothing acts automatically is incorrect.
+Commands execute **exactly as given**. There is no chamber-pressure interlock, no
+MFC setpoint clamp, no watchdog that closes valves, no arm/disarm gate, no
+general refusal to actuate, or general auto-close on shutdown. The requested
+Ar isolation interlock, soft-open sequence, run/pre-start cleanup and flags below
+are explicit exceptions. A setpoint is written as typed subject to that isolation
+interlock; a valve follows its configured opening sequence.
 
 This is deliberate and was done at the operator's explicit direction. **Zach is
 the sole arbiter of reactor behavior.** An earlier version of this program had a
@@ -23,7 +24,7 @@ say-so.** If you think one is warranted, propose it and wait for a yes. (See the
 
 ## The guards that exist — because they were requested
 
-Two, both explicitly requested by Zach, both narrow:
+Three, all explicitly requested by Zach, all narrow:
 
 1. **Fill-pressure flag.** During a run (EE-ALD or EE-CVD), if the precursor
    fill pressure drifts more than ±20% off its setpoint (a run parameter,
@@ -38,10 +39,28 @@ Two, both explicitly requested by Zach, both narrow:
    `set_valve`. The UI disables the Ar tile's Set Flow button and shows why
    while the valve is closed.
 
-Both exist **only** because the operator asked for them directly, and both
-are narrow — a flag that never stops anything, and a single valve/MFC pairing
-that refuses one specific invalid combination rather than gating anything
-reactor-wide. Neither is a precedent for adding more without asking first.
+3. **Ar pneumatic soft open** (2026-08-26). The Ar isolation valve is never
+   opened in one flip. Every open of it — the Hardware tab, pre-start, a
+   recipe step — bleeds it in with a **0.05 s pulse, waits 0.5 s**, and only
+   then opens it, so the Ar built up behind it does not dump into the reactor
+   all at once. Zach's words: *"so as to let built up Ar into the reactor more
+   slowly."* It was five pulses on the first pass; he cut it to one on
+   2026-08-26 because the pneumatic is too slow for a short command to move it
+   far, so five pulses were simply five inrushes and the chamber gauge tripped
+   off anyway. Which valve behaves this way is `soft_open` in
+   `config/reactor.yaml`; the three numbers are operator settings in the Run
+   tab's **Advanced timing** panel, and setting the pulse count to 0 turns it
+   back into a plain flip. It is in `Supervisor.set_valve`, not in the callers,
+   precisely so that "any time" means any time.
+
+   The pulses' *closes* deliberately use the quiet write path, so they do not
+   fire the isolation interlock above — they are part of opening, not a close,
+   and re-opening an already-open valve must not silently stop the gas.
+
+These exist **only** because the operator asked for them directly, and each is
+narrow — a flag that never stops anything, a single valve/MFC pairing that
+refuses one specific invalid combination, and a pulse shape for one valve.
+None is a precedent for adding more without asking first.
 
 ## The DC supply outputs (requested 2026-08-21)
 
@@ -59,16 +78,20 @@ and, on when the sample bias should come up:
 > stability when the beam dump is grounded. Start at prestart so I can see how
 > things are working before the run starts."
 
+That quotation records the original request. The later sample-bias bracket
+supersedes its bias timing; the table below describes current behavior.
+
 What that means in code (`Supervisor.supplies_output_on` / `_off`, driven by
 `prestart_output` in `config/reactor.yaml`):
 
-| Trigger | Effect |
-|---|---|
-| Pre-start begins | outputs **ON**, before any gas |
-| Reignite / pause / beam on-off | **nothing** |
-| Run ends, aborts, or crashes | outputs **OFF** |
-| **Stop** pre-start | **nothing** (hands over primed, like Ar and the fill) |
-| **Abort** pre-start | outputs **OFF** |
+| Trigger | Effect (steering, grid, collimating) | Effect (sample bias) |
+|---|---|---|
+| Pre-start begins | outputs **ON**, before any gas | **armed** — level and polarity set, output left **OFF** |
+| Beam on / beam off | **nothing** | **ON** a lead time before, **OFF** a trail time after |
+| Reignite / pause | **nothing** | **nothing** |
+| Run ends, aborts, or crashes | outputs **OFF** | output **OFF** |
+| **Stop** pre-start (`stop_prestart`, no longer a button) | **nothing** (hands over primed, like Ar and the fill) | **nothing** (stays armed, output off) |
+| **Abort** pre-start | outputs **OFF** | output **OFF** |
 
 Three properties of this are deliberate and should not be "tidied":
 
@@ -111,13 +134,38 @@ when neither has been. It is not read from a status register: `:OUTP:MODE?`
 returns 0 regardless of state on these units, which had everything reading CV.
 See [KEITHLEY_2260B.md](KEITHLEY_2260B.md).
 
-### The sample bias
+### The sample bias follows the beam (changed 2026-08-26)
 
 The stage/sample bias supply is the conditional one, and the only supply whose
-**voltage** pre-start sets automatically. All four Keithleys accept manual
-voltage/current commands from the Hardware tab. Its output comes on at pre-start **only when the
-run's Sample bias field is non-zero**; at zero it is explicitly commanded off
-and an event says so, rather than leaving the operator to infer it.
+**voltage** this program sets. Until 2026-08-26 its output came on at pre-start
+and stayed on for the whole run, like the coils. It no longer does, because a
+live bias makes the stage thermocouple unreadable:
+
+> "the sample bias thermocouple issue has become untenable. We need the sample
+> bias to trigger 0.2 s before the e-beam and turn off 0.2 s after. [...] At
+> least then I can get good thermocouple data when the e-beam is off."
+
+So now:
+
+- **Pre-start arms it**: the level and the lead orientation are programmed, the
+  output is left **off**, and an event says "armed ... output follows the beam".
+  At a Sample bias of 0 the supply is never switched on at all.
+- **Each beam brackets it.** In EE-ALD the bias comes up `Bias lead` seconds
+  before every cycle's beam and drops `Bias trail` seconds after it — both in
+  the Run tab's Advanced timing panel, 0.2 s by default. In EE-CVD the beam is
+  one long step, so the bias leads the strike at the start of the run and drops
+  after the beam at the end of it.
+- **A reignite does not cycle it.** It brackets the beam *step*, not every flip
+  of the plasma-ground relay — a 0.1 s reignite pulse is shorter than the lead,
+  so chasing it would leave the bias down for most of the restrike.
+- **It costs no run time.** Both flips are scheduled tasks, not awaited steps:
+  the lead counts down inside pump A and the trail inside pump B, so a cycle
+  still takes exactly the sum of its step durations
+  (`tests/test_sample_bias_bracket.py` asserts this alongside the timings).
+- **The level is written once per run**, on the first bracket, so a level
+  adjusted by hand on the Hardware tab mid-run is not overwritten every cycle.
+- **However a run ends** — finished, aborted, or crashed — every queued flip is
+  cancelled and the output is switched off. An abort does not honour the trail.
 
 Only the voltage is set. **Pre-start never sets a current limit** on any of the
 four — that stays wherever the front panel or the Hardware-tab current field
@@ -130,8 +178,9 @@ applied to the *logged* voltage. There is no software limit on the bias
 magnitude beyond the supply's own rating.
 
 Because this is the one output that puts a potential on the sample, the
-pre-start confirmation dialog states it explicitly — magnitude, sign, and
-whether the stage will be energised at all.
+pre-start confirmation dialog states it explicitly — magnitude, sign, and that
+pre-start only arms it, the stage being energised around each beam once the run
+starts.
 
 Details in [KEITHLEY_2260B.md](KEITHLEY_2260B.md).
 
@@ -155,7 +204,7 @@ from exactly two places, both of them an ending:
   recipe runner calls it from its own `finally`, so a crash is covered too.)
 - `abort_prestart()` (below) — the same intent for the pre-run state.
 
-There is still **no application route to set a Glassman voltage or turn its HV on**, from the
+There is still **no way to set a voltage, and no way to turn HV on**, from the
 supervisor, the API or the browser. The Hardware-tab card has no inputs; not
 disabled inputs, absent ones. Voltage/current control remains a not-yet.
 
@@ -193,11 +242,131 @@ It exists because `stop_prestart` only ends the *sequence* and deliberately
 leaves the tool primed — Ar flowing, fill pulsing, beam grounded — which is the
 state a successful pre-start hands to Start run. That meant the Stop button
 greyed out at exactly the moment the operator most often wanted to back out.
+**That button was removed on 2026-08-28**, along with `POST
+/api/prestart/stop`: abort is the one way out, running or already struck, and
+it calls `stop_prestart` itself on the way through. The method stays; only the
+button and its route went.
 
 The relay ending de-energised is deliberate, not an oversight: the relay box
 runs off a 9 V battery that drains only while the relay is energised (see
-[HARDWARE.md](HARDWARE.md)), so at rest it belongs off. HV is commanded off in
-the same call, so there is nothing for an un-grounded relay to do.
+[HARDWARE.md](HARDWARE.md)), so at rest it belongs off. HV is commanded off
+**first** and the ground released after (reordered 2026-09-09 — releasing the
+ground energises the beam path, so doing that while the supply might still be
+up was the wrong way round), and there is then nothing for an un-grounded relay
+to do.
+
+## Ending a RUN lands in the same place (2026-09-09)
+
+Operator: *"Abort does not leave the plasma ground in the right position or
+clear the run progress section."* A clean run's teardown parks the relay
+de-energised, but an abort never reaches a teardown, so it stopped at the
+runner's immediate "ground the beam" and left the relay **energised** — on that
+same 9 V battery — for as long as nobody noticed.
+
+`Supervisor.finish_run()` now ends every run the same way, in this order:
+
+1. the runner grounds the beam at once (its own `finally`, unchanged — this is
+   the fast response while HV may still be up),
+2. HV off, DC supply outputs off,
+3. the relay released to its resting, de-energised state — skipped if it is
+   already there, so a clean run does not write the line twice.
+
+The Run panel follows: a run that ended by abort clears its progress bar, cycle
+counter, step and remaining-time readouts and its phase strip. A **completed**
+run keeps its final tally — that is the result, not stale state.
+
+## Pause stops the action, not just the clock (2026-09-01)
+
+Operator: *"pause doesn't really work. in the purge step the timer keeps moving,
+in the e-beam step the beam stays on. God knows what happens if I pause in the
+dose step... It needs to stop the current action (e-beam or dose) and stop the
+timer. The step should resume with the correct timing on resume."*
+
+Pause used to be honoured only at a step **boundary** and inside the beam step's
+tick loop. `_sleep` - which every wait and every dose ran on - never looked at
+it, so a pump counted straight through a pause and a paused dose held its valve
+open for as long as the operator was away.
+
+Now, on pause:
+
+- the **dose valve closes**, and reopens on resume with the rest of its pulse
+  still to run;
+- the **plasma ground goes back on** (beam off), in EE-ALD and EE-CVD alike, and
+  the beam is re-struck on resume with a fresh settle window so the re-strike is
+  not misread as a dead plasma and reported as a reignite;
+- **every clock stops**: the step countdown, the exposure budget, the cycle
+  number and "est. remaining". The step resumes with exactly what was left.
+
+What pause does **not** touch, asked and answered the same day: the **sample
+bias stays energised** and the **scheduled gases keep flowing**. Do not add
+either without asking.
+
+## Setpoint vs measurement warnings (2026-09-01)
+
+The precursor fill pressure has always flagged when it drifts off setpoint.
+Operator, after the N2 line on Mo-017 sat at a flow it never reached with
+nothing to say so: *"All params should be monitored like the precursor
+pressure"* — and, on what the check should be, *"just a warning that the
+setpoint doesn't match the measured flow value during a run."*
+
+`Supervisor.setpoint_flags()` applies exactly the fill regulator's rule -
+`|measured - commanded| / commanded` past the same **Fill flag tolerance (%)** -
+to every MFC and to any supply whose output is on. Up to four live conditions
+show as chips in the top right of the header, and each clears itself the moment
+its condition does.
+
+**A supply in CC mode is exempt** (2026-09-09). A current-limited supply sits
+below its voltage setpoint by definition — that is what constant current *is* —
+so judging it against that setpoint produced a warning that stood for the whole
+run, on the coils, every run. The check now applies only where the supply
+claims CV, and `mode_label()` already says nothing at all unless a limit has
+actually been reached, so an unloaded or settling output is not judged either.
+
+**These warn and nothing else.** No setpoint is refused, clamped or altered by
+any of it; a flagged value is still written to the hardware exactly as typed.
+There is a `SETPOINT_SETTLE_S` grace after each commanded change so a device on
+its way to a new value is not called a mismatch - a display debounce, nothing
+about the control path depends on it. A commanded **zero** is not monitored:
+there is no relative baseline, and a gas that is off is not a fault.
+
+Deliberately NOT added: any minimum-flow or out-of-range check. The MFCs report
+a `min_setpoint` of 0.015 sccm, which would not have caught the 0.6 sccm case
+anyway, and every other candidate threshold would have been a number this
+program invented.
+
+## Parameters are editable mid-run (2026-09-01)
+
+Operator: *"I need to be able to change parameters mid run."* A recipe used to
+be a snapshot taken at Start - the Run tab's fields stayed editable during a run
+and simply went nowhere.
+
+`Supervisor.update_run_params()` diffs the new parameters against what the run
+is actually using, rebuilds a recipe from them, and copies the numbers into the
+**running** Step objects (`RecipeRunner.apply_params`). A gas that is flowing
+right now is re-commanded immediately rather than at its next window; the fill
+regulator is **retuned in place** rather than restarted, because restarting it
+would close the fill valve and drop the chamber off setpoint mid-run.
+
+A step's duration is read when the step starts, so a timing change lands the
+next time that step runs. The cycle count is re-read every cycle: raised, the
+run keeps going; **lowered below the cycle in progress, that cycle finishes and
+the run ends there with its full teardown** (operator's call - never a half
+cycle in the data).
+
+Switching a scheduled gas **off** counts as a change like any other
+(2026-09-09). It did not used to: an unticked gas simply vanishes from the
+freshly built recipe, `apply_params` only looked at gases present in both, and
+the live schedule object survived untouched — so a line the operator had
+switched off, showing 0 in every field, went on being commanded to its old flow
+every cycle. A gas that disappears is now shut off immediately and dropped from
+the plan; one that appears is picked up. The EE-ALD lead-in list is re-read
+every cycle for the same reason (it used to be captured once before the cycle
+loop, which would have re-armed a gas that had just been switched off).
+
+Every change is timestamped from the start of the run, tagged with the cycle,
+and written into the run's parameters report under **CHANGES DURING THE RUN**,
+which is rewritten on each edit. Without it the report would list the values the
+run ended with and quietly describe a run that never happened.
 
 ## The Shut down server button (requested 2026-08-25)
 
@@ -217,7 +386,114 @@ through the normal lifespan teardown - so the server you are talking to releases
 its devices properly, and any orphan holding a serial port is gone before you
 restart. It then calls `os._exit(0)` rather than falling out of `main()`,
 because something in the stack keeps a non-daemon thread alive; that is exactly
-how the orphan survived.
+how the orphan survived. Since 2026-08-28 that exit is **unconditional** — it
+used to run only when the button had been pressed, so a second copy started by
+mistake, which fails to bind port 8000 and tears itself back down, took the
+plain `return` path and lingered in exactly the same way.
+
+### Why it kept not working (fixed 2026-08-28)
+
+The button was still leaving the old server up. From `server.log`: "[command]
+server shutdown requested from the UI" at 14:53:20 and then **not one further
+line from that process** - no teardown, no error - while the next server started
+20 s later and got "resource is reserved" from the DAQ and "Access is denied" on
+COM9. The old instance was still there at 14:54:10, when a second shutdown
+finally taskkilled it.
+
+That silence places it exactly: uvicorn's `Server.shutdown()` closes the
+listening socket **first** (which is why the next server binds port 8000 and
+looks fine), then drains open connections, and only *then* runs the lifespan
+shutdown that is `Supervisor.stop()`. No teardown lines with the port already
+free means it was parked in the drain — and that drain is
+`timeout_graceful_shutdown`, which uvicorn defaults to **None: wait forever**.
+One WebSocket whose peer never answers the close - a laptop asleep over
+Tailscale, a browser gone without a FIN - holds the whole stop there, keeping
+the DAQ and COM8-COM12 for as long as it likes. uvicorn says so at INFO
+("Waiting for connections to close"), which `log_level="warning"` suppresses,
+which is why the log showed nothing at all.
+
+Two fixes, both in `reactor/__main__.py`:
+
+- **the drain is bounded** (`SHUTDOWN_DRAIN_S`). On timeout uvicorn cancels
+  the stragglers and *continues into the lifespan shutdown*, so the devices are
+  still released properly. That is why it is a timeout and not `force_exit`,
+  which would skip the teardown altogether.
+- **the hard deadline behind it can now actually fire.** It never could:
+  its first statement referenced a `log` this module never defined, so the
+  daemon thread died on `NameError` instead of calling `os._exit(1)`. Nothing
+  else in that module used `log`, so nothing ever raised anywhere visible - and
+  there is no trace of it in `server.log` because the deadline had never once
+  been reached, the drain having hung long before 20 s were up.
+
+Measured end to end afterwards, launched exactly as the shortcut does and with a
+client parked on the WebSocket: shim and interpreter both gone **1.3 s** after
+the button. `tests/test_server_shutdown.py` pins the mechanism.
+
+### Then reordered so it can be BELIEVED (2026-09-10)
+
+1.3 s is not what the operator experienced, and "it stopped answering" is not
+what he needed to know. Zach: *"20 s hold is way too long, and there is no way
+for me to know if it worked or not. I need some confirmation things are shut
+down and ready to be booted again."*
+
+Both complaints come from the ordering above. The drain releases the socket
+**first**, so everything the browser can observe happens before the teardown it
+actually cares about - the page was calling success on the DAQ and COM8-COM12
+while they might still be held. And the sibling sweep ran a `powershell.exe`
+`Win32_Process` query *inside the request*, 1-3 s of cold start before the
+browser was told anything at all.
+
+So the teardown moved in front of the answer. `POST /api/server/shutdown` now:
+
+1. sweeps siblings from `config/instances/` (see `reactor/instances.py`) and
+   ends them through the Win32 API - no subprocess, microseconds;
+2. runs `Supervisor.stop()` **here**, in the request;
+3. answers with a **receipt** - each step, what was released and by which port
+   (`grid_bias (COM11)`, `DAQ tasks`), what failed, how long it took;
+4. and only then asks the process to end.
+
+`Supervisor.stop()` is idempotent and returns that receipt, so the lifespan
+calling it again on the way out costs nothing. The whole request answers in
+~20 ms in the original idle measurement, not a deadline for active cleanup;
+`SHUTDOWN_DEADLINE_S` dropped 20 s → 3 s, since everything after the
+response is socket cleanup.
+
+The merged implementation shares one shutdown task across concurrent callers.
+Run abort, pre-start abort, device disconnects and recording close have bounded
+waits. The receipt distinguishes released ports from failures, including a
+five-second recording-close timeout and latched recording errors. Released
+ports do not establish that experiment files drained successfully. A late
+worker may continue until process exit; a recording failure does not add new
+hardware actions.
+
+The third defect was the one that had been doing real damage. uvicorn 0.52's
+`Server.startup()` calls `sys.exit(STARTUP_FAILURE)` when the bind fails, and
+that `SystemExit` propagates out of `server.run()`, **jumping over the
+`os._exit` that merely followed it**. On 2026-09-10 two servers started within
+the same second; one bound port 8000, the other failed and lingered holding
+COM10 and COM11, so `steering` and `grid_bias` reported themselves unreachable
+and looked for all the world like the USB fault that had happened earlier the
+same afternoon. `server.run()` is now inside a `try/finally` with the exit in
+the finally, and the test checks that **structurally** (walks the AST for a
+`Try` containing the `run()` call whose `finalbody` calls `os._exit`) rather
+than grepping for `os._exit(0)` - the string was there the whole time.
+
+Note the process tree, which is what made the first press look inert under the
+old command-line sweep: the venv's `.venv\Scripts\pythonw.exe` is a launcher
+shim that re-execs the real interpreter as a child (measured — from a venv,
+`os.getppid()` is the shim while this process's own image is
+`Python312\python.exe`), so **two** processes matched the query and it skipped
+both, its own PID and its parent. The first press therefore always reported
+"killed 0", and it was the *next* server's press that found the pair.
+
+The registry sweep does not have that problem: only the process that actually
+runs `main()` registers, so there is exactly one entry per server and the only
+PID excluded is the caller's own. The shim is dealt with explicitly instead —
+the entry records `ppid`/`pimage`, and `kill_others` takes the parent too, but
+**only when that parent is itself a Python interpreter**. Started from a
+terminal the parent is the shell, and killing an operator's console because
+they launched the server from it would be its own bug. Measured 0.6 ms to sweep
+a registered pair, both processes gone.
 
 **Any shutdown aborts whatever is in progress.** Operator decision,
 2026-08-25: *"any server shutdown should abort the run or prestart. Safety over
@@ -234,9 +510,9 @@ wording depending on whether a run is live:
   otherwise walk away from all of it with nothing left to manage it.
 - **Gas stops either way.** The MKS G50s zero their own setpoints when the
   Modbus master disconnects. Device behaviour, not something this program does.
-- **Valve lines are not commanded.** Last-commanded state is persisted and
-  restored at startup.
-- **With no run active, HV and the DC supply outputs stay as they are** -
+- **Unrelated valve lines are not reset.** Run/pre-start cleanup commands the
+  valves specified above. Last-commanded state is persisted and restored at startup.
+- **With no run or primed pre-start active, HV and the DC supply outputs stay as they are** -
   neither driver commands anything on `disconnect()`. So a shutdown outside a
   run stops the gas while leaving the supplies energised.
 
@@ -270,9 +546,9 @@ prevent a broken *config*; they do not constrain reactor operation.
 - **Valve position after a restart is not reliably "closed."** This used to say
   closing DAQmx output tasks resets lines low on task close - that was an
   assumption, and it was contradicted 2026-08: the Ar pneumatic isolation valve
-  stayed physically open across a server restart. Run/pre-start cleanup commands its specified outputs on server stop; it does
-  not reset every DAQ line. Whatever other lines do on task close is DAQ
-  hardware behavior and should not be assumed to go low. Because there is no
+  stayed physically open across a server restart. The program never commands a
+  reset on stop; whatever the line does on task close is DAQ hardware
+  behaviour, and it should not be assumed to go low. Because there is no
   valve-position feedback (see IDENTIFYING_HARDWARE.md), the program now
   persists the last-commanded state per valve (`config/valve_state.json`) and
   restores it into its internal model at startup - this is a best-effort
@@ -286,7 +562,7 @@ prevent a broken *config*; they do not constrain reactor operation.
   swept line low. **Pre-start** (see docs/RUN_PROGRAM.md) has the same shape: its
   plasma-strike step retries **indefinitely, with no timeout or attempt
   limit**, by explicit instruction — the only way to stop it is the operator
-  pressing Stop pre-start. These are the emergency/manual-stop controls in the
+  pressing Abort pre-start. These are the emergency/manual-stop controls in the
   program; nothing else auto-stops.
 - **A digital-output write only ever touches its own line.** Early on, writing
   one valve re-drove its whole DAQ module from an in-memory vector, which could
@@ -294,10 +570,3 @@ prevent a broken *config*; they do not constrain reactor operation.
   closed the Ar isolation valve). Fixed 2026-08-03 by giving every valve its
   own single-line DAQmx task. Worth remembering if a future change touches
   `reactor/devices/nidaq.py`: never go back to one task per module for DO.
-
-## Recording and software structure
-
-Recording and analysis file work run in workers; hardware ownership stays with
-the Supervisor. Recording failures are visible warnings, not a new interlock.
-PrestartController implements the existing pre-start behavior, and RecipeRunner
-implements recipes. See [ARCHITECTURE.md](ARCHITECTURE.md).

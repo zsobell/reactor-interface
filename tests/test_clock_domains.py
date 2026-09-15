@@ -63,7 +63,7 @@ async def main():
     runner = RecipeRunner(host, clock=t.sources)
     async def sleep(seconds):
         t.advance(seconds)
-    with patch.object(recipe_module, 'asyncio', SimpleNamespace(sleep=sleep)):
+    with patch.object(runner, '_tick', sleep):
         await runner._electron_beam(Step(op='electron_beam', switch='plasma', seconds=0.3))
     c.check('ALD exposure survives backward wall jumps', len(trace) == 2
             and abs(trace[-1][0] - trace[0][0] - 0.3) < 1e-8)
@@ -77,7 +77,7 @@ async def main():
         if polls == 3:
             raise asyncio.CancelledError
         t.advance(seconds)
-    with patch.object(recipe_module, 'asyncio', SimpleNamespace(sleep=watch_sleep)):
+    with patch.object(runner, '_tick', watch_sleep):
         try:
             await runner._beam_watch(Step(op='beam_start', switch='plasma'))
         except asyncio.CancelledError:
@@ -98,7 +98,8 @@ async def main():
                 if polls == 3:
                     raise asyncio.CancelledError
                 host.snapshot['inst.ammeter'] = 0 if polls == 1 else 0.001
-        with patch.object(recipe_module, 'asyncio', SimpleNamespace(sleep=dropout_sleep)):
+        with patch.object(runner, '_tick', dropout_sleep), \
+                patch.object(recipe_module, 'asyncio', SimpleNamespace(sleep=dropout_sleep, CancelledError=asyncio.CancelledError)):
             try:
                 await runner._beam_watch(Step(op='beam_start', switch='plasma',
                                              reignite_pulse_s=0.1, reignite_settle_s=0.15))

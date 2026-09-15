@@ -112,9 +112,6 @@ const PRETTY = {
   gauge_ar_baratron: "Ar Baratron (Torr)",
   gauge_prec1_dose: "Precursor 1 dose pressure (Torr)",
   gauge_prec2_dose: "Precursor 2 dose pressure (Torr)",
-  mfc_ar: "Ar flow (sccm)",
-  mfc_h2: "H2 flow (sccm)",
-  mfc_n2: "N2 flow (sccm)",
   beam_on: "Beam on (0/1)",
   dosing: "Dosing (0/1)",
   paused: "Paused (0/1)",          // only in run exports written before 2026-08-21
@@ -129,6 +126,11 @@ const PRETTY = {
 function pretty(col){
   if(!col) return "";
   if(PRETTY[col]) return PRETTY[col];
+  // MFC columns are named by the GAS the line was flowing when the file was
+  // written (mfc_NH3), and that changes - so there is nothing static to look
+  // up. The column carries the name; this just makes it read like a label.
+  const mfc = /^mfc[._](.+?)(?:[._]flow)?$/.exec(col);
+  if(mfc) return `${mfc[1]} flow (sccm)`;
   const m = /^Thick\(([^)]*)\)/.exec(col);        // FS-1: "Thick(A).1"
   if(m) return `Thickness (${m[1] === "A" ? "Å" : m[1]})`;
   // Whatever else the refit carried. A model with a Drude layer adds
@@ -165,13 +167,25 @@ function seedX(){
    Persistence
    =========================================================================== */
 
+let layoutSaveTimer = null;
 function saveLayout(){
   LAYOUT.cols = +$("cols").value;
   LAYOUT.plotH = +$("plotH").value;
   LAYOUT.settings = $("showSettings").checked;
-  try{ localStorage.setItem(LS_KEY, JSON.stringify(LAYOUT)); }catch(_){}
+  const body = JSON.stringify(LAYOUT);
+  try{ localStorage.setItem(LS_KEY, body); }catch(_){}
+  /* Debounced, and fire-and-forget: saveLayout() runs on every drag of a range
+     field, and a failed POST leaves the local cache correct. Last write wins
+     if two browsers edit at once - single-operator tool. */
+  clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = setTimeout(() => {
+    fetch("/api/analysis_layout", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body,
+    }).catch(() => {});
+  }, 600);
 }
-function loadLayout(){
+async function loadLayout(){
+  // Cache first (instant, and survives an unreachable server), server on top.
   try{
     const raw = localStorage.getItem(LS_KEY);
     if(raw){
@@ -179,6 +193,16 @@ function loadLayout(){
       if(l && Array.isArray(l.plots)) LAYOUT = l;
     }
   }catch(_){}
+  try{
+    const r = await fetch("/api/analysis_layout");
+    if(r.ok){
+      const l = (await r.json()).layout;
+      if(l && Array.isArray(l.plots)){
+        LAYOUT = l;
+        try{ localStorage.setItem(LS_KEY, JSON.stringify(l)); }catch(_){}
+      }
+    }
+  }catch(_){ /* server copy unavailable - the cache above already applied */ }
   LAYOUT.cols = LAYOUT.cols || 2;
   LAYOUT.plotH = LAYOUT.plotH || 260;
   LAYOUT.settings = LAYOUT.settings !== false;
@@ -967,7 +991,7 @@ window.addEventListener("focus", async () => {
 });
 
 (async () => {
-  loadLayout();
+  await loadLayout();
   loadAuger();
   renderGrid();
   await rescan();

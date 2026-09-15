@@ -3,6 +3,7 @@ import asyncio
 import sys
 import tempfile
 import threading
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -28,9 +29,22 @@ async def main():
         c.check("path escape refused", status == 404)
         outside = Path(td) / "outside.csv"
         outside.write_text("outside")
-        (root / "link.csv").symlink_to(outside)
-        status, _ = await request(app, "/api/data/file?name=link.csv")
-        c.check("symlink escape refused", status == 404)
+        try:
+            (root / "link.csv").symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 1314:
+                raise
+            # Windows without Developer Mode cannot create symlinks. Exercise
+            # the same resolved-path boundary; Linux CI also uses a real link.
+            real_resolve = Path.resolve
+            def resolve(path, *args, **kwargs):
+                return outside if path == root / "link.csv" else real_resolve(path, *args, **kwargs)
+            with patch.object(Path, "resolve", resolve):
+                status, _ = await request(app, "/api/data/file?name=link.csv")
+            c.check("resolved symlink escape refused (Windows privilege fallback)", status == 404)
+        else:
+            status, _ = await request(app, "/api/data/file?name=link.csv")
+            c.check("symlink escape refused", status == 404)
 
         text = b"Time\tThick(A).1\n0\t1\n0.0166666667\t2\n"
         url = "/api/ellipsometer/merge?sidecar=Test/Test_ellipsometer.csv"

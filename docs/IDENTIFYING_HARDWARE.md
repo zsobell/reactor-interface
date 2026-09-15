@@ -100,7 +100,10 @@ to, and whether the box's outputs map to lines in order. A labelled box (D1, D2,
 
 ### The in-app sweep (built for this)
 
-The web UI has a **Valve identification** card. It pulses each output line of a
+The web UI has a **Valve identification** card on the Diagnostics tab,
+collapsed by default since 2026-08-26 (it is bring-up equipment, used once per
+line, and the event log took its place as that tab's main panel). It pulses
+each output line of a
 chosen control-box module in turn — per line, on/off × N, then a gap, then the
 next line — while you watch the box. When a valve moves, click its name to bind
 it to the line being pulsed. A sticky red **STOP** bar drives every line low the

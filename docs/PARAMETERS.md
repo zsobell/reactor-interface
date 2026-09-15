@@ -5,6 +5,10 @@ views. The original dictionary remains the public API payload and the input to
 saved settings and human-readable experiment reports. Typed views capture an
 independent copy, retaining unknown fields, original strings and explicit nulls.
 Changing a request dictionary after submission cannot change the captured run.
+Legacy `h2_gas_*` and `n2_gas_*` keys migrate to `mfc1_gas_*` and
+`mfc2_gas_*`; an explicitly supplied channel key wins. Channel identity stays
+stable when the gas selected on a device changes. Reports receive each
+instance's gas names rather than sharing a global gas map.
 
 `RunParameters.normalize(payload, mode=...)` converts run fields once at the
 Supervisor entry point. Builders accept either this object or a dictionary for
@@ -28,6 +32,11 @@ The normalization is deliberately compatible with existing Python coercions:
   No new Pydantic input constraints were added. Multiple simultaneous invalid
   run fields may now report a different first conversion error; failed building
   still occurs before admission or hardware commands.
+
+The merged schema also retains sample-bias lead/trail brackets and paired
+`simultaneous` gas schedules. Simultaneous gases each cover the whole window;
+their percentages do not divide exposure. A lone simultaneous selection or a
+mixture of simultaneous and sequential selections is rejected.
 
 ## Pre-start compatibility
 

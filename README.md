@@ -193,6 +193,7 @@ config/{labels,valve_state,last_run,run_params}.json  operator metadata/settings
 reactor/
   __main__.py                 CLI and single-process Uvicorn lifecycle
   dependencies.py             device factories and per-instance persistence paths
+  instances.py                per-instance server registry and Windows sibling shutdown
   config.py                   validated hardware/configuration models
   supervisor.py               hardware ownership, polling, commands and run admission
   telemetry.py                stable snapshots and bounded WebSocket fan-out

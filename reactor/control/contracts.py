@@ -19,6 +19,8 @@ class ProcessCommands(ValveCommands, Protocol):
 
 class RecipeHost(ProcessCommands, Protocol):
     async def finish_run(self) -> None: ...
+    async def set_sample_bias_output(self, on: bool, *, volts: float | None = None,
+                                     polarity: int = 1, reason: str = '') -> None: ...
 
 
 class PrestartHost(ProcessCommands, Protocol):

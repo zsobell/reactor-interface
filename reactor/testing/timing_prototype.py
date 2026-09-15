@@ -30,8 +30,9 @@ class Deadline:
 class ExposureModel:
     """Characterized ALD exposure without gas scheduling or run-level cleanup.
 
-    Pause and graceful abort gate the next sample; they do not interrupt a
-    sample or restrike already underway. ``cancel`` models coroutine cancellation.
+    The characterization adapter delivers pause at a sample endpoint; pause
+    grounds the beam and resume re-strikes with fresh grace. An in-flight
+    restrike completes before that pause. ``cancel`` models coroutine cancellation.
     Timer/ack tokens must match this run and its current generation exactly.
     Caller supplies a unique run ID for each instance.
     """
@@ -94,7 +95,7 @@ class ExposureModel:
         self.pending = None
         if self.phase == "finishing":
             self.phase = "done"
-        elif command.reason == "beam on":
+        elif command.reason in ("beam on", "resumed - beam on"):
             self._strike_at = self.clock()
             return self._next_sample()
         elif command.reason == "reignite pulse":
@@ -113,7 +114,7 @@ class ExposureModel:
             return self._finish()
         if "operator" in self.reasons:
             self.phase = "paused"
-            return ()
+            return self._command(True, "paused - beam off")
         self._sample_at = self._now()
         self._timer("sample", min(self.tick, self.remaining))
         return ()
@@ -147,7 +148,10 @@ class ExposureModel:
     def resume(self) -> tuple[Command, ...]:
         self._now()
         self.reasons.discard("operator")
-        return self._next_sample() if self.phase == "paused" else ()
+        if self.phase == "paused":
+            self.phase = "resuming"
+            return self._command(False, "resumed - beam on")
+        return ()
 
     def abort(self) -> tuple[Command, ...]:
         self._now()

@@ -22,7 +22,7 @@
   <a class="badge" href="/analysis" target="_blank" rel="noopener"
      style="text-decoration:none" title="Post-run plotting (opens in a new tab)">Analysis ↗</a>
   <div class="spacer"></div>
-  <div class="alertchip hidden" id="alertChip" title="latest warning — click for the event log"></div>
+  <div class="alertchips" id="alertChips"></div>
 </header>
 
 <div id="banners"></div>
@@ -72,6 +72,8 @@
 
     <section class="card" id="aldCard">
       <h2><span id="runTitle">EE-ALD run</span>
+        <span class="livebadge hidden" id="liveEditBadge"
+              title="A run is in progress. Editing a field below changes THAT run, not the next one - every change is logged in the run's parameters file.">editing the run in progress</span>
         <span class="grow"></span>
         <select id="modeSel" class="mini" title="run mode">
           <option value="ald" selected>EE-ALD</option>
@@ -84,21 +86,26 @@
             <label>Cycles<input type="number" id="p_cycles" min="1" step="1" value="100"></label>
             <label>Dose pressure (Torr)<input type="number" id="p_dose_pressure_torr" step="0.001" value="0.020"></label>
             <label>Dose time (s)<input type="number" id="p_dose_s" step="0.01" value="0.05"></label>
-            <label>Pump A (s)<input type="number" id="p_pump_a_s" step="0.1" value="10"></label>
+            <label>Pump A after dose (s)<input type="number" id="p_pump_a_s" step="0.1" value="10"></label>
             <label data-mode="ald">Beam exposure (s)<input type="number" id="p_beam_s" step="0.1" value="5"></label>
-            <label data-mode="ald">Pump B (s)<input type="number" id="p_pump_b_s" step="0.1" value="10"></label>
+            <label data-mode="ald">Pump B after beam (s)<input type="number" id="p_pump_b_s" step="0.1" value="10"></label>
             <label>Sample bias (V)<input type="number" id="p_sample_bias_v" step="1" min="0" value="0"></label>
             <label>Bias polarity<select id="p_sample_bias_polarity">
               <option value="1">+ positive to stage</option>
               <option value="-1">&minus; negative to stage</option>
             </select></label>
           </div>
-          <div class="hint">Sample bias comes on at pre-start only when it is
-            non-zero, and stays on for the whole run. Enter a magnitude — the
-            supply cannot source a negative voltage, so the polarity toggle
-            records which way you ran the leads onto the stage and signs the
-            <em>logged</em> voltage. Its current limit stays whatever you set on
-            the supply's front panel.</div>
+          <div class="hint">Sample bias <strong>follows the electron
+            beam</strong>: pre-start arms the supply at this level but leaves its
+            output off, and each beam brings it on a lead time early and drops it
+            a trail time late (both in <em>Advanced timing</em>). That leaves the
+            stage unenergised for the rest of the cycle, so the stage
+            thermocouple reads clean whenever the beam is off. A reignite does
+            not cycle it. Zero here means the supply is never switched on at all.
+            <br>Enter a magnitude — the supply cannot source a negative voltage,
+            so the polarity toggle records which way you ran the leads onto the
+            stage and signs the <em>logged</em> voltage. Its current limit stays
+            whatever you set on the supply's front panel.</div>
         </div>
 
         <details class="sub" id="gasSchedSection" open>
@@ -112,34 +119,43 @@
               </tr></thead>
               <tbody>
                 <tr>
-                  <td>H2</td>
-                  <td><input type="checkbox" id="p_h2_gas_enable"></td>
-                  <td><select id="p_h2_gas_order">
+                  <td data-gas-name="mfc1">MFC 1</td>
+                  <td><input type="checkbox" id="p_mfc1_gas_enable"></td>
+                  <td><select id="p_mfc1_gas_order">
                     <option value="first">First</option>
                     <option value="second">Second</option>
+                    <option value="simultaneous">Simultaneous</option>
                   </select></td>
-                  <td><input type="number" id="p_h2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
-                  <td><input type="number" id="p_h2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc1_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc1_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
                 </tr>
                 <tr>
-                  <td>N2</td>
-                  <td><input type="checkbox" id="p_n2_gas_enable"></td>
-                  <td><select id="p_n2_gas_order">
+                  <td data-gas-name="mfc2">MFC 2</td>
+                  <td><input type="checkbox" id="p_mfc2_gas_enable"></td>
+                  <td><select id="p_mfc2_gas_order">
                     <option value="first">First</option>
                     <option value="second" selected>Second</option>
+                    <option value="simultaneous">Simultaneous</option>
                   </select></td>
-                  <td><input type="number" id="p_n2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
-                  <td><input type="number" id="p_n2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc2_gas_pct" min="0" max="100" step="1" value="50" style="width:72px"></td>
+                  <td><input type="number" id="p_mfc2_gas_flow_sccm" min="0" step="0.1" value="5" style="width:72px"></td>
                 </tr>
               </tbody>
             </table>
             <div class="params" style="margin-top:10px">
-              <label>Overlap (s)<input type="number" id="p_gas_overlap_s" min="0" step="0.05" value="0.5"></label>
+              <label>Gas overlap (s)<input type="number" id="p_gas_overlap_s" min="0" step="0.05" value="0.5"></label>
             </div>
             <div class="hint">Overlap is how long the incoming gas starts before
               the outgoing one stops. The same value applies at every handoff —
-              First to Second, and Second back to First.</div>
-            <div class="hint" data-mode="ald">H2/N2 turn on automatically around
+              First to Second, and Second back to First.<br>
+              <strong>Simultaneous</strong> means the gases do not divide the
+              window at all: every gas set to it flows for the whole window at
+              its own rate, so the % is greyed out. It takes <em>two</em> —
+              setting only one gas to Simultaneous is refused when you press
+              Start, since a lone one is almost always a half-finished edit.
+              They still lead the beam in by the overlap.</div>
+            <div class="hint" data-mode="ald"><span data-gas-name="mfc1">MFC 1</span>/<span
+              data-gas-name="mfc2">MFC 2</span> turn on automatically around
               the beam exposure instead of running the whole cycle. Percentages
               cover the beam's lit exposure time, freezing along with the
               exposure clock during a reignite or a pause. "First" also leads
@@ -157,25 +173,71 @@
 
         <details class="sub" id="advSection">
           <summary><span class="stitle">Advanced timing</span><span class="sum" id="reigniteHint"></span></summary>
+          <!-- Grouped by the mechanism each number belongs to (2026-08-28). As
+               one flat 12-field grid, "Ar pulse gap" sat next to "Bias trail"
+               with nothing to say they have nothing to do with each other, and
+               a single hint at the bottom had to explain all of them at once.
+               Each group now carries its own explanation, under the fields it
+               is about. -->
           <div class="dbody">
+            <div class="subhead">Precursor fill regulation</div>
             <div class="params">
               <label class="adv">Fill pulse on (s)<input type="number" id="p_fill_pulse_on_s" step="0.01" value="0.10"></label>
               <label class="adv">Fill pulse off (s)<input type="number" id="p_fill_pulse_off_s" step="0.01" value="0.30"></label>
-              <label class="adv">Flag tolerance (%)<input type="number" id="p_tolerance_pct" step="1" value="20"></label>
-              <label class="adv">Min current (µA)<input type="number" id="p_min_current_ua" step="1" value="500"></label>
-              <label class="adv">Reignite pulse (s)<input type="number" id="p_reignite_pulse_s" step="0.01" min="0" value="0.10"></label>
-              <label class="adv">Reignite settle (s)<input type="number" id="p_reignite_settle_s" step="0.01" min="0" value="0.15"></label>
-              <label class="adv">Ar close delay (s)<input type="number" id="p_ar_close_delay_s" step="1" min="0" value="10"></label>
+              <label class="adv">Fill flag tolerance (%)<input type="number" id="p_tolerance_pct" step="1" value="20"></label>
             </div>
             <div class="hint">Flag tolerance only warns — fill pressure drifting
-              past it raises an event, it never stops or changes the run.<br>
+              past it raises an event, it never stops or changes the run.</div>
+
+            <div class="subhead">Beam strike and reignite</div>
+            <div class="params">
+              <label class="adv">Min beam current (µA)<input type="number" id="p_min_current_ua" step="1" value="500"></label>
+              <label class="adv">Reignite pulse (s)<input type="number" id="p_reignite_pulse_s" step="0.01" min="0" value="0.10"></label>
+              <label class="adv">Reignite settle (s)<input type="number" id="p_reignite_settle_s" step="0.01" min="0" value="0.15"></label>
+            </div>
+            <div class="hint">Sample current below <strong>min beam current</strong>
+              is what counts as the plasma being out, and is what triggers a
+              reignite.<br>
               <strong>Reignite settle</strong> is also how long the initial strike
               is given to draw current before it counts as a failure — the first
               flip of the plasma ground is always required to start the beam, so
-              it is never reported as a reignite.<br>
-              <strong>Ar close delay</strong>: at the end of a run the Ar setpoint
-              is zeroed, this delay runs, then the Ar pneumatic closes. The run
-              then parks with the plasma ground OFF (beam-on mode).</div>
+              it is never reported as a reignite.</div>
+
+            <div class="subhead">Sample bias bracket</div>
+            <div class="params">
+              <label class="adv">Bias lead before beam (s)<input type="number" id="p_sample_bias_lead_s" step="0.05" min="0" value="0.20"></label>
+              <label class="adv">Bias trail after beam (s)<input type="number" id="p_sample_bias_trail_s" step="0.05" min="0" value="0.20"></label>
+            </div>
+            <div class="hint">How far ahead of the beam the sample bias comes on,
+              and how long after it goes off. The lead runs down inside pump A and
+              the trail inside pump B, so bracketing the beam does not make a
+              cycle any longer. A reignite does not cycle the bias. In EE-CVD the
+              beam is one long step, so the bias leads the strike at the start of
+              the run and drops after the beam at the end of it.</div>
+
+            <div class="subhead">Ar pneumatic soft open</div>
+            <div class="params">
+              <label class="adv">Ar soft-open pulses<input type="number" id="p_ar_soft_open_pulses" step="1" min="0" value="1"></label>
+              <label class="adv">Ar pulse width (s)<input type="number" id="p_ar_soft_open_on_s" step="0.01" min="0" value="0.05"></label>
+              <label class="adv">Ar pulse gap (s)<input type="number" id="p_ar_soft_open_gap_s" step="0.1" min="0" value="0.50"></label>
+            </div>
+            <div class="hint">The Ar pneumatic is never opened in one flip — it is
+              pulsed this many times, this wide, this far apart, and only then
+              left open, so the Ar built up behind it bleeds in instead of
+              dumping. It applies to <em>every</em> open of that valve: the
+              Hardware tab, pre-start, and the recipe. Zero pulses turns it off
+              and an open becomes one plain flip again.<br>
+              One pulse is the default: the pneumatic is too slow for a short
+              command to move it far, so more pulses just meant more
+              inrushes.</div>
+
+            <div class="subhead">End of run</div>
+            <div class="params" style="max-width:300px">
+              <label class="adv">Ar close delay (s)<input type="number" id="p_ar_close_delay_s" step="1" min="0" value="10"></label>
+            </div>
+            <div class="hint">At the end of a run the Ar setpoint is zeroed, this
+              delay runs, then the Ar pneumatic closes. The run then parks with
+              the plasma ground OFF (beam-on mode).</div>
           </div>
         </details>
 
@@ -185,8 +247,8 @@
             <div class="params">
               <label class="adv">Run name<input type="text" id="p_run_name" placeholder="Mo-001" autocomplete="off"></label>
               <label class="adv">Ar flow (sccm)<input type="number" id="p_pre_ar_sccm" step="0.1" min="0" value="4"></label>
-              <label class="adv">Valve settle (s)<input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1"></label>
-              <label class="adv">Hold current (s)<input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5"></label>
+              <label class="adv">Ar valve settle (s)<input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1"></label>
+              <label class="adv">Current hold time (s)<input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5"></label>
             </div>
             <div class="hint"><strong>Run name</strong> prefixes every file this
               run writes (trace, by-cycle, parameters, ellipsometer), e.g.
@@ -197,7 +259,8 @@
               Opens the Ar pneumatic, waits, flows Ar, starts the
               precursor fill pulse, then runs the reignite protocol until sample
               current appears and holds it. <strong>The strike retries
-              indefinitely</strong> — it stops only when you press Stop pre-start.
+              indefinitely</strong> — it stops only when you press Abort
+              pre-start.
               However it ends, the beam is grounded on the way out; Ar and the
               fill pulse are left running.<br><br>
               <strong>Abort pre-start</strong> is the undo, and stays available
@@ -217,7 +280,6 @@
 
         <div class="row">
           <button id="preStartBtn">Pre-start</button>
-          <button id="preStopBtn" class="estop">Stop pre-start</button>
           <button id="preAbortBtn" class="estop">Abort pre-start</button>
           <button id="fillStart">Initiate fill pulse</button>
           <button id="fillStop">Stop fill</button>
@@ -234,10 +296,14 @@
 
         <div class="note" id="recipeInfo">No run in progress.</div>
         <div class="prog"><i id="recipeBar" style="width:0"></i></div>
+        <!-- The two labels change with the state: idle they read
+             "est. duration" / "finish if started now" off the parameters as
+             typed, running they read "est. remaining" / "finish" off the run
+             clock. -->
         <div class="progmeta">
           <span>elapsed <b id="rElapsed">—</b></span>
-          <span id="rEtaWrap">est. remaining <b id="rEta">—</b></span>
-          <span>finish <b id="rFinish">—</b></span>
+          <span id="rEtaWrap"><span id="rEtaLbl">est. duration</span> <b id="rEta">—</b></span>
+          <span><span id="rFinishLbl">finish</span> <b id="rFinish">—</b></span>
         </div>
         <div class="runstats">
           <div class="kv"><span>Cycle</span><span id="rCycle">—</span></div>
@@ -338,28 +404,69 @@
   </div>
 
   <div class="hwbottom">
-    <section class="card" id="gaugeCard">
-      <h2>Other pressure gauges</h2>
-      <div class="body"><div id="gauges" class="tilegrid"></div></div>
-    </section>
-
-    <section class="card" id="auxCard">
-      <h2>Other inputs</h2>
-      <div class="body"><div id="aux" class="tilegrid"></div></div>
-    </section>
-
-    <section class="card">
-      <h2>Instruments</h2>
-      <div class="body"><div id="instruments" class="tilegrid"></div></div>
-    </section>
-
     <!-- No setpoint controls here on purpose: the Glassman is operated by hand
          from its front panel. The one command this program ever sends it is HV
          OFF at the end of a run or on abort, and that is not driven from here.
          See docs/CONTROL_MODEL.md before adding any control. -->
-    <section class="card">
+    <section class="card" id="supplyCard">
       <h2>Power supplies</h2>
       <div class="body"><div id="supplies" class="tilegrid"></div></div>
+    </section>
+
+    <!-- Chamber pressure and the stage TC used to sit in a separate "Primary
+         sensor detail" card. They belong with the sensors they describe, which
+         is what these two cards now are - hence the names. -->
+    <section class="card" id="gaugeCard">
+      <h2>Pressure Sensors</h2>
+      <div class="body">
+        <div class="subhead">Chamber (cold cathode)</div>
+        <div class="tile" style="background:transparent;border:0;padding:0">
+          <div class="top">
+            <span class="name">Chamber pressure</span>
+            <div style="flex:1"></div>
+            <span class="read"><span id="hwPressure">—</span
+              ><span class="unit">Torr</span></span>
+          </div>
+        </div>
+        <div class="kv"><span>Gauge output</span><span id="hwPressureV">—</span></div>
+        <div class="kv"><span>Channel</span><span id="pressureChan">—</span></div>
+        <div class="kv"><span>Curve</span><span id="pressureCurve">—</span></div>
+        <div class="subhead" id="gaugeSub">Capacitance manometers</div>
+        <div id="gauges" class="tilegrid"></div>
+      </div>
+    </section>
+
+    <section class="card" id="auxCard">
+      <h2>Thermocouples</h2>
+      <div class="body">
+        <div class="subhead">Stage</div>
+        <div class="tile" style="background:transparent;border:0;padding:0">
+          <div class="top">
+            <span class="name">Stage temperature</span>
+            <div style="flex:1"></div>
+            <span class="read"><span id="hwStageTemp">—</span
+              ><span class="unit">°C</span></span>
+          </div>
+        </div>
+        <div class="kv"><span>Channel</span><span id="stageChan">—</span></div>
+        <div class="kv"><span>Type</span><span id="stageType">—</span></div>
+        <div class="kv"><span>Voltage</span><span id="stageVolts">—</span></div>
+        <div class="hint" style="margin-bottom:4px">Measurement only — this tool
+          has no heater control.</div>
+        <div class="subhead" id="auxSub">Other</div>
+        <div id="aux" class="tilegrid"></div>
+        <!-- Answers the question before it is asked: there is no millivolt
+             readout for these because DAQmx does the cold-junction
+             compensation and linearisation itself and hands back °C. A channel
+             declared kind:"voltage" in reactor.yaml DOES report volts, and the
+             Voltage row above fills in when it does. -->
+        <div class="hint" id="tcVoltHint"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Ammeter</h2>
+      <div class="body"><div id="instruments" class="tilegrid"></div></div>
     </section>
 
     <!-- The FS-1 belongs with the other hardware: it is a live instrument the
@@ -381,18 +488,6 @@
       </div>
     </section>
 
-    <section class="card">
-      <h2>Primary sensor detail</h2>
-      <div class="body">
-        <div class="kv"><span>Pressure channel</span><span id="pressureChan">—</span></div>
-        <div class="kv"><span>Pressure curve</span><span id="pressureCurve">—</span></div>
-        <div class="kv"><span>Stage TC channel</span><span id="stageChan">—</span></div>
-        <div class="kv"><span>Stage TC type</span><span id="stageType">—</span></div>
-        <div class="note" id="pressureWarn"></div>
-        <div class="hint">Stage temperature is measurement only — this tool has
-          no heater control.</div>
-      </div>
-    </section>
   </div>
 </section>
 
@@ -400,8 +495,77 @@
 <section class="pane hidden" data-pane="diag">
 
   <div class="diagtop">
-    <section class="card" id="valveIdCard">
-      <h2>Valve identification</h2>
+    <!-- The event log is the thing actually read on this tab, so it gets the
+         big top-left slot. Valve identification, which is a one-off bring-up
+         tool, is folded away at the bottom (swapped 2026-08-26). -->
+    <div class="diagcol">
+      <section class="card" data-card="errors">
+        <h2>Errors <span class="hint" style="text-transform:none;letter-spacing:0"
+              id="errCount"></span></h2>
+        <div class="body"><div id="errors"></div></div>
+      </section>
+
+      <section class="card" data-card="events">
+        <h2>Event log</h2>
+        <div class="body"><div id="events"></div></div>
+      </section>
+    </div>
+
+    <div class="diagcol">
+      <section class="card" data-card="logging">
+        <h2>Data logging</h2>
+        <div class="body">
+          <div class="row" style="margin-top:0">
+            <input id="logLabel" placeholder="General" style="flex:1;min-width:120px">
+            <button id="logStart">Start</button>
+            <button id="logStop">Stop</button>
+          </div>
+          <div class="kv"><span>File</span><span id="logFile">—</span></div>
+          <div class="kv"><span>Rows</span><span id="logRows">—</span></div>
+          <div class="hint" id="logCols"></div>
+        </div>
+      </section>
+
+      <section class="card" data-card="connections">
+        <h2>Connections</h2>
+        <div class="body" style="overflow-x:auto">
+          <!-- Fixed layout with explicit widths. With the default auto layout
+               the browser re-solves every column from its content on every
+               repaint, so the Device column visibly jumped whenever a Detail
+               cell changed width - a row count ticking over, an error string
+               appearing, a reconnect message coming and going. Reported
+               2026-08-26 (most visible over Tailscale, where the window is
+               narrower and the columns are tighter). Detail takes whatever is
+               left and ellipsises. -->
+          <table class="conntable">
+            <colgroup>
+              <col style="width:22%"><col style="width:14%"><col style="width:22%">
+              <col style="width:12%"><col>
+            </colgroup>
+            <thead><tr>
+              <th>Device</th><th>Interface</th><th>Address</th><th>State</th><th>Detail</th>
+            </tr></thead>
+            <tbody id="conns"></tbody>
+          </table>
+          <!-- Restarting picks up changed code. It is a graceful shutdown +
+               re-exec, not a kill, so Supervisor.stop() runs normally. The
+               consequences are spelled out in the confirm dialog rather than
+               here, because that is where they get read. -->
+          <div class="row" style="margin-top:12px">
+            <button id="shutdownBtn" class="danger">Shut down server</button>
+            <span class="hint" id="shutdownHint" style="flex:1"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Collapsed by default: this is bring-up equipment, used once per line.
+       Everything inside is unchanged - only its home and its wrapper moved. -->
+  <details class="card idcard" id="valveIdCard">
+    <summary><span class="stitle">Valve identification</span>
+      <span class="sum">pulse a line to see which valve moves</span></summary>
+
       <div class="body">
         <div class="hint" id="idIntro" style="margin-top:0">
           Pulses each output line in turn so you can see which valve moves. Put the
@@ -444,49 +608,7 @@
         </div>
         <div class="marks" id="idMarks"></div>
       </div>
-    </section>
-
-    <div class="diagcol">
-      <section class="card" data-card="logging">
-        <h2>Data logging</h2>
-        <div class="body">
-          <div class="row" style="margin-top:0">
-            <input id="logLabel" placeholder="General" style="flex:1;min-width:120px">
-            <button id="logStart">Start</button>
-            <button id="logStop">Stop</button>
-          </div>
-          <div class="kv"><span>File</span><span id="logFile">—</span></div>
-          <div class="kv"><span>Rows</span><span id="logRows">—</span></div>
-          <div class="hint" id="logCols"></div>
-        </div>
-      </section>
-
-      <section class="card" data-card="connections">
-        <h2>Connections</h2>
-        <div class="body" style="overflow-x:auto">
-          <table>
-            <thead><tr>
-              <th>Device</th><th>Interface</th><th>Address</th><th>State</th><th>Detail</th>
-            </tr></thead>
-            <tbody id="conns"></tbody>
-          </table>
-          <!-- Restarting picks up changed code. It is a graceful shutdown +
-               re-exec, not a kill, so Supervisor.stop() runs normally. The
-               consequences are spelled out in the confirm dialog rather than
-               here, because that is where they get read. -->
-          <div class="row" style="margin-top:12px">
-            <button id="shutdownBtn" class="danger">Shut down server</button>
-            <span class="hint" id="shutdownHint" style="flex:1"></span>
-          </div>
-        </div>
-      </section>
-    </div>
-  </div>
-
-  <section class="card" data-card="events">
-    <h2>Event log</h2>
-    <div class="body"><div id="events"></div></div>
-  </section>
+  </details>
 </section>
 
 </main>

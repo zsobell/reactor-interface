@@ -36,6 +36,7 @@ class FillController:
         self.state = {
             "running": True, "valve": valve, "gauge": gauge,
             "target_torr": target_torr, "tolerance_frac": tolerance_frac,
+            "pulse_on_s": pulse_on_s, "pulse_off_s": pulse_off_s,
             "pressure": None, "in_bounds": True, "duty": False,
         }
         self.task = asyncio.create_task(
@@ -69,6 +70,9 @@ class FillController:
 
         try:
             while not self.stop_event.is_set():
+                target = self.state["target_torr"]
+                on_s, off_s = self.state["pulse_on_s"], self.state["pulse_off_s"]
+                tol = self.state["tolerance_frac"]
                 p = self.host.snapshot.get(gauge)
                 self.state["pressure"] = p
                 if isinstance(p, (int, float)) and target > 0:

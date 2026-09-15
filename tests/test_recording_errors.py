@@ -36,18 +36,21 @@ async def main():
     for failure in ("write", "flush", "close"):
         async with VirtualReactor() as vr:
             log = vr.sup.logger
+            worker = vr.sup.recording
+            await worker.drain()
             broken = BrokenFile(failure)
             sibling = io.StringIO()
             log._run_fh, log._bycycle_fh = broken, sibling
             progress = SimpleNamespace(cycle_fraction=0.5, paused=False, step_desc="dose")
-            log.write_run_sample({"t": 1, "pressure": 2}, progress)
+            await worker.run(log.write_run_sample, {"t": 1, "pressure": 2}, progress)
             if failure != "close":
                 c.check("failed row isn't counted", log.run_rows == 0)
                 c.check("sibling stream still records", log.bycycle_rows == 1)
                 count = len(vr.sup.events)
-                log.write_run_sample({"t": 2}, progress)
+                await worker.run(log.write_run_sample, {"t": 2}, progress)
                 c.check("repeated failure does not flood events", len(vr.sup.events) == count)
-            log.stop_run_export()
+            await worker.stop_run_export()
+            await worker.drain()
             c.check(f"{failure} failure visible in telemetry",
                     bool(vr.sup.state()["logging"]["errors"]))
             c.check("recording failure emits an event",

@@ -36,3 +36,12 @@ Desktop.ini
 /server.log
 /server.log.*
 /config/run_params.json
+
+# Per-instance runtime process registry
+config/instances/
+
+# Local integration worktrees and rollback artifacts
+/.integration/
+/.baseline-master/
+/.merge-work/
+/.merge-backup/

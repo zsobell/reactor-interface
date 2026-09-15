@@ -54,6 +54,9 @@ async def characterize(currents, *, abort_sleep=None, pause_sleep=None, cancel_s
         def set(self):
             self.paused = False
 
+        def is_set(self):
+            return not self.paused
+
         async def wait(self):
             if self.paused:
                 clock.now += 1.0
@@ -75,7 +78,8 @@ async def characterize(currents, *, abort_sleep=None, pause_sleep=None, cancel_s
             runner._abort.set()
 
     # Replace module references, never mutate asyncio.sleep or global time.time.
-    with patch.object(production, "asyncio", SimpleNamespace(sleep=sleep)):
+    with patch.object(runner, "_tick", sleep), \
+            patch.object(production, "asyncio", SimpleNamespace(sleep=sleep, CancelledError=asyncio.CancelledError)):
         try:
             await runner._electron_beam(Step(op="electron_beam", switch="plasma", seconds=0.3,
                                             reignite_pulse_s=0.1, reignite_settle_s=0.15))
@@ -131,12 +135,14 @@ async def main():
             trace == [(0.0, False, "beam on"), (0.4, True, "reignite pulse"),
                       (0.5, False, "reignite - beam on"), (0.95, True, "beam off")])
     trace, _, _ = await characterize([0.001], pause_sleep=1)
-    c.check("pause leaves in-flight lit tick credited, then gates next tick",
-            trace[-1] == (1.3, True, "beam off"))
+    c.check("pause credits the lit tick, grounds the beam, then resumes exposure",
+            trace == [(0.0, False, "beam on"), (0.2, True, "paused - beam off"),
+                      (1.2, False, "resumed - beam on"), (1.3, True, "beam off")])
     trace, _, reasons = await characterize([0, 0, 0, 0, 0.001], pause_sleep=2)
     c.check("operator pause overlapping loss does not interrupt restrike",
             trace == [(0.0, False, "beam on"), (0.4, True, "reignite pulse"),
-                      (0.5, False, "reignite - beam on"), (1.95, True, "beam off")]
+                      (0.5, False, "reignite - beam on"), (0.65, True, "paused - beam off"),
+                      (1.65, False, "resumed - beam on"), (1.95, True, "beam off")]
             and frozenset({"operator", "reignite"}) in reasons)
     trace, _, _ = await characterize([0, 0, 0, 0], abort_sleep=2)
     c.check("graceful abort completes in-flight restrike before grounding",

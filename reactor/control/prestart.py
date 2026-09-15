@@ -115,12 +115,12 @@ class PrestartController:
         await attempt("fill valve",
                       self.sup.set_valve(g("fill_valve", "rpm_top"), False,
                                      reason="pre-start abort"))
-        await attempt("beam relay",
-                      self.sup.set_valve(g("plasma_switch", "plasma_ground"), False,
-                                     reason="pre-start abort - relay at rest"))
         await attempt("HV off", self.sup.hv_off(reason="pre-start abort"))
         await attempt("DC supply outputs",
                       self.sup.supplies_output_off(reason="pre-start abort"))
+        await attempt("beam relay",
+                      self.sup.set_valve(g("plasma_switch", "plasma_ground"), False,
+                                     reason="pre-start abort - relay at rest"))
 
         # The tool is no longer primed, so the UI must stop offering the abort
         # (and stop claiming pre-start is complete).

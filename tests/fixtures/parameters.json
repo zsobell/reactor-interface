@@ -26,7 +26,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "start_fill",
@@ -49,7 +53,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "cycles": 100,
@@ -75,7 +83,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -98,7 +110,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "electron_beam",
@@ -121,7 +137,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -144,7 +164,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "teardown": [
@@ -169,7 +193,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -192,7 +220,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -215,7 +247,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -238,7 +274,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "message",
@@ -261,13 +301,17 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "gas_schedules": [],
       "gas_overlap_s": 0.0
     },
-    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             ALD + e-beam (precursor 1)\n  Mode               EE-ALD\n  Cycles             100\n  Cycle length       25.05 s\n  Nominal run time   41m 45s  (2505 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  ALD + e-beam (precursor 1) \u2014 100 cycles\n    dose prec1 for 0.05 s\n    wait 10 s\n    electron beam 5 s (|I|>500 uA)\n    wait 10 s\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  (none)\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n\nCycle (repeated 100 times)\n   1. dose prec1 for 0.05 s\n   2. wait 10 s\n   3. electron beam 5 s (|I|>500 uA)\n   4. wait 10 s\n\nEnd of run\n   1. set ar to 0 sccm\n   2. wait 10 s\n   3. valve ar_pneumatic -> closed\n   4. valve plasma_ground -> closed\n   5. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  (no scheduled gas)\n\n"
+    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             ALD + e-beam (precursor 1)\n  Mode               EE-ALD\n  Cycles             100\n  Cycle length       25.05 s\n  Nominal run time   41m 45s  (2505 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  ALD + e-beam (precursor 1) — 100 cycles\n    dose prec1 for 0.05 s\n    wait 10 s\n    electron beam 5 s (|I|>500 uA)\n    wait 10 s\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  (none)\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n\nCycle (repeated 100 times)\n   1. dose prec1 for 0.05 s\n   2. wait 10 s\n   3. electron beam 5 s (|I|>500 uA)\n   4. wait 10 s\n\nEnd of run\n   1. set ar to 0 sccm\n   2. wait 10 s\n   3. valve ar_pneumatic -> closed\n   4. valve plasma_ground -> closed\n   5. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  (no scheduled gas)\n\n"
   },
   {
     "recipe": {
@@ -296,7 +340,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "start_fill",
@@ -319,7 +367,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "beam_start",
@@ -342,7 +394,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "cycles": 100,
@@ -368,7 +424,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -391,7 +451,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "teardown": [
@@ -416,7 +480,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "set_flow",
@@ -439,7 +507,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -462,7 +534,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -485,7 +561,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -508,7 +588,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "message",
@@ -531,13 +615,17 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "gas_schedules": [],
       "gas_overlap_s": 0.0
     },
-    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             EE-CVD (precursor 1)\n  Mode               EE-CVD\n  Cycles             100\n  Cycle length       10.05 s\n  Nominal run time   16m 45s  (1005 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  EE-CVD (precursor 1) \u2014 100 cycles\n    dose prec1 for 0.05 s\n    wait 10 s\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  (none)\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n   3. beam on, held for the run (|I|>500 uA)\n\nCycle (repeated 100 times)\n   1. dose prec1 for 0.05 s\n   2. wait 10 s   [freezes while the plasma is out]\n\nEnd of run\n   1. beam off\n   2. set ar to 0 sccm\n   3. wait 10 s\n   4. valve ar_pneumatic -> closed\n   5. valve plasma_ground -> closed\n   6. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  (no scheduled gas)\n\n"
+    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             EE-CVD (precursor 1)\n  Mode               EE-CVD\n  Cycles             100\n  Cycle length       10.05 s\n  Nominal run time   16m 45s  (1005 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  EE-CVD (precursor 1) — 100 cycles\n    dose prec1 for 0.05 s\n    wait 10 s\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  (none)\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n   3. beam on, held for the run (|I|>500 uA)\n\nCycle (repeated 100 times)\n   1. dose prec1 for 0.05 s\n   2. wait 10 s   [freezes while the plasma is out]\n\nEnd of run\n   1. beam off\n   2. set ar to 0 sccm\n   3. wait 10 s\n   4. valve ar_pneumatic -> closed\n   5. valve plasma_ground -> closed\n   6. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  (no scheduled gas)\n\n"
   },
   {
     "recipe": {
@@ -566,7 +654,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "start_fill",
@@ -589,7 +681,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "set_flow",
@@ -597,7 +693,7 @@
           "state": null,
           "seconds": null,
           "lit_gated": false,
-          "mfc": "h2",
+          "mfc": "mfc1",
           "sccm": 0.0,
           "below_torr": null,
           "above_torr": null,
@@ -612,7 +708,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "set_flow",
@@ -620,7 +720,7 @@
           "state": null,
           "seconds": null,
           "lit_gated": false,
-          "mfc": "n2",
+          "mfc": "mfc2",
           "sccm": 0.0,
           "below_torr": null,
           "above_torr": null,
@@ -635,7 +735,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "cycles": 2,
@@ -661,7 +765,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -684,7 +792,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "electron_beam",
@@ -707,7 +819,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -730,7 +846,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "teardown": [
@@ -755,7 +875,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -778,7 +902,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -801,7 +929,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -824,7 +956,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "message",
@@ -847,18 +983,22 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "gas_schedules": [
         {
-          "mfc": "h2",
+          "mfc": "mfc1",
           "order": "first",
           "pct": 40.0,
           "flow_sccm": 2.5
         },
         {
-          "mfc": "n2",
+          "mfc": "mfc2",
           "order": "second",
           "pct": 60.0,
           "flow_sccm": 0.0
@@ -866,7 +1006,7 @@
       ],
       "gas_overlap_s": 0.0
     },
-    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             ALD + e-beam (precursor 1)\n  Mode               EE-ALD\n  Cycles             2\n  Cycle length       21.4 s\n  Nominal run time   43s  (42.8 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  ALD + e-beam (precursor 1) \u2014 2 cycles\n    dose prec1 for 1 s\n    wait 10 s\n    electron beam 0.4 s (|I|>500 uA)\n    wait 10 s\n    gas schedule (relative to beam start, 0s handoff overlap):\n      h2: on at beam-0s, off at beam+0.16s (40% @ 2.5 sccm)\n      n2: on at beam+0.16s, off at beam+0.4s (60% @ 0 sccm)\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  ar_close_delay_s   0\n  beam_s             0.4\n  cycles             2\n  dose_s             yes\n  h2_gas_enable      false\n  h2_gas_flow_sccm   2.5\n  h2_gas_pct         40\n  n2_gas_enable      1\n  n2_gas_order       second\n  n2_gas_pct         60\n  run_name           Raw-007\n  unknown            {'future': [1, 2]}\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n   3. set h2 to 0 sccm\n   4. set n2 to 0 sccm\n\nCycle (repeated 2 times)\n   1. dose prec1 for 1 s\n   2. wait 10 s\n   3. electron beam 0.4 s (|I|>500 uA)\n   4. wait 10 s\n\nEnd of run\n   1. set ar to 0 sccm\n   2. wait 0 s\n   3. valve ar_pneumatic -> closed\n   4. valve plasma_ground -> closed\n   5. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  h2   first, 40% of the window @ 2.5 sccm\n  n2   second, 60% of the window @ 0 sccm\n  handoff overlap   0 s (the incoming gas starts this early)\n\n"
+    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             ALD + e-beam (precursor 1)\n  Mode               EE-ALD\n  Cycles             2\n  Cycle length       21.4 s\n  Nominal run time   43s  (42.8 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  ALD + e-beam (precursor 1) — 2 cycles\n    dose prec1 for 1 s\n    wait 10 s\n    electron beam 0.4 s (|I|>500 uA)\n    wait 10 s\n    gas schedule (relative to beam start, 0s handoff overlap):\n      mfc1: on at beam-0s, off at beam+0.16s (40% @ 2.5 sccm)\n      mfc2: on at beam+0.16s, off at beam+0.4s (60% @ 0 sccm)\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  ar_close_delay_s     0\n  beam_s               0.4\n  cycles               2\n  dose_s               yes\n  mfc1_gas_enable      false\n  mfc1_gas_flow_sccm   2.5\n  mfc1_gas_pct         40\n  mfc2_gas_enable      1\n  mfc2_gas_order       second\n  mfc2_gas_pct         60\n  run_name             Raw-007\n  unknown              {'future': [1, 2]}\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n   3. set MFC 1 to 0 sccm\n   4. set MFC 2 to 0 sccm\n\nCycle (repeated 2 times)\n   1. dose prec1 for 1 s\n   2. wait 10 s\n   3. electron beam 0.4 s (|I|>500 uA)\n   4. wait 10 s\n\nEnd of run\n   1. set ar to 0 sccm\n   2. wait 0 s\n   3. valve ar_pneumatic -> closed\n   4. valve plasma_ground -> closed\n   5. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  mfc1   first, 40% of the window @ 2.5 sccm\n  mfc2   second, 60% of the window @ 0 sccm\n  handoff overlap   0 s (the incoming gas starts this early)\n\n"
   },
   {
     "recipe": {
@@ -895,7 +1035,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "start_fill",
@@ -918,7 +1062,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "beam_start",
@@ -941,7 +1089,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "cycles": 2,
@@ -967,7 +1119,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -990,7 +1146,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "teardown": [
@@ -1015,7 +1175,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "set_flow",
@@ -1038,7 +1202,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "wait",
@@ -1061,7 +1229,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -1084,7 +1256,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "valve",
@@ -1107,7 +1283,11 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         },
         {
           "op": "message",
@@ -1130,12 +1310,16 @@
           "ammeter": "inst.ammeter",
           "min_current": 0.0005,
           "reignite_pulse_s": 0.1,
-          "reignite_settle_s": 0.15
+          "reignite_settle_s": 0.15,
+          "bias_v": 0.0,
+          "bias_polarity": 1,
+          "bias_lead_s": 0.0,
+          "bias_trail_s": 0.0
         }
       ],
       "gas_schedules": [],
       "gas_overlap_s": 0.25
     },
-    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             custom\n  Mode               EE-CVD\n  Cycles             2\n  Cycle length       10.05 s\n  Nominal run time   20s  (20.1 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  custom \u2014 2 cycles\n    dose prec1 for 0.05 s\n    wait 10 s\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  beam_s          ignored\n  cycles          2.9\n  gas_overlap_s   0.25\n  h2_gas_enable   no\n  h2_gas_order    ignored\n  h2_gas_pct      ignored\n  name            custom\n  pump_b_s        -\n  sample_bias_v   ignored\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n   3. beam on, held for the run (|I|>500 uA)\n\nCycle (repeated 2 times)\n   1. dose prec1 for 0.05 s\n   2. wait 10 s   [freezes while the plasma is out]\n\nEnd of run\n   1. beam off\n   2. set ar to 0 sccm\n   3. wait 10 s\n   4. valve ar_pneumatic -> closed\n   5. valve plasma_ground -> closed\n   6. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  (no scheduled gas)\n\n"
+    "report": "RUN PARAMETERS\n============================================================\n\n  Run                Raw-007\n  Recorded           2026-09-13 12:00:00\n  Recipe             custom\n  Mode               EE-CVD\n  Cycles             2\n  Cycle length       10.05 s\n  Nominal run time   20s  (20.1 s)\n\nNominal run time is the cycling phase only - the pre-start, the\nsetup and the end-of-run steps below are not counted, and a\nreignite makes the real run longer.\n\nSUMMARY\n------------------------------------------------------------\n  custom — 2 cycles\n    dose prec1 for 0.05 s\n    wait 10 s\n\nPARAMETERS SET IN THE UI\n------------------------------------------------------------\n  beam_s            ignored\n  cycles            2.9\n  gas_overlap_s     0.25\n  mfc1_gas_enable   no\n  mfc1_gas_order    ignored\n  mfc1_gas_pct      ignored\n  name              custom\n  pump_b_s          -\n  sample_bias_v     0\n\nRECIPE STEPS\n------------------------------------------------------------\nSetup (once, before the first cycle)\n   1. valve plasma_ground -> open\n   2. regulate gauge.prec1_dose to 0.02 Torr via rpm_top\n   3. beam on, held for the run (|I|>500 uA)\n\nCycle (repeated 2 times)\n   1. dose prec1 for 0.05 s\n   2. wait 10 s   [freezes while the plasma is out]\n\nEnd of run\n   1. beam off\n   2. set ar to 0 sccm\n   3. wait 10 s\n   4. valve ar_pneumatic -> closed\n   5. valve plasma_ground -> closed\n   6. run complete\n\nGAS SCHEDULE\n------------------------------------------------------------\n  (no scheduled gas)\n\n"
   }
 ]

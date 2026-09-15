@@ -80,6 +80,7 @@ class FakeDaq:
     def __init__(self) -> None:
         self._plan = None
         self.raw: dict[str, float] = {}
+        self.closed = False
         self.do_state: dict[str, bool] = {}
         self.do_writes: list[tuple[float, str, bool]] = []
         self.id_state: dict[str, bool] = {}
@@ -116,6 +117,10 @@ class FakeDaq:
 
     async def close(self) -> None:
         self.close_count += 1
+        # Recorded, not ignored: "did the DAQ actually get released" is the
+        # question a hung shutdown leaves behind - a zombie still holding it is
+        # what stops the next server from configuring its tasks.
+        self.closed = True
 
 
 class FakeMfc(Device):
@@ -135,6 +140,10 @@ class FakeMfc(Device):
         self.device_mode = "virtual"
         self.health = {"over_temp": "No", "open_circuit": "No", "interface_error": "No"}
         self.commanded_sccm: float = 0.0
+        #: Every set_setpoint_sccm(...) value, timestamped. `commanded_sccm`
+        #: alone only shows where a gas ENDED up; a schedule is about when it
+        #: was switched, and about what was NOT switched mid-window.
+        self.setpoint_calls: list[tuple[float, float]] = []
         self.flow_sccm: float = 0.0
 
     async def connect(self) -> None:
@@ -160,6 +169,7 @@ class FakeMfc(Device):
     async def set_setpoint_sccm(self, sccm: float) -> float:
         self.commanded_sccm = float(sccm)
         self.flow_sccm = float(sccm)
+        self.setpoint_calls.append((time.time(), self.commanded_sccm))
         return self.commanded_sccm
 
     def status(self) -> dict:
@@ -341,6 +351,9 @@ class FakeKeithley(Device):
         #: Every set_output(...) value, in order. A test asserts on the SHAPE of
         #: the sequence, not just the final state.
         self.output_calls: list[bool] = []
+        #: The same transitions, timestamped - the sample bias brackets the
+        #: beam by a lead/trail time, so WHEN it switched is the assertion.
+        self.output_events: list[tuple[float, bool]] = []
         #: Every set_voltage(...) magnitude, in order.
         self.voltage_calls: list[float] = []
         #: Every set_current(...) magnitude, in order. Nothing sets a current
@@ -387,6 +400,7 @@ class FakeKeithley(Device):
 
     async def set_output(self, on: bool) -> None:
         self.output_calls.append(bool(on))
+        self.output_events.append((time.time(), bool(on)))
         self.output_on = bool(on)
 
     async def set_voltage(self, volts: float) -> None:

@@ -59,15 +59,15 @@ function fakeElement(value = '') {
     'p_beam_s','p_pump_b_s','p_min_current_ua','p_sample_bias_v','p_sample_bias_polarity',
     'p_fill_pulse_on_s','p_fill_pulse_off_s','p_tolerance_pct','p_reignite_pulse_s',
     'p_reignite_settle_s','p_ar_close_delay_s','p_pre_ar_sccm','p_pre_valve_delay_s',
-    'p_pre_hold_s','p_gas_overlap_s','p_h2_gas_enable','p_h2_gas_order','p_h2_gas_pct',
-    'p_h2_gas_flow_sccm','p_n2_gas_enable','p_n2_gas_order','p_n2_gas_pct',
-    'p_n2_gas_flow_sccm','p_run_name'];
+    'p_pre_hold_s','p_gas_overlap_s','p_mfc1_gas_enable','p_mfc1_gas_order','p_mfc1_gas_pct',
+    'p_mfc1_gas_flow_sccm','p_mfc2_gas_enable','p_mfc2_gas_order','p_mfc2_gas_pct',
+    'p_mfc2_gas_flow_sccm','p_run_name'];
   const elements = new Map(ids.map(id => [id, fakeElement('0')]));
-  for(const gas of ['h2','n2']) elements.get(`p_${gas}_gas_enable`).type = 'checkbox';
+  for(const gas of ['mfc1','mfc2']) elements.get(`p_${gas}_gas_enable`).type = 'checkbox';
   elements.get('p_smooth_on').type = 'checkbox';
   elements.get('modeSel').value = 'ald';
-  elements.get('p_h2_gas_order').value = 'first';
-  elements.get('p_n2_gas_order').value = 'second';
+  elements.get('p_mfc1_gas_order').value = 'first';
+  elements.get('p_mfc2_gas_order').value = 'second';
   const modeAld = {...fakeElement(), dataset: {mode:'ald'}};
   const modeCvd = {...fakeElement(), dataset: {mode:'cvd'}};
   const stored = new Map([['aldParams', JSON.stringify({cycles:'7'})]]);

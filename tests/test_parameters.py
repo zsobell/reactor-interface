@@ -16,12 +16,12 @@ CASES = [
     ("ald", {}),
     ("cvd", {}),
     ("ald", {"cycles": "2", "dose_s": True, "beam_s": "0.4", "run_name": "Raw-007",
-             "h2_gas_enable": "false", "h2_gas_pct": "40", "h2_gas_flow_sccm": "2.5",
-             "n2_gas_enable": 1, "n2_gas_order": "second", "n2_gas_pct": "60",
+             "mfc1_gas_enable": "false", "mfc1_gas_pct": "40", "mfc1_gas_flow_sccm": "2.5",
+             "mfc2_gas_enable": 1, "mfc2_gas_order": "second", "mfc2_gas_pct": "60",
              "unknown": {"future": [1, 2]}, "ar_close_delay_s": "0"}),
     ("cvd", {"cycles": 2.9, "beam_s": "ignored", "pump_b_s": None,
-             "h2_gas_enable": False, "h2_gas_order": "ignored", "h2_gas_pct": "ignored",
-             "sample_bias_v": "ignored", "name": "custom", "gas_overlap_s": "0.25"}),
+             "mfc1_gas_enable": False, "mfc1_gas_order": "ignored", "mfc1_gas_pct": "ignored",
+             "sample_bias_v": 0, "name": "custom", "gas_overlap_s": "0.25"}),
 ]
 
 
@@ -55,8 +55,8 @@ async def prestart_trace(params):
 
 async def main():
     c = Checker("test_parameters")
-    golden = json.loads(Path(__file__).with_name("fixtures").joinpath("parameters.json").read_text())
-    c.check("ALD/CVD recipes and raw parameter reports retain exact baseline", outputs() == golden)
+    golden = json.loads(Path(__file__).with_name("fixtures").joinpath("parameters.json").read_text(encoding="utf-8"))
+    c.check("ALD/CVD recipes and raw reports match reviewed integrated fixtures", outputs() == golden)
     trace, events, state, error = await prestart_trace({"ar_sccm": "bad"})
     c.check("initial conversion failure is reported before commands or cleanup",
             trace == [] and error is None and state["running"] is False
@@ -95,8 +95,8 @@ async def main():
             pre_typed.opening().ar_sccm == 3.5 and pre_typed.raw["future"] == [1])
     c.check("legacy null optional valve remains accepted by existing schema",
             build_ald_recipe({"fill_valve": None}).setup[1].valve is None)
-    for payload in ({"dose_s": -1}, {"h2_gas_enable": True, "n2_gas_enable": True},
-                    {"h2_gas_enable": True, "h2_gas_order": "invalid"}):
+    for payload in ({"dose_s": -1}, {"mfc1_gas_enable": True, "mfc2_gas_enable": True},
+                    {"mfc1_gas_enable": True, "mfc1_gas_order": "invalid"}):
         try:
             build_ald_recipe(payload)
         except ValueError:

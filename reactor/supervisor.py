@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 from collections import deque
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,16 @@ RECONNECT_EVERY_S = 5.0       # retry a dropped instrument this often
 #: Operator-edited display names (rename a valve/MFC/gauge when swapping
 #: chemicals) live here, not in reactor.yaml, so a rename is a UI action rather
 #: than a hand edit of the hardware map. Keyed as {"valve"|"mfc"|"gauge": {id: label}}.
+def _tail(dq: deque, n: int) -> list:
+    """The last `n` entries of a deque, without copying the whole thing.
+
+    `list(dq)[-n:]` copies every element first, and these buffers hold 200 000.
+    At the 5 Hz telemetry rate that is a million pointer copies a second to
+    ship two hundred rows. Walking backwards from the right end is O(n).
+    """
+    return list(islice(reversed(dq), n))[::-1]
+
+
 LABELS_PATH = Path(__file__).resolve().parent.parent / "config" / "labels.json"
 
 #: Last-commanded valve state, persisted across restarts. There is no valve-
@@ -58,11 +69,39 @@ LABELS_PATH = Path(__file__).resolve().parent.parent / "config" / "labels.json"
 #: never writes to hardware, so a restart still commands nothing (see start()).
 VALVE_STATE_PATH = Path(__file__).resolve().parent.parent / "config" / "valve_state.json"
 
+
+def _holds(dev) -> str:
+    """What `dev` is occupying, for the shutdown receipt: "grid_bias (COM11)".
+
+    The operator's question at shutdown is never "did the object disconnect" -
+    it is "is COM11 free, can I start the server again". So the receipt names
+    the port, and falls back to the device id when there is nothing better
+    (an MFC holds a TCP socket, which is released by the same disconnect but is
+    not the thing that blocks a restart).
+    """
+    cfg = getattr(dev, "cfg", None)
+    where = (getattr(dev, "port", "")                       # resolved at connect
+             or getattr(cfg, "port", "")                    # configured
+             or getattr(cfg, "resource", "")                # VISA
+             or getattr(cfg, "host", ""))                   # Modbus TCP
+    where = str(where or "").strip()
+    # MfcCfg.port is the Modbus TCP port (502), not a COM port - an integer
+    # there means "no serial port", not "COM502".
+    if where.isdigit():
+        where = str(getattr(cfg, "host", "") or "")
+    return f"{dev.id} ({where})" if where else str(dev.id)
+
 #: Name of the last run actually STARTED (not merely typed into the box), so the
 #: UI can pre-fill the next one incremented - "Mo-014" -> "Mo-015". Written when
 #: a run starts, which is what makes the sequence reflect real runs: abandoning a
 #: pre-filled name without starting leaves the counter where it was.
 RUN_NAME_PATH = Path(__file__).resolve().parent.parent / "config" / "last_run.json"
+
+#: Grace after a setpoint is commanded before its measurement is judged against
+#: it. A device on its way to a new value is not a mismatch, and without this
+#: every gas window would flash a warning as the MFC ramped. A DISPLAY debounce
+#: only - nothing about what is commanded, or when, depends on it.
+SETPOINT_SETTLE_S = 5.0
 
 #: Digital-output lines available for valve identification, grouped by module.
 #: Verified present on this hardware. Note a 9375's port0 is INPUT; outputs are
@@ -84,7 +123,7 @@ class Supervisor:
         self.recipes = RecipeRunner(self, clock=self.clock)
         self.logger = DataLogger(cfg)
         self.recording = RecordingService(
-            self.logger, lambda message: self._event("error", message),
+            self.logger, lambda message: self._event("error", message, record=False),
             on_capture=lambda name: self._event("ellipsometer", f"acquisition start -> {name}"))
         self.runs = RunCoordinator(self, self.recipes, self.recording, clock=self.clock)
 
@@ -96,7 +135,14 @@ class Supervisor:
         #: pre-start out of the buffer before anyone could read it. This is only
         #: the in-memory copy the UI scrolls; every event is ALSO written to
         #: server.log by _event(), which rotates and is the permanent record.
-        self.events: deque[dict[str, Any]] = deque(maxlen=20000)
+        #: Everything that happened, oldest dropped first. 200k is far more than
+        #: any run produces (a 150-cycle run logs a few hundred), and the run's
+        #: own copy on disk is unbounded - see DataLogger.write_event.
+        self.events: deque[dict[str, Any]] = deque(maxlen=200000)
+        #: Just the bad news, kept separately so it does not have to be found by
+        #: scrolling the event log (Zach, 2026-09-09). Same entries, same
+        #: objects - a subset, not a second source of truth.
+        self.errors: deque[dict[str, Any]] = deque(maxlen=200000)
 
         self.daq: NiDaqBackend | None = None
         self.mfcs: dict[str, Device] = {}
@@ -111,6 +157,41 @@ class Supervisor:
         self.valve_state: dict[str, bool] = {
             v.id: _persisted_valves.get(v.id, False) for v in cfg.valves
         }
+
+        # Soft-open pulse train for valves flagged `soft_open` in the config
+        # (the Ar pneumatic). Operator settings, so they are owned by the UI and
+        # arrive from config/run_params.json via set_soft_open_params - they are
+        # NOT run parameters, because a manual open from the Hardware tab
+        # carries none. These are the fallbacks until the UI has been saved once.
+        # One bleed pulse, then full open. It was five until 2026-08-26, when
+        # Zach found the pneumatic does not actuate fast enough for short
+        # pulses to blunt the inrush - five of them just made five inrushes,
+        # and the chamber gauge tripped off anyway.
+        #: Per-device reconnect state, id -> {attempts, last, error}. The
+        #: retry loop below rewrites a device's last_error on every attempt,
+        #: and the text varies between attempts (a port-not-found becomes a
+        #: timeout becomes an access-denied), so the Connections table had a
+        #: cell whose width changed every few seconds and nothing that said
+        #: whether the program was still trying. Reported 2026-08-26.
+        self.reconnect: dict[str, dict[str, Any]] = {}
+
+        self.soft_open: dict[str, float] = {
+            "pulses": 1, "on_s": 0.05, "gap_s": 0.5,
+        }
+
+        # Setpoint-vs-measurement monitoring (operator, 2026-09-01, after the
+        # N2 line on Mo-017 sat at a setpoint it never reached and nothing said
+        # so). The rule is the one the precursor fill pressure already uses -
+        # commanded value vs measured value, flagged past the same tolerance,
+        # cleared the moment it comes back. It WARNS and never acts: no
+        # setpoint is refused, clamped or changed by any of this.
+        #: Fraction off setpoint that counts as a mismatch. The Run tab's "Fill
+        #: flag tolerance (%)", shared so there is one number for all of it.
+        self.flag_tolerance: float = 0.20
+        #: id -> monotonic time its setpoint was last commanded, so a device on
+        #: its way to a new value is not flagged for being on the way. Display
+        #: debounce only; nothing about the hardware depends on it.
+        self._setpoint_changed: dict[str, float] = {}
 
         self._plan = DaqPlan()
         self._loop_task: asyncio.Task | None = None
@@ -138,6 +219,16 @@ class Supervisor:
         self._cycle_count = 0
         self._running = False
         self.telemetry = Telemetry(self, DO_LINE_GROUPS)
+
+        # Shutdown receipt. `stop()` records what it released so the Shut down
+        # button can SHOW it - Zach, 2026-09-10: "I need some confirmation
+        # things are shut down and ready to be booted again". Also makes stop()
+        # idempotent: the button awaits it inside the request handler, and the
+        # lifespan then awaits it again on the way out.
+        self._stop_steps: list[dict] = []
+        self._stop_receipt: dict | None = None
+        self._stop_task = None
+        self._pending_teardowns = set()
 
         # Valve flip markers (for the current-trace overlay). Every set_valve is
         # recorded with its reason so the UI can mark scheduled vs reignite flips.
@@ -310,8 +401,26 @@ class Supervisor:
                         f"ellipsometer subscriber -> {self.cfg.ellipsometer.host}:"
                         f"{self.cfg.ellipsometer.port} (read-only)")
 
-    async def stop(self) -> None:
-        """Abort a pending/active run or primed pre-start, then disconnect.
+    async def stop(self) -> dict:
+        """Concurrent callers share one teardown and its truthful receipt."""
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._stop(), name="reactor-stop")
+        return await asyncio.shield(self._stop_task)
+
+    async def _stop(self) -> dict:
+        """Abort active work, stop polling and disconnect with a bounded receipt.
+
+        Returns a RECEIPT: every teardown step with whether it succeeded, the
+        devices whose ports were released, and how long it took. The Shut down
+        button awaits this and shows it, because "port 8000 stopped answering"
+        is not evidence that the DAQ and COM8-COM12 were let go - uvicorn
+        releases the listening socket BEFORE the lifespan teardown runs, so the
+        page used to report success on the one thing that was never in doubt.
+
+        Idempotent. The shutdown endpoint calls it directly so it can report
+        the receipt over HTTP while there is still an HTTP connection to report
+        it on; the lifespan then calls it again and gets the same receipt back
+        without touching a device twice.
 
         Previously documented here as "closing DAQmx output tasks resets those
         lines low" - CONTRADICTED by observation 2026-08: the Ar pneumatic
@@ -323,8 +432,13 @@ class Supervisor:
         valve state is now persisted (VALVE_STATE_PATH) and restored at startup
         instead of defaulting every valve to closed.
         """
+        if self._stop_receipt is not None:
+            return self._stop_receipt
+
+        t0 = self.clock.elapsed()
+        self._stop_steps = []
         self._running = False
-        await self.abort_recipe()
+        await self._teardown("abort run", self.abort_recipe(), timeout=12.0)
 
         # Pre-start gets the full ABORT, not just a stop. Operator decision,
         # 2026-08-25 (reactor-4h9), and the reasoning is his: "any server
@@ -348,37 +462,122 @@ class Supervisor:
             self._event("recipe",
                         "server stopping: aborting pre-start "
                         f"({'in progress' if self.prestart.get('running') else 'primed'})")
-            with contextlib.suppress(Exception):
-                await self.abort_prestart()
+            await self._teardown("abort pre-start", self.abort_prestart(),
+                                 timeout=8.0)
 
-        with contextlib.suppress(Exception):
-            await self.stop_fill_regulation()
-        await self._sweep.shutdown()
+        await self._teardown("stop fill regulation", self.stop_fill_regulation())
+        if self.daq is not None:
+            await self._teardown("stop valve identification", self._sweep.shutdown())
 
-        for task in (self._loop_task, self._current_task, self._mfc_task,
-                     self._reconnect_task):
-            if task:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+        # Cancel-and-wait, but never wait forever. `_cycle` reads the DAQ
+        # through asyncio.to_thread, and a to_thread future CANNOT be
+        # cancelled once its thread has started: `await task` after
+        # `task.cancel()` blocks until DAQmx returns, which on a wedged module
+        # is not bounded by anything this program controls. asyncio.wait is
+        # used rather than awaiting the task, because awaiting a cancelled task
+        # re-raises CancelledError and would abort the rest of this teardown.
+        for name, task in (("control loop", self._loop_task),
+                           ("current loop", self._current_task),
+                           ("MFC loop", self._mfc_task),
+                           ("reconnect loop", self._reconnect_task)):
+            if task is None:
+                continue
+            log.info("shutdown: stopping %s", name)
+            task.cancel()
+            _done, pending = await asyncio.wait({task}, timeout=3.0)
+            if pending:
+                log.warning("shutdown: %s did not stop in 3s - leaving it "
+                            "(its thread will die with the process)", name)
+                self._stop_steps.append({
+                    "what": f"stop {name}", "ok": False,
+                    "note": "did not stop in 3s"})
+            else:
+                self._stop_steps.append({"what": f"stop {name}", "ok": True,
+                                         "note": ""})
 
         if self.ellipsometer is not None:
-            with contextlib.suppress(Exception):
-                await self.ellipsometer.stop()
+            await self._teardown("stop ellipsometer subscriber",
+                                 self.ellipsometer.stop())
 
         # Power supplies are included here purely to close their serial ports.
         # GlassmanFL.disconnect() deliberately commands nothing - it does NOT
         # send HV OFF - so stopping the server cannot switch off a plasma Zach
         # set by hand at the front panel. See reactor/devices/glassman_fl.py.
+        #
+        # Each disconnect gets its own deadline: one unresponsive serial port
+        # must not keep the others - or the process - open. This is what left a
+        # zombie holding the DAQ and COM8-COM12 after the Shut down button was
+        # pressed (reported 2026-08-27); the button appeared to do nothing and
+        # the next server came up unable to reach any device.
         for dev in (list(self.mfcs.values()) + list(self.instruments.values())
                     + list(self.supplies.values())):
-            with contextlib.suppress(Exception):
-                await dev.disconnect()
+            # Read what it is holding BEFORE disconnecting - a driver is free
+            # to clear its own port attribute on the way down, and the receipt
+            # exists to name the COM port that has been let go.
+            await self._teardown(f"disconnect {dev.id}", dev.disconnect(),
+                                 timeout=3.0, holds=_holds(dev))
         if self.daq:
-            with contextlib.suppress(Exception):
-                await self.daq.close()
+            await self._teardown("close DAQ tasks", self.daq.close(),
+                                 timeout=5.0, holds="DAQ tasks")
 
-        await self.recording.close()
+        await self._teardown("close recording worker", self.recording.close(), timeout=5.0)
+        if self.recording.status().get("errors"):
+            self._stop_steps.append({"what": "recording integrity", "ok": False,
+                                     "note": str(self.recording.status()["errors"])})
+        log.info("shutdown: teardown complete")
+
+        released = [s["holds"] for s in self._stop_steps if s["ok"] and s.get("holds")]
+        failed = [s for s in self._stop_steps if not s["ok"]]
+        self._stop_receipt = {
+            "steps": self._stop_steps,
+            "released": released,
+            "failed": [{"what": s["what"], "note": s["note"]} for s in failed],
+            "ok": not failed,
+            "elapsed_s": round(self.clock.elapsed() - t0, 2),
+        }
+        return self._stop_receipt
+
+    async def _teardown(self, what: str, coro, timeout: float = 4.0,
+                        holds: str = "") -> None:
+        """One teardown step, with a deadline and a line in the log saying which.
+
+        `holds` names the resource this step lets go of ("COM9", "DAQ tasks").
+        It is what the Shut down button shows the operator, so only a step that
+        actually succeeded contributes one.
+
+        Teardown talks to real hardware over serial, USB and TCP, and any of
+        those calls can block for as long as the driver feels like. Before
+        2026-08-27 every step here was an unbounded await, so one wedged device
+        stopped the whole shutdown - and the process stayed up holding the DAQ
+        and the COM ports. Now each step is bounded and NAMED, so a hang is
+        both survivable and diagnosable from server.log.
+        """
+        log.info("shutdown: %s", what)
+        step = {"what": what, "ok": True, "note": "", "holds": holds}
+        self._stop_steps.append(step)
+        try:
+            task = asyncio.ensure_future(coro)
+            self._pending_teardowns.add(task)
+            def collected(done):
+                self._pending_teardowns.discard(done)
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(collected)
+            done, pending = await asyncio.wait({task}, timeout=timeout)
+            if pending:
+                task.cancel()
+                raise asyncio.TimeoutError
+            await task
+        except asyncio.TimeoutError:
+            log.warning("shutdown: %s did not finish in %.0fs - moving on",
+                        what, timeout)
+            step["ok"] = False
+            step["note"] = f"did not finish in {timeout:.0f}s"
+        except Exception as exc:
+            log.warning("shutdown: %s failed: %s: %s",
+                        what, type(exc).__name__, exc)
+            step["ok"] = False
+            step["note"] = f"{type(exc).__name__}: {exc}"
 
     # ====================================================================== #
     #  Control loop
@@ -421,26 +620,46 @@ class Supervisor:
             await asyncio.sleep(RECONNECT_EVERY_S)
             for dev_id, dev in list(self.instruments.items()):
                 if dev.connected or not self._running:
+                    self.reconnect.pop(dev_id, None)
                     continue
                 try:
                     await dev.connect()
+                    self.reconnect.pop(dev_id, None)
                     self._event("startup",
                                 f"instrument {dev_id} reconnected: {dev.identity}")
                 except Exception as exc:
                     # Keep the reason visible in the tile, but don't flood the
                     # event log with one line per retry while it stays off.
                     dev.last_error = f"{type(exc).__name__}: {exc}"
+                    self._note_retry(dev_id, dev.last_error)
 
             for dev_id, dev in list(self.supplies.items()):
                 if dev.connected or not self._running:
+                    self.reconnect.pop(dev_id, None)
                     continue
                 try:
                     await dev.connect()
+                    self.reconnect.pop(dev_id, None)
                     self._event("startup",
                                 f"power supply {dev_id} reconnected: "
                                 f"firmware {getattr(dev, 'firmware', '') or '?'}")
                 except Exception as exc:
                     dev.last_error = f"{type(exc).__name__}: {exc}"
+                    self._note_retry(dev_id, dev.last_error)
+
+    def _note_retry(self, dev_id: str, error: str) -> None:
+        """Record one failed reconnect attempt for `dev_id`.
+
+        The count and the timestamp are the stable part - they say the program
+        is still working on it and how long it has been - and they are what the
+        Connections table leads with. The error text is carried along but is
+        the volatile half.
+        """
+        st = self.reconnect.setdefault(
+            dev_id, {"attempts": 0, "first": self.clock.wall(), "last": 0.0, "error": ""})
+        st["attempts"] += 1
+        st["last"] = self.clock.wall()
+        st["error"] = error
 
     async def _cycle(self) -> None:
         """Slow loop: DAQ analog inputs and the power supplies, at site.loop_hz
@@ -585,6 +804,11 @@ class Supervisor:
                 *(d.read() for d in self.mfcs.values()),
                 return_exceptions=True,
             ))
+            # The gas is selected on the MFC itself and moves with it, so the
+            # log headings and the recipe's own prose follow it from here rather
+            # than from any config.
+            names = self.gas_names()
+            self.recording.set_gas_names(names)
 
     async def _current_cycle(self) -> None:
         cfg = self.cfg
@@ -655,11 +879,86 @@ class Supervisor:
     #  Commands
     # ====================================================================== #
 
+    def set_soft_open_params(self, params: dict) -> dict[str, float]:
+        """Take the soft-open pulse settings from the UI's saved run params.
+
+        Called on every /api/run_params save and once at startup, so a manual
+        open from the Hardware tab uses the same numbers the Run tab shows.
+        Unknown or unparseable keys leave the current value alone; `pulses` of 0
+        disables the train and an open becomes one plain flip again.
+        """
+        for key, name in (("pulses", "ar_soft_open_pulses"),
+                          ("on_s", "ar_soft_open_on_s"),
+                          ("gap_s", "ar_soft_open_gap_s")):
+            if name not in params:
+                continue
+            try:
+                value = float(params[name])
+            except (TypeError, ValueError):
+                continue
+            self.soft_open[key] = max(0.0, value)
+        # The same saved parameters carry the flag tolerance, and setpoint
+        # monitoring needs it outside a run too (pre-start, the Hardware tab).
+        if "tolerance_pct" in params:
+            try:
+                self.flag_tolerance = max(0.0, float(params["tolerance_pct"]) / 100.0)
+            except (TypeError, ValueError):
+                pass
+        return dict(self.soft_open)
+
+    def _soft_open_plan(self, valve_id: str) -> tuple[int, float, float] | None:
+        """(pulses, on_s, gap_s) if opening this valve should be pulsed, else
+        None. None whenever the valve is not flagged or the operator has set
+        the pulse count to zero."""
+        cfg = next((v for v in self.cfg.valves if v.id == valve_id), None)
+        if cfg is None or not getattr(cfg, "soft_open", False):
+            return None
+        pulses = int(self.soft_open.get("pulses", 0) or 0)
+        if pulses <= 0:
+            return None
+        return (pulses, float(self.soft_open.get("on_s", 0.05)),
+                float(self.soft_open.get("gap_s", 0.5)))
+
+    async def _soft_open(self, valve_id: str, plan: tuple[int, float, float],
+                         reason: str) -> None:
+        """Bleed a valve open: N pulses of on_s, gap_s apart, then leave it OPEN.
+
+        Requested 2026-08-26 for the Ar pneumatic - opening it in one flip dumps
+        the Ar built up behind it into the reactor. One pulse is the default:
+        the valve is too slow for a short command to move it far, so several
+        pulses just made several inrushes. The pulses use the quiet write path
+        deliberately:
+
+        - no event per flip (10 log lines for one open is noise; one summary
+          line goes out instead, and the final open logs normally);
+        - no chart mark per flip, so the valve marker still reads as one open;
+        - no valve_state.json write per flip, and no MFC-zeroing side effect.
+          That last one matters: set_valve zeroes an MFC whose isolation valve
+          closes, and the closes here are part of OPENING, not a close.
+        """
+        pulses, on_s, gap_s = plan
+        shape = (f"{on_s:g} s pulse, then {gap_s:g} s" if pulses == 1
+                 else f"{pulses} x {on_s:g} s pulses {gap_s:g} s apart")
+        self._event("valve",
+                    f"{valve_id}: soft open - {shape}, then full open"
+                    + (f" ({reason})" if reason else ""))
+        for _ in range(pulses):
+            await self.drive_fill_valve(valve_id, True)
+            await asyncio.sleep(on_s)
+            await self.drive_fill_valve(valve_id, False)
+            await asyncio.sleep(gap_s)
+
     async def set_valve(self, valve_id: str, state: bool, *, reason: str = "") -> None:
         if valve_id not in self.valve_state:
             raise KeyError(f"unknown valve '{valve_id}'")
         if self.daq is None:
             raise RuntimeError("DAQ not started")
+        # A flagged valve is pulsed in rather than opened in one flip. This sits
+        # in set_valve, not in the callers, so it covers EVERY open there is -
+        # Hardware tab, pre-start, recipe step - as the operator asked.
+        plan = self._soft_open_plan(valve_id) if state else None
+        if plan is not None:
+            await self._soft_open(valve_id, plan, reason)
         await self.daq.write_do(valve_id, state)
         self.valve_state[valve_id] = state
         self._save_valve_state()
@@ -727,12 +1026,15 @@ class Supervisor:
             if iso and not self.valve_state.get(iso, False):
                 label = self._label("valve", iso, iso)
                 raise ValueError(
-                    f"{mfc_id}: isolation valve '{label}' is closed - "
+                    f"{self.gas_label(mfc_id)}: isolation valve '{label}' "
+                    "is closed - "
                     "open it before setting flow above 0"
                 )
 
         result = await dev.set_setpoint_sccm(sccm)   # type: ignore[attr-defined]
-        self._event("mfc", f"{mfc_id} setpoint -> {result:.2f} sccm")
+        self._setpoint_changed[f"mfc.{mfc_id}"] = self.clock.elapsed()
+        self._event("mfc",
+                    f"{self.gas_label(mfc_id)} setpoint -> {result:.2f} sccm")
         return result
 
     # -- background fill-pressure regulation ------------------------------- #
@@ -751,6 +1053,23 @@ class Supervisor:
 
     def has_valve(self, valve_id: str) -> bool:
         return valve_id in self.valve_state
+    def update_fill_regulation(self, *, target_torr: float | None = None,
+                               pulse_on_s: float | None = None,
+                               pulse_off_s: float | None = None,
+                               tolerance_frac: float | None = None) -> dict:
+        """Retune the running fill regulator in place, without restarting it.
+
+        Restarting would close the fill valve and drop the chamber off its
+        setpoint mid-run, which is exactly what a mid-run tweak must not do.
+        The loop re-reads these on its next pass (see _run_regulation).
+        """
+        for key, value in (("target_torr", target_torr),
+                           ("pulse_on_s", pulse_on_s),
+                           ("pulse_off_s", pulse_off_s),
+                           ("tolerance_frac", tolerance_frac)):
+            if value is not None:
+                self.regulator[key] = float(value)
+        return dict(self.regulator)
 
     async def start_fill_regulation(
         self, *, valve: str, gauge: str, target_torr: float,
@@ -833,6 +1152,7 @@ class Supervisor:
             raise RuntimeError(
                 f"{supply_id} has no voltage control in this program")
         await setter(volts)
+        self._setpoint_changed[f"psu.{supply_id}"] = self.clock.elapsed()
         self._event("command", f"{supply_id}: voltage set to {float(volts):g} V")
         return {"id": supply_id, "voltage": float(volts)}
 
@@ -846,6 +1166,77 @@ class Supervisor:
         self._event("command", f"{supply_id}: current limit set to {float(amps):g} A")
         return {"id": supply_id, "current": float(amps)}
 
+    def _settling(self, key: str) -> bool:
+        """True while a device is still on its way to a newly commanded value."""
+        last = self._setpoint_changed.get(key)
+        return last is not None and (self.clock.elapsed() - last) < SETPOINT_SETTLE_S
+
+    def setpoint_flags(self) -> list[dict[str, Any]]:
+        """Every commanded value that its own measurement does not agree with.
+
+        Exactly the precursor fill pressure's rule, applied to everything else
+        this program commands: |measured - commanded| / commanded past
+        `flag_tolerance`. Warn-only, and computed fresh each telemetry tick so
+        it clears itself the instant the device catches up - the operator asked
+        for warnings that "stay up only when they are out of bounds".
+
+        A commanded zero is not monitored: there is no relative baseline, and a
+        gas that is off is not a fault. Nothing here is a limit - a setpoint
+        this flags is still written to the hardware exactly as typed.
+        """
+        out: list[dict[str, Any]] = []
+        tol = self.flag_tolerance
+        if tol <= 0:
+            return out
+
+        for mid, dev in self.mfcs.items():
+            sp = getattr(dev, "commanded_sccm", None)
+            flow = self.snapshot.get(f"mfc.{mid}.flow")
+            if not isinstance(sp, (int, float)) or sp <= 0:
+                continue
+            if not isinstance(flow, (int, float)):
+                continue
+            if self._settling(f"mfc.{mid}"):
+                continue
+            off = abs(flow - sp) / sp
+            if off > tol:
+                out.append({
+                    "id": mid, "kind": "mfc",
+                    "label": self.gas_label(mid),
+                    "commanded": float(sp), "measured": float(flow),
+                    "unit": "sccm", "off_frac": off,
+                })
+
+        for pid, dev in self.supplies.items():
+            st = dev.status()
+            if not st.get("output_on"):
+                continue
+            # A supply in CONSTANT CURRENT is doing its job at a voltage below
+            # its setpoint - that is what CC means, and the coils run there all
+            # run (Zach, 2026-09-09: "of course they're not, they're on CC mode,
+            # not CV"). Only a CV supply owes its voltage setpoint anything.
+            if st.get("mode") == "CC":
+                continue
+            sp = st.get("voltage_setpoint")
+            meas = st.get("voltage")
+            if not isinstance(sp, (int, float)) or sp <= 0:
+                continue
+            if not isinstance(meas, (int, float)):
+                continue
+            if self._settling(f"psu.{pid}"):
+                continue
+            off = abs(meas - sp) / sp
+            if off > tol:
+                out.append({
+                    "id": pid, "kind": "supply",
+                    "label": self._label("supply", pid, st.get("label") or pid),
+                    "commanded": float(sp), "measured": float(meas),
+                    "unit": "V", "off_frac": off,
+                })
+
+        out.sort(key=lambda d: -d["off_frac"])
+        return out
+
     async def set_supply_output(self, supply_id: str, on: bool) -> dict[str, Any]:
         dev = self._supply(supply_id)
         setter = getattr(dev, "set_output", None)
@@ -855,7 +1246,59 @@ class Supervisor:
         await setter(bool(on))
         self._event("command",
                     f"{supply_id}: output {'ON' if on else 'OFF'} (operator)")
+        self._setpoint_changed[f"psu.{supply_id}"] = self.clock.elapsed()
         return {"id": supply_id, "output_on": bool(on)}
+
+    def _sample_bias_supply(self):
+        """The one supply flagged `sample_bias` in the config, or (None, None).
+
+        config.py already refuses more than one, so the first is the one.
+        """
+        for ps_id, dev in self.supplies.items():
+            if getattr(getattr(dev, "cfg", None), "sample_bias", False):
+                return ps_id, dev
+        return None, None
+
+    async def set_sample_bias_output(
+        self, on: bool, *, volts: float | None = None,
+        polarity: int | None = None, reason: str = "",
+    ) -> bool:
+        """Switch the sample-bias supply output, optionally setting its level.
+
+        Called by the recipe runner to bracket the beam (operator request
+        2026-08-26): a live stage bias corrupts the stage thermocouple, so the
+        stage is only energised from bias_lead_s before the beam comes on until
+        bias_trail_s after it goes off, and the TC reads clean through the rest
+        of the cycle. See Step.bias_v and RecipeRunner._schedule_bias.
+
+        `volts` is written only when given - the runner passes it on the FIRST
+        ON of a run and never again, so a level adjusted by hand on the Hardware
+        tab mid-run is not overwritten every cycle. The magnitude is what
+        reaches the instrument; `polarity` is lead-orientation bookkeeping that
+        signs the LOGGED value, because the 2260B is single-quadrant and cannot
+        source a negative voltage.
+
+        Returns False if there is no sample-bias supply to command. Raises if
+        there is one and the command fails - the caller decides what a failed
+        bias means for the run.
+        """
+        ps_id, dev = self._sample_bias_supply()
+        set_output = getattr(dev, "set_output", None)
+        if dev is None or set_output is None:
+            return False
+        if polarity is not None:
+            dev.polarity = -1 if polarity < 0 else 1
+        if volts is not None:
+            await dev.set_voltage(abs(float(volts)))
+        await set_output(bool(on))
+        sign = "-" if getattr(dev, "polarity", 1) < 0 else "+"
+        level = getattr(dev, "voltage_setpoint", None)
+        level_txt = (f" at {sign}{abs(level):g} V"
+                     if on and isinstance(level, (int, float)) else "")
+        tail = f" ({reason})" if reason else ""
+        self._event("recipe", f"{ps_id}: sample bias output "
+                              f"{'ON' if on else 'OFF'}{level_txt}{tail}")
+        return True
 
     async def supplies_output_on(self, *, sample_bias_v: float = 0.0,
                                  polarity: int = 1, reason: str = "") -> None:
@@ -869,11 +1312,11 @@ class Supervisor:
         cycling it with the beam would be actively harmful.
 
         The SAMPLE BIAS supply is the exception, and the reason this is not a
-        plain loop: its output comes on only when the run's Sample bias field is
-        non-zero, and its voltage is set from that field first. `polarity` is
-        lead-orientation bookkeeping (+1/-1) - the 2260B is single-quadrant and
-        cannot source a negative voltage, so the sign is applied to the LOGGED
-        value, never to what is commanded.
+        plain loop. Since 2026-08-26 pre-start only ARMS it: the level and the
+        lead orientation are programmed here, but the output is left OFF and the
+        beam steps switch it (set_sample_bias_output). It used to come on here
+        and stay on for the whole run, which held a potential on the stage
+        continuously and made the stage thermocouple unreadable.
 
         Current limits are never touched: those are set by hand on each front
         panel and are Zach's.
@@ -892,39 +1335,19 @@ class Supervisor:
             try:
                 if getattr(cfg, "sample_bias", False):
                     dev.polarity = -1 if polarity < 0 else 1
+                    # Output OFF either way now - the beam brackets it. Which of
+                    # the two cases this is still gets said, because "the bias
+                    # supply is dark" should never be something to infer.
+                    await set_output(False)
                     if magnitude <= 0.0:
-                        # No bias wanted for this run. Leave it OFF - and say
-                        # so, because "the bias supply is dark" should never be
-                        # something the operator has to infer.
-                        await set_output(False)
                         self._event("recipe",
-                                    f"{ps_id}: sample bias is 0 V, output left off")
+                                    f"{ps_id}: sample bias is 0 V, output stays off")
                         continue
                     await dev.set_voltage(magnitude)
-                    await set_output(True)
                     sign = "-" if dev.polarity < 0 else "+"
-                    # Read it back rather than trusting the write. This is the
-                    # one supply that puts a potential on the sample, so
-                    # "commanded" and "actually on" being conflated is not
-                    # acceptable - and a silent no-op here is precisely what
-                    # was reported on 2026-08-25.
-                    confirmed = None
-                    try:
-                        await dev.read()
-                        confirmed = getattr(dev, "output_on", None)
-                    except Exception:
-                        pass
-                    if confirmed is False:
-                        self._event("error",
-                                    f"{ps_id}: commanded sample bias "
-                                    f"{sign}{magnitude:g} V ON but the supply "
-                                    f"still reports its output OFF - check the "
-                                    f"front panel (protection tripped? output "
-                                    f"key?)")
-                    else:
-                        self._event("recipe",
-                                    f"{ps_id}: sample bias {sign}{magnitude:g} V, "
-                                    f"output ON")
+                    self._event("recipe",
+                                f"{ps_id}: sample bias armed at "
+                                f"{sign}{magnitude:g} V - output follows the beam")
                 else:
                     await set_output(True)
                     self._event("recipe", f"{ps_id}: output ON")
@@ -991,6 +1414,9 @@ class Supervisor:
     async def _start_built_run(self, recipe: Recipe, params: dict) -> Recipe:
         return await self.runs.start(recipe, params)
 
+    async def update_run_params(self, params: dict) -> dict[str, Any]:
+        return await self.runs.update_params(params)
+
     # -- operator run naming (see RUN_NAME_PATH) ---------------------------- #
 
     @property
@@ -1042,6 +1468,9 @@ class Supervisor:
         await self.supplies_output_off(reason="run end")
         if not session.end_cleanup:
             return
+        if self.valve_state.get(session.plasma_switch) is not False:
+            with contextlib.suppress(Exception):
+                await self.set_valve(session.plasma_switch, False, reason="run end - relay at rest")
         if session.fill_valve in self.valve_state:
             with contextlib.suppress(Exception):
                 await self.set_valve(session.fill_valve, False, reason="run end")
@@ -1062,9 +1491,21 @@ class Supervisor:
         """Publish controller events through the application event owner."""
         self._event(kind, message)
 
-    def _event(self, kind: str, message: str) -> None:
-        self.events.append({"t": self.clock.wall(), "kind": kind, "message": message})
-        log.info("[%s] %s", kind, message)
+    #: Event kinds that belong in the error log as well as the event log.
+    #: One list, defined next to the writer that also uses it.
+    ERROR_KINDS = datalog.ERROR_KINDS
+
+    def _event(self, kind: str, message: str, *, record=True) -> None:
+        entry = {"t": self.clock.wall(), "kind": kind, "message": message}
+        self.events.append(entry)
+        if kind in self.ERROR_KINDS:
+            self.errors.append(entry)
+            log.warning("[%s] %s", kind, message)
+        else:
+            log.info("[%s] %s", kind, message)
+        # A run keeps its own unbounded copy next to its data files.
+        if record:
+            self.recording.submit_event(entry)
 
     # -- operator label overrides ------------------------------------------ #
 
@@ -1082,7 +1523,57 @@ class Supervisor:
     def _label(self, kind: str, dev_id: str, default: str) -> str:
         return self.label_overrides.get(kind, {}).get(dev_id) or default
 
-    # -- valve state persistence (see self.paths.valves) --------------------- #
+    def _gas_name(self, mfc_id: str) -> str:
+        """The gas on an MFC line, or "" if nothing has said what it is.
+
+        The unit's own gas selection is the authority: change it from H2 to NH3
+        and it reports "2: NH3" (gas-table index and name), full scale moves
+        with it, and everything that names the line has to follow. An operator
+        rename wins over it - that is someone stating the name deliberately.
+
+        Empty when neither has spoken, deliberately: nothing static in this
+        program may claim a gas, so a run file that cannot know says so by
+        falling back to the CHANNEL (see gas_names / DataLogger._heading).
+        """
+        over = self.label_overrides.get("mfc", {}).get(mfc_id)
+        if over:
+            return over.split(" - ")[0].strip() or over
+        gas = str(getattr(self.mfcs.get(mfc_id), "gas", "") or "")
+        return gas.split(":")[-1].strip()      # "2: NH3" -> "NH3"
+
+    def gas_names(self) -> dict[str, str]:
+        """MFC id -> the gas it is really flowing, KNOWN ones only. Feeds every
+        log heading and the recipe's step prose, both of which fall back to the
+        channel id rather than invent a gas."""
+        return {mid: name for mid in self.mfcs
+                if (name := self._gas_name(mid))}
+
+    def gas_label(self, mfc_id: str) -> str:
+        """What to CALL this line on screen - never empty. The gas if one is
+        known, else the channel as named in reactor.yaml ("MFC 1")."""
+        if name := self._gas_name(mfc_id):
+            return name
+        label = next((m.label for m in self.cfg.mfcs if m.id == mfc_id), "") or ""
+        return label.split(" - ")[0].strip() or mfc_id.upper()
+
+    def mfc_label(self, mfc_id: str, device_label: str = "") -> str:
+        """Full display label for an MFC line, with the gas kept honest.
+
+        The reactor.yaml labels read "<channel> - <what it is for>" ("MFC 1 -
+        reactive background"). The head is replaced by the gas the unit actually
+        reports, so the tile reads "NH3 - reactive background" and reverts to
+        "MFC 1 - ..." if the device stops saying. An operator rename overrides
+        the whole thing.
+        """
+        over = self.label_overrides.get("mfc", {}).get(mfc_id)
+        if over:
+            return over
+        cfg_label = next((m.label for m in self.cfg.mfcs if m.id == mfc_id), "")
+        cfg_label = cfg_label or device_label or mfc_id
+        _, sep, tail = cfg_label.partition(" - ")
+        return f"{self.gas_label(mfc_id)}{sep}{tail}" if sep else self.gas_label(mfc_id)
+
+    # -- valve state persistence (see VALVE_STATE_PATH) --------------------- #
 
     def _load_valve_state(self) -> dict[str, bool]:
         try:

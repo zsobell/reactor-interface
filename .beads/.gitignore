@@ -59,6 +59,8 @@ dolt-pprof/
 
 # Backup data (auto-exported JSONL, local-only)
 backup/
+dolt-backup.json
+dolt-backup-state.json
 
 # Generated exports and audit logs. Dolt is the source of truth; sync its
 # database separately with bd dolt push/pull. Keep these files local.

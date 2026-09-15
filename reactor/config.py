@@ -197,6 +197,13 @@ class ValveCfg(BaseModel):
     #: Informational label that this line's destination was confirmed by
     #: observation. Does not gate actuation.
     identified: bool = False
+    #: Open this valve as a train of short pulses instead of one flip
+    #: (operator request 2026-08-26, for the Ar pneumatic: opening it in one go
+    #: dumps the Ar built up behind it into the reactor). WHICH valve behaves
+    #: this way is a fact about the plumbing and lives here; the pulse count,
+    #: width and gap are operator settings and live in the UI's Advanced timing
+    #: panel - see Supervisor.soft_open and set_valve.
+    soft_open: bool = False
 
 
 class MfcRegisterMapCfg(BaseModel):

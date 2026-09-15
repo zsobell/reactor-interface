@@ -50,11 +50,15 @@ in plug order. Treat that as a snapshot, not a fact.
 
 ### Automatically (requested 2026-08-21)
 
-**`:OUTP ON` / `:OUTP OFF`.** All four outputs come on during pre-start and go
-off when a run ends, aborts, or crashes.
+**`:OUTP ON` / `:OUTP OFF`.** The three coil supplies come on during pre-start
+and go off when a run ends, aborts, or crashes. The **sample bias** is switched
+by the beam instead (2026-08-26): on a lead time before each beam, off a trail
+time after, and off whenever a run ends however it ends.
 
 **`:SOUR:VOLT`.** On the sample-bias unit only, and only when the run's
-**Sample bias** field is non-zero.
+**Sample bias** field is non-zero — once at pre-start to arm it, and once more
+on the first bracket of a run that did not go through pre-start. Not per cycle:
+a level changed by hand mid-run is not fought.
 
 Nothing sets a **current** automatically. `tests/test_keithley_supplies.py`
 asserts that a full pre-start-plus-run produces zero current writes.
@@ -117,8 +121,10 @@ which the guessed register bit was not.
 
 ### They are not cycled with the beam
 
-The outputs come up at pre-start and **stay on for the whole run**. They are
-deliberately not tied to plasma events — a reignite does not touch them.
+The **coil** outputs come up at pre-start and **stay on for the whole run**.
+They are deliberately not tied to plasma events — a reignite does not touch
+them. (The sample bias is the exception, and has been since 2026-08-26: it
+follows the beam. See below.)
 
 Zach's reason, worth preserving because it is not obvious from the code: the
 collimating coil is what keeps the plasma stable when the beam dump is grounded.
@@ -127,17 +133,19 @@ Cycling it with the beam would be actively harmful, not merely wasteful.
 **Confirmed on real hardware 2026-08-25**: the outputs switch on at pre-start
 and off at run end, the sample bias energises only for a non-zero value, and the
 Hardware-tab controls work. Until then the actuation path had only ever run
-against the virtual reactor.
+against the virtual reactor. The bias's *timing* changed the next day
+(2026-08-26, below) and that part is verified against the virtual reactor only.
 
 ### When each trigger fires
 
-| Trigger | Effect |
-|---|---|
-| Pre-start begins | outputs **ON** (bias only if non-zero) — before Ar, so the tool can be watched settling |
-| Reignite, pause, beam on/off | **nothing** |
-| Run ends, aborts, or crashes | outputs **OFF** (`Supervisor.finish_run`) |
-| **Stop** pre-start | **nothing** — see below |
-| **Abort** pre-start | outputs **OFF** |
+| Trigger | Coils (steering, grid, collimating) | Sample bias |
+|---|---|---|
+| Pre-start begins | outputs **ON** — before Ar, so the tool can be watched settling | **armed**: level + polarity set, output **OFF** |
+| Beam on / beam off | **nothing** | **ON** `Bias lead` s early, **OFF** `Bias trail` s late |
+| Reignite, pause | **nothing** | **nothing** |
+| Run ends, aborts, or crashes | outputs **OFF** (`Supervisor.finish_run`) | output **OFF**, queued flips cancelled |
+| **Stop** pre-start | **nothing** — see below | **nothing** (stays armed) |
+| **Abort** pre-start | outputs **OFF** | output **OFF** |
 
 `stop_prestart` deliberately leaves them on. It only ends the *sequence* and
 hands the tool over primed for Start run, exactly as it leaves Ar flowing and
@@ -153,6 +161,14 @@ EE-ALD / EE-CVD parameter grid; min current moved into **Advanced timing**.
 
 - Enter a **magnitude**. Zero means the stage bias output stays off for that
   run, and the event log says so rather than leaving you to infer it.
+- **It follows the beam** (2026-08-26). Pre-start arms the supply at this level
+  with its output off; the beam then switches it on `Bias lead` seconds early
+  and off `Bias trail` seconds late (Advanced timing, 0.2 s each). The reason
+  is the stage thermocouple: a bias held on all run made it unreadable, and
+  Zach wanted *"good thermocouple data when the e-beam is off"*. A reignite
+  does not cycle it, and the bracket adds nothing to a cycle's length — both
+  flips are scheduled inside pump A and pump B. See
+  `RecipeRunner._schedule_bias` and `tests/test_sample_bias_bracket.py`.
 - The **polarity toggle** (`+` / `−`) records **which way the leads were run
   onto the stage**. The 2260B is single-quadrant and physically cannot source a
   negative voltage, so the sign never reaches the instrument — it is applied to

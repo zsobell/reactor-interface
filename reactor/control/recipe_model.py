@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 import yaml
+import re
 
 from .parameters import GAS_SCHEDULE_MFCS, GasParameters, RunParameters
 from pydantic import BaseModel, Field
@@ -59,7 +60,47 @@ class Step(BaseModel):
     reignite_pulse_s: float = 0.10
     reignite_settle_s: float = 0.15
 
-    def describe(self) -> str:
+    # --- sample bias bracketing the beam ---
+    # Operator request 2026-08-26: a live stage bias corrupts the stage
+    # thermocouple, so the bias is only energised around the beam - on
+    # `bias_lead_s` BEFORE the beam comes on, off `bias_trail_s` AFTER it goes
+    # off, leaving clean TC data everywhere else in the cycle.
+    #
+    # bias_v == 0 means this step does not touch the sample bias at all, which
+    # is what every file recipe gets: only build_ald_recipe/build_cvd_recipe
+    # ever set these, and only when the run asked for a bias.
+    #
+    # Both flips are scheduled, never awaited in line (see
+    # RecipeRunner._schedule_bias): the lead runs down inside the preceding
+    # pump A and the trail inside pump B, so bracketing the beam does not make
+    # a cycle one second longer than the sum of its steps.
+    #
+    # A reignite deliberately does NOT cycle the bias. It brackets the beam
+    # STEP, not every flip of the plasma-ground relay - a 0.1 s reignite pulse
+    # is shorter than the lead time, so chasing it would leave the bias off for
+    # most of the restrike.
+    bias_v: float = 0.0
+    bias_polarity: int = 1
+    bias_lead_s: float = Field(default=0.0, ge=0)
+    bias_trail_s: float = Field(default=0.0, ge=0)
+
+    def _bias_note(self) -> str:
+        """The sample-bias bracket, for `describe()`. Empty when unset - a step
+        that does not touch the bias must not claim to."""
+        if not self.bias_v:
+            return ""
+        sign = "-" if self.bias_polarity < 0 else "+"
+        if self.op == "beam_stop":
+            return f", sample bias off {self.bias_trail_s:g} s later"
+        return (f", sample bias {sign}{abs(self.bias_v):g} V on "
+                f"{self.bias_lead_s:g} s early"
+                + (f" / off {self.bias_trail_s:g} s late"
+                   if self.op == "electron_beam" else ""))
+
+    def describe(self, gas_names=None) -> str:
+        """One line of operator-facing prose for this step. Used by the run
+        parameters report, the UI's step readout and the `recipe_step` column,
+        so an MFC is named by the GAS it is flowing, not by its channel id."""
         if self.op == "dose":
             return f"dose {self.valve} for {self.seconds:g} s"
         if self.op == "wait":
@@ -67,17 +108,19 @@ class Step(BaseModel):
         if self.op == "valve":
             return f"valve {self.valve} -> {'open' if self.state else 'closed'}"
         if self.op == "set_flow":
-            return f"set {self.mfc} to {self.sccm:g} sccm"
+            return f"set {gas_display_name(self.mfc, gas_names)} to {self.sccm:g} sccm"
         if self.op == "wait_for_pressure":
             if self.below_torr is not None:
                 return f"wait for pressure below {self.below_torr:g} Torr"
             return f"wait for pressure above {self.above_torr:g} Torr"
         if self.op == "electron_beam":
-            return f"electron beam {self.seconds:g} s (|I|>{self.min_current*1e6:g} uA)"
+            return (f"electron beam {self.seconds:g} s "
+                    f"(|I|>{self.min_current*1e6:g} uA)" + self._bias_note())
         if self.op == "beam_start":
-            return f"beam on, held for the run (|I|>{self.min_current*1e6:g} uA)"
+            return (f"beam on, held for the run "
+                    f"(|I|>{self.min_current*1e6:g} uA)" + self._bias_note())
         if self.op == "beam_stop":
-            return "beam off"
+            return "beam off" + self._bias_note()
         if self.op == "start_fill":
             return f"regulate {self.gauge} to {self.target_torr:g} Torr via {self.valve}"
         if self.op == "stop_fill":
@@ -110,11 +153,20 @@ class GasSchedule(BaseModel):
 
     At most one schedule may have order="first" and at most one "second"
     (validated by _build_gas_schedules before a run starts).
+
+    **order="simultaneous"** is the third option, requested 2026-08-26: the
+    gases do not divide the window at all, they both cover the whole of it, each
+    at its own flow. `pct` is unused and the UI greys it out. It is a PAIRING -
+    "if more than one MFC selects simultaneous then they both run together";
+    exactly one gas set to simultaneous is rejected before the run starts rather
+    than silently treated as a 100% "first", because a lone simultaneous gas is
+    far more likely to be a half-finished edit than an intent.
     """
 
     mfc: str
-    order: Literal["first", "second"]
-    #: percent (0-100) of the window (beam exposure, or cycle) this gas covers
+    order: Literal["first", "second", "simultaneous"]
+    #: percent (0-100) of the window (beam exposure, or cycle) this gas covers.
+    #: Unused when order="simultaneous", which covers the whole window.
     pct: float = Field(ge=0, le=100)
     #: setpoint while on; separate from any setpoint set by hand on the tile
     flow_sccm: float = Field(ge=0)
@@ -169,6 +221,20 @@ def _build_gas_schedules(p: dict | RunParameters) -> list[GasSchedule]:
                 f"at most one gas can be order='{order}' - "
                 f"{n} are currently set to it"
             )
+    # Simultaneous is a pairing, not a solo mode (operator, 2026-08-26): two or
+    # more gases share the whole window, so exactly one is a half-finished edit
+    # and the run is refused rather than started on a guess.
+    simul = [s for s in schedules if s.order == "simultaneous"]
+    if len(simul) == 1:
+        others = [m for m in GAS_SCHEDULE_MFCS if m != simul[0].mfc]
+        lone = gas_display_name(simul[0].mfc)
+        raise ValueError(
+            f"{lone} is set to Simultaneous on its own. "
+            f"Simultaneous means two or more gases flow together for the whole "
+            f"window, so set {' or '.join(map(gas_display_name, others))} to "
+            f"Simultaneous as well (and switch it on), or put "
+            f"{lone} back to First or Second."
+        )
     return schedules
 
 
@@ -186,6 +252,7 @@ def build_ald_recipe(p: dict | RunParameters) -> Recipe:
     fill_valve, dose_valve = p.fill.valve, p.dose_valve
     plasma, gauge, ammeter = p.beam.switch, p.fill.gauge, p.beam.ammeter
     gas_schedules = _build_gas_schedules(p)
+    bias = _bias_bracket(p.raw.get)
 
     return Recipe(
         name=p.name,
@@ -208,7 +275,7 @@ def build_ald_recipe(p: dict | RunParameters) -> Recipe:
                  min_current=p.beam.min_current,
                  seconds=p.beam_s,
                  reignite_pulse_s=p.beam.pulse_s,
-                 reignite_settle_s=p.beam.settle_s),
+                 reignite_settle_s=p.beam.settle_s, **bias),
             Step(op="wait", seconds=p.pump_b_s),
         ],
         teardown=_end_of_run(p, plasma),
@@ -268,12 +335,13 @@ def build_cvd_recipe(p: dict | RunParameters) -> Recipe:
     fill_valve, dose_valve = p.fill.valve, p.dose_valve
     plasma, gauge, ammeter = p.beam.switch, p.fill.gauge, p.beam.ammeter
     gas_schedules = _build_gas_schedules(p)
+    bias = _bias_bracket(p.raw.get)
 
     beam = dict(
         switch=plasma, ammeter=ammeter,
         min_current=p.beam.min_current,
         reignite_pulse_s=p.beam.pulse_s,
-        reignite_settle_s=p.beam.settle_s,
+        reignite_settle_s=p.beam.settle_s, **bias,
     )
     return Recipe(
         name=p.name,
@@ -299,9 +367,37 @@ def build_cvd_recipe(p: dict | RunParameters) -> Recipe:
         # beam_stop first: it kills the watchdog (and grounds the beam) so the
         # shared end-of-run sequence can leave the switch where the operator
         # wants it without the watchdog fighting it.
-        teardown=[Step(op="beam_stop", switch=plasma), *_end_of_run(p, plasma)],
+        teardown=[Step(op="beam_stop", switch=plasma, **bias), *_end_of_run(p, plasma)],
         gas_schedules=gas_schedules,
         gas_overlap_s=p.gas_overlap_s,
     )
 
+
+
+
+def gas_display_name(mfc_id: str, names=None) -> str:
+    if name := (names or {}).get(mfc_id):
+        return name
+    match = re.fullmatch(r"mfc(\d+)", mfc_id or "")
+    return f"MFC {match.group(1)}" if match else mfc_id
+
+
+def _bias_bracket(g) -> dict:
+    """The sample-bias bracket, from UI params, for a beam step.
+
+    Empty when the run's Sample bias field is zero: no bias wanted means the
+    beam steps leave the supply alone entirely, exactly as they did before
+    2026-08-26. The magnitude is what reaches the instrument (the 2260B is
+    single-quadrant); the polarity is lead-orientation bookkeeping and only
+    signs the logged value - see Supervisor.set_sample_bias_output.
+    """
+    volts = abs(float(g("sample_bias_v", 0.0) or 0.0))
+    if volts <= 0.0:
+        return {}
+    return dict(
+        bias_v=volts,
+        bias_polarity=-1 if int(g("sample_bias_polarity", 1) or 1) < 0 else 1,
+        bias_lead_s=float(g("sample_bias_lead_s", 0.2)),
+        bias_trail_s=float(g("sample_bias_trail_s", 0.2)),
+    )
 

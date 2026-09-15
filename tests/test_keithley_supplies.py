@@ -11,7 +11,18 @@ The behaviour under test is Zach's, stated 2026-08-21:
   "set the output to on for the stage/sample bias only when a non-0 value is
    entered"
 
-So the load-bearing assertions here are as much about what does NOT happen -
+...amended 2026-08-26, when a live stage bias turned out to make the stage
+thermocouple unreadable:
+
+  "We need the sample bias to trigger 0.2 s before the e-beam and turn off
+   0.2 s after."
+
+So pre-start now only ARMS the bias - level and lead orientation programmed,
+output left OFF - and the beam steps switch it. The coils are untouched by
+that change, and the contrast is what this file is for. When the bias actually
+comes on and off is tested in tests/test_sample_bias_bracket.py.
+
+The load-bearing assertions here are as much about what does NOT happen -
 these supplies must not be cycled by a reignite - as about what does.
 
 Run directly: python -m tests.test_keithley_supplies
@@ -76,6 +87,14 @@ async def main() -> int:
             parse_idn("nonsense") == ("", ""))
 
     async with VirtualReactor() as vr:
+        # The Ar pneumatic is soft-opened on the way through pre-start (see
+        # tests/test_soft_open.py); at the operator's real timings that is
+        # ~2.7 s added to each of the three pre-starts below, for no benefit
+        # to what this file tests.
+        vr.sup.set_soft_open_params({"ar_soft_open_pulses": 2,
+                                     "ar_soft_open_on_s": 0.02,
+                                     "ar_soft_open_gap_s": 0.02})
+
         missing = [k for k in ("stage_bias", *COILS) if k not in vr.supplies]
         if missing:
             c.check("all four supplies configured", False, f"missing {missing}")
@@ -101,20 +120,25 @@ async def main() -> int:
             vr.supplies[k].voltage_calls.clear()
 
         # -------------------------------------------------------------- #
-        c.section("3. pre-start WITH a negative bias")
+        c.section("3. pre-start WITH a negative bias: ARMED, not energised")
         await _prestart(vr, dict(PRE, sample_bias_v=12.0, sample_bias_polarity=-1))
 
         bias = vr.supplies["stage_bias"]
-        c.check("stage bias output ON", bias.output_on is True)
+        # The change of 2026-08-26: the level is programmed but the stage is
+        # NOT energised until a beam step asks for it, so the stage TC reads
+        # clean right up to the first beam.
+        c.check("stage bias output still OFF", bias.output_on is False,
+                str(bias.output_calls))
         # Magnitude only: the 2260B is single-quadrant and cannot source
         # negative. The sign belongs to the log, not the instrument.
         c.check("commanded MAGNITUDE, unsigned", bias.voltage_calls == [12.0],
                 str(bias.voltage_calls))
         c.check("polarity recorded on the device", bias.polarity == -1,
                 str(bias.polarity))
-        c.check("voltage set BEFORE the output was enabled",
-                bias.voltage_calls and bias.output_calls
-                and bias.output_calls[-1] is True)
+        c.check("the operator is told it is armed, not left to infer it",
+                any("armed" in str(e.get("message", ""))
+                    for e in vr.sup.events),
+                str([e.get("message") for e in list(vr.sup.events)[-3:]]))
 
         # The sign has to reach the snapshot, or the log records a positive
         # bias when the leads are the other way round.
@@ -150,6 +174,10 @@ async def main() -> int:
             # at run end. Anything more means something cycled them.
             c.check(f"{k} not cycled during the run - only the run-end off",
                     calls == [False], str(calls))
+        # This RUN carries no sample bias, so the bias supply is not touched at
+        # all beyond the run-end sweep. A run WITH a bias is bracketed by the
+        # beam, and that a reignite still does not cycle it is asserted in
+        # tests/test_sample_bias_bracket.py.
         c.check("stage bias likewise", vr.supplies["stage_bias"].output_calls == [False],
                 str(vr.supplies["stage_bias"].output_calls))
 
@@ -187,8 +215,12 @@ async def main() -> int:
             c.check(f"{k} still ON after stop_prestart",
                     vr.supplies[k].output_on is True,
                     str(vr.supplies[k].output_calls))
-        c.check("stage bias still ON after stop_prestart",
-                vr.supplies["stage_bias"].output_on is True)
+        # The bias is the exception in the other direction: handing over primed
+        # leaves it armed at its level with the output off, waiting for a beam.
+        c.check("stage bias armed but OFF after stop_prestart",
+                vr.supplies["stage_bias"].output_on is False
+                and vr.supplies["stage_bias"].voltage_calls[-1:] == [5.0],
+                str(vr.supplies["stage_bias"].voltage_calls))
 
         # -------------------------------------------------------------- #
         c.section("8. the pre-start ABORT does switch everything off")

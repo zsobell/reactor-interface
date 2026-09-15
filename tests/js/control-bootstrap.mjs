@@ -32,7 +32,9 @@ globalThis.localStorage = {getItem: k => stored.get(k) ?? null, setItem: (k, v) 
 const requested = [];
 globalThis.fetch = async url => {
   requested.push(url);
-  return {ok: true, json: async () => ({params: {}, samples: [], events: []})};
+  return {ok: true, json: async () => ({params: {}, samples: [],
+    events: url === '/api/events' ? [{t: 1700000000, kind: 'startup', message: 'seeded startup event'}] : [],
+    total_s: 2505})};
 };
 const sockets = [];
 globalThis.WebSocket = class {
@@ -44,6 +46,8 @@ await new Promise(resolve => setTimeout(resolve, 20));
 assert.equal(sockets[0].url, 'wss://reactor.test/ws', 'bootstrap reaches secure telemetry connection');
 assert.ok(requested.includes('/api/run_params'), 'server settings loaded');
 assert.ok(requested.includes('/api/events'), 'event history loaded');
+assert.match(elements.get('events').innerHTML, /seeded startup event/,
+  'seeded event history renders before a new telemetry event arrives');
 assert.match(elements.get('smoothHint').textContent, /off/, 'page reads extracted chart settings during bootstrap');
 const formHandler = elements.get('aldParams').events.input;
 windowEvents.pagehide({persisted:true});

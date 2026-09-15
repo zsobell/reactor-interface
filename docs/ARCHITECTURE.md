@@ -89,17 +89,20 @@ Recording samples use a bounded backlog (2,048 pending jobs by default). When
 full, further samples are rejected and a persistent recording error is shown;
 control continues. Lifecycle operations are ordered behind accepted writes.
 Stopping a run performs hardware cleanup before waiting for its recording to
-close. Server shutdown drains accepted file work and shuts down the worker.
-A hung filesystem can still delay file completion/shutdown, but it does not
-block the event loop while the worker is waiting.
+close. Server shutdown gives recording close a five-second deadline and reports
+timeout or latched recording errors in its receipt. A released device port does
+not prove that queued files were flushed. Accepted worker jobs retain ownership
+after caller cancellation; the process exit deadline can still interrupt a hung
+filesystem operation.
 
 Analysis file reads, merging and saving run in a worker, separate from the
 recording executor. This removes synchronous analysis work from the control
 event loop, but it is not a hard real-time guarantee: CPU work still shares the
-Python process, and small settings writes and application event logging remain
-synchronous. Hard physical deadlines require measured end-to-end timing and
+Python process, and small settings writes remain synchronous. Per-run event and
+error files use the recording worker; recording-error events are not submitted
+back to that failing writer. Hard physical deadlines require measured end-to-end timing and
 suitable hardware, such as supported hardware-clocked DAQ output or a PLC;
-deployment measurements are tracked separately in Beads issue `reactor-l2c`.
+deployment measurements remain separate from fake-device acceptance in Beads.
 
 ## Run admission and recording failures
 
@@ -115,6 +118,9 @@ All run starts share the coordinator lock. A running recipe or pre-start is chec
 changing run metadata or opening another export. Recording is prepared before
 starting recipe execution. Abort/shutdown can cancel a start waiting on file
 preparation, without starting the recipe or advancing the remembered run name.
+Live edits share an edit lock with run completion. They preserve the admitted
+hardware identities and append change history using elapsed time; a supplied
+`_run_started_at` rejects edits from a different run.
 
 Recording errors (open, header/row write, flush, close, or backlog overflow)
 appear in `logging.errors`, the event log, and the control page's alert chip.
@@ -134,7 +140,9 @@ page navigation suspends/resumes transport; final unload disposes handlers.
 Static assets revalidate on reload.
 
 Hardware mapping is YAML. Labels, last-commanded valve state, last-started run
-name, and shared run parameters are JSON. Browser localStorage caches parameters
+name, shared run parameters and the shared analysis layout are JSON. All state
+paths, including the process registry, are supplied through `StatePaths`.
+Browser localStorage caches parameters
 and stores display preferences. Experimental records are CSV/text under
 `data/<run>/`. Beads' Dolt database tracks development work, not reactor state.
 Valve state is commanded state, not measured position, and restoring it never

@@ -10,6 +10,7 @@ reactor, with a browser UI using vanilla JavaScript ES modules and no build step
 [HARDWARE.md](HARDWARE.md) owns hardware identification;
 [the test guide](../tests/README.md) explains the fake-device harness and its limits.
 Use Beads for work history and outstanding tasks.
+See [INTEGRATION.md](INTEGRATION.md) for branch provenance, compatibility and rollback.
 
 ## Environments
 
@@ -40,6 +41,9 @@ identify the owner; public Supervisor commands remain the hardware boundary.
 |---|---|---|
 | Dependency construction, instance paths and controller contracts | [dependencies.py](../reactor/dependencies.py), [contracts.py](../reactor/control/contracts.py), [supervisor.py](../reactor/supervisor.py) | `test_dependencies`, `test_controller_contracts` |
 | Run admission, cancellation and cleanup | [run_coordinator.py](../reactor/control/run_coordinator.py), [supervisor.py](../reactor/supervisor.py), [recipe.py](../reactor/control/recipe.py) | `test_run_admission`, `test_run_lifecycle`, `test_hv_and_prestart_abort` |
+| Live edits, reports and instance isolation | [run_coordinator.py](../reactor/control/run_coordinator.py), [recording.py](../reactor/recording.py) | `test_live_params`, `test_merge_integration`, `test_run_export` |
+| Pause, bias and simultaneous gases | [recipe.py](../reactor/control/recipe.py) | `test_pause`, `test_sample_bias_bracket`, `test_gas_simultaneous` |
+| Process shutdown and recording receipts | [instances.py](../reactor/instances.py), [supervisor.py](../reactor/supervisor.py) | `test_server_shutdown`, `test_shutdown_teardown` |
 | ALD/CVD timing and gas scheduling | [recipe.py](../reactor/control/recipe.py), [recipe_model.py](../reactor/control/recipe_model.py), [clock.py](../reactor/control/clock.py) | `test_ee_ald_recipe`, `test_ee_cvd_recipe`, `test_run_timing`, `test_cycle_numbering`, `test_clock_domains` |
 | Timing prototype and production trace compatibility | [timing_prototype.py](../reactor/testing/timing_prototype.py), [recipe.py](../reactor/control/recipe.py), [clock.py](../reactor/control/clock.py) | `test_timing_prototype`, `test_clock_domains` |
 | Run and pre-start parameters | [parameters.py](../reactor/control/parameters.py), [recipe_model.py](../reactor/control/recipe_model.py), [prestart.py](../reactor/control/prestart.py) | `test_parameters`, `test_prestart_invalid`, `test_run_admission` |

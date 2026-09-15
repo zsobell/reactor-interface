@@ -4,6 +4,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+from itertools import islice
+
+def _tail(dq, n):
+    return list(islice(reversed(dq), n))[::-1]
+
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +43,7 @@ class Telemetry:
         published (the UI shows it to 0.1 s)."""
         d = self.sup.recipes.progress.as_dict()
         d["run_remaining_s"] = self.sup.recipes.run_remaining_s()
+        d["phase_owner"] = self.sup.runs.phase.value
         d["run_total_s"] = self.sup.recipes.run_total_s()
         return d
 
@@ -60,6 +66,12 @@ class Telemetry:
                 "value": self.sup.snapshot.get("stage.temp"),
                 "unit": self.sup.cfg.stage_temp.unit,
             },
+            # channel/kind/tc_type so every thermocouple can show the same
+            # fields the stage TC does (operator, 2026-08-27). `volts` is
+            # present only for kind="voltage" channels: a DAQmx thermocouple
+            # channel returns degC with the cold-junction compensation and
+            # linearisation done inside the driver, so the millivolt signal
+            # never reaches this program - see _cycle's scaling block.
             "aux": [
                 {
                     "id": a.id,
@@ -67,6 +79,9 @@ class Telemetry:
                     "value": self.sup.snapshot.get(f"aux.{a.id}"),
                     "volts": self.sup.snapshot.get(f"aux.{a.id}.volts"),
                     "unit": a.unit,
+                    "channel": a.channel,
+                    "kind": a.kind,
+                    "tc_type": a.tc_type if a.kind == "thermocouple" else "",
                 }
                 for a in self.sup.cfg.aux_inputs
             ],
@@ -98,16 +113,21 @@ class Telemetry:
                 for v in self.sup.cfg.valves
             ],
             "mfcs": [
-                {**st, "label": self.sup._label("mfc", mid, st.get("label") or mid),
+                {**st, "label": self.sup.mfc_label(mid, st.get("label") or ""),
+                 "gas_name": self.sup.gas_label(mid),
                  "isolation_valve": next(
                      (m.isolation_valve for m in self.sup.cfg.mfcs if m.id == mid), None)}
                 for mid, st in ((mid, d.status()) for mid, d in self.sup.mfcs.items())
             ],
-            "instruments": [i.status() for i in self.sup.instruments.values()],
+            "instruments": [{**i.status(), "retry": self.sup.reconnect.get(iid)}
+                            for iid, i in self.sup.instruments.items()],
             # Read-only. Each status() carries read_only=True, which is what the
             # UI keys off to render a monitor card with no controls on it.
-            "power_supplies": [p.status() for p in self.sup.supplies.values()],
+            "power_supplies": [{**p.status(), "retry": self.sup.reconnect.get(pid)}
+                               for pid, p in self.sup.supplies.items()],
             "regulator": self.sup.regulator,
+            # Commanded values their own measurements disagree with, right now.
+            "setpoint_flags": self.sup.setpoint_flags(),
             "prestart": self.sup.prestart,
             "marks": [m for m in self.sup.marks if self.sup.clock.wall() - m["t"] <= 900][-500:],
             "run_valves": {"dose": self.sup.runs.session.dose_valve,
@@ -130,7 +150,12 @@ class Telemetry:
             # The browser seeds its scrollback once from /api/events and then
             # appends whatever is new here. 200 is far more than one frame's
             # worth, so nothing can slip through the gap.
-            "events": list(self.sup.events)[-200:],
+            "events": _tail(self.sup.events, 200),
+            # The error log is its own panel, fed the same way: seeded from
+            # /api/errors, tailed from here. Errors are rare, so 200 is an
+            # enormous margin (it is the same cap as the event tail for one
+            # reason only - one frame cannot outrun either).
+            "errors": _tail(self.sup.errors, 200),
         })
 
     def trend(self, limit: int = 1800) -> list[dict[str, Any]]:

@@ -35,7 +35,7 @@ from typing import Literal
 # Re-export these names for existing callers and file recipes.
 from .recipe_model import (
     Step, GasSchedule, Recipe, build_ald_recipe, build_cvd_recipe,
-    BEAM_TICK_S, GAS_SCHEDULE_MFCS,
+    BEAM_TICK_S, GAS_SCHEDULE_MFCS, gas_display_name,
 )
 
 # --------------------------------------------------------------------------- #
@@ -66,6 +66,13 @@ class RecipeProgress:
     #: set by a lit_gated step, whose remaining time is not a wall-clock
     #: countdown and so cannot be derived from step_started/step_duration
     step_remaining_hint: float | None = None
+    #: Operator-paused time inside the CURRENT step, so the step countdown the
+    #: UI shows is run time and not wall time. Without these, `pause` froze the
+    #: step's action and the cycle clock but the "Step remaining" readout kept
+    #: falling - half of what "in the purge step the timer keeps moving" was
+    #: (2026-09-01). Reset per step by _run_steps.
+    step_paused_accum: float = 0.0
+    step_pause_start: float | None = None
     #: fractional cycle number for property-vs-cycle plotting, set by the runner
     #: each telemetry tick: whole part = completed cycles, fraction = progress
     #: through the current cycle's predicted length, FROZEN during a reignite or
@@ -100,7 +107,11 @@ class RecipeProgress:
         if self.step_remaining_hint is not None:
             remaining = max(0.0, self.step_remaining_hint)
         elif self.step_elapsed_started is not None and self.step_duration is not None:
-            remaining = max(0.0, self.step_duration - (self.clock.elapsed() - self.step_elapsed_started))
+            held = self.step_paused_accum
+            if self.step_pause_start is not None:
+                held += self.clock.elapsed() - self.step_pause_start
+            remaining = max(0.0, self.step_duration
+                            - (self.clock.elapsed() - self.step_elapsed_started - held))
         return {
             "state": self.state,
             "recipe": self.recipe,
@@ -135,11 +146,22 @@ class RecipeRunner:
         self.sup = supervisor
         self.progress = RecipeProgress(clock=self.clock)
         self._task: asyncio.Task | None = None
+        self.recipe = None
         self._pause = asyncio.Event()
         self._pause.set()               # set == not paused
+        #: The same condition the other way up, so a timed wait can be woken BY
+        #: a pause. An asyncio.Event can only be awaited for "set", and _pause
+        #: is set while running - so without this, a step sleeping through its
+        #: duration had no way to hear a pause arrive and could only notice at
+        #: the next step boundary. That is exactly what "the timer keeps moving
+        #: in the purge step" was (2026-09-01).
+        self._paused = asyncio.Event()
         self._abort = asyncio.Event()
         self._gas_schedules: list[GasSchedule] = []
         self._gas_lead_tasks: list[asyncio.Task] = []
+        #: One-shot "shut this gas off" commands from a mid-run parameter edit.
+        #: Held only so the loop keeps a reference; they discard themselves.
+        self._gas_off_tasks: set[asyncio.Task] = set()
         # EE-CVD continuous beam. Two clocks, both advanced by _beam_watch:
         #   _lit_s      total seconds with current present; what a lit_gated
         #               wait counts down against.
@@ -155,7 +177,10 @@ class RecipeRunner:
         self._clock_gated = False
         self._cycle_len = 0.0
         self._gas_plan: dict | None = None
-        self._gas_on: dict[str, bool | None] = {"first": None, "second": None}
+        #: Last state written per MFC id (None = never written). Keyed by MFC
+        #: rather than by order because two gases can share the order
+        #: "simultaneous"; keying by order would have them overwrite each other.
+        self._gas_on: dict[str, bool | None] = {}
         self._gas_overlap_s = 0.0
         # Fractional-cycle bookkeeping for property-vs-cycle plotting. Progress
         # through a cycle is elapsed time since the cycle began MINUS time spent
@@ -167,6 +192,20 @@ class RecipeRunner:
         self._cycle_paused_accum = 0.0
         self._pause_start: float | None = None
         self._pause_reasons: set[str] = set()
+        # Sample bias bracketing the beam (Step.bias_v & co). One pending flip
+        # at a time: scheduling a new one cancels whatever was queued, which is
+        # what makes a pump B shorter than the trail time do the right thing -
+        # the next cycle's ON cancels the pending OFF and the bias simply stays
+        # up rather than blinking. `_bias_armed` is the once-per-run voltage
+        # write; after that only the OUTPUT is switched, so adjusting the level
+        # by hand on the Hardware tab mid-run is not fought every cycle.
+        self._bias_pending: list[tuple[float, asyncio.Task]] = []
+        self._bias_step: Step | None = None
+        self._bias_armed = False
+        self._bias_on = False
+
+    def gas_names(self):
+        return getattr(self.sup, "gas_names", lambda: {})()
 
     @property
     def busy(self) -> bool:
@@ -279,9 +318,11 @@ class RecipeRunner:
         if self.busy:
             raise RuntimeError("a recipe is already running")
         self._pause.set()
+        self._paused.clear()
         self._abort.clear()
         self._gas_schedules = []
         self._gas_lead_tasks = []
+        self._gas_off_tasks = set()
         self._beam_task = None
         self._beam_switch = None
         self._lit_s = 0.0
@@ -289,12 +330,18 @@ class RecipeRunner:
         self._clock_gated = False
         self._cycle_len = recipe.cycle_seconds()
         self._gas_plan = None
-        self._gas_on = {"first": None, "second": None}
+        self._gas_on = {}
         self._gas_overlap_s = recipe.gas_overlap_s
         self._cycle_start_elapsed = None
         self._cycle_paused_accum = 0.0
         self._pause_start = None
         self._pause_reasons = set()
+        self._bias_step = None
+        self._bias_armed = False
+        self._bias_on = False
+        #: The recipe object actually running, so a mid-run parameter change has
+        #: something to write into (Supervisor.update_run_params).
+        self.recipe = recipe
         self.progress = RecipeProgress(
             state="running", recipe=recipe.name,
             cycles_total=recipe.cycles, started_at=self.clock.wall() if started_at is None else started_at,
@@ -302,16 +349,130 @@ class RecipeRunner:
         )
         self._task = asyncio.create_task(self._run(recipe), name="recipe")
 
+    #: Step fields a mid-run parameter change is allowed to move. Everything
+    #: else about a step - which valve, which gauge, which MFC - is plumbing,
+    #: and changing it under a running recipe would mean the log no longer
+    #: describes what ran.
+    LIVE_STEP_FIELDS = (
+        "seconds", "target_torr", "pulse_on_s", "pulse_off_s", "tolerance_frac",
+        "min_current", "reignite_pulse_s", "reignite_settle_s",
+        "bias_v", "bias_polarity", "bias_lead_s", "bias_trail_s", "sccm",
+    )
+
+    def apply_params(self, recipe_now, fresh) -> None:
+        """Push a freshly built recipe's numbers into the one that is RUNNING.
+
+        Operator, 2026-09-01: "I need to be able to change parameters mid run."
+        Until now a recipe was a snapshot taken at Start, so the N2 flow that
+        was wrong on Mo-017 stayed wrong for the whole run - the field accepted
+        a new number and nothing happened with it.
+
+        Values are copied INTO the existing Step objects rather than swapping
+        the lists, which is what makes the change land on the cycle in progress:
+        the beam step re-reads `min_current` every tick, the watchdog re-reads
+        its reignite timings, and `_gas_set` re-reads a schedule's flow at the
+        next window boundary. A step's `seconds` is read once when the step
+        starts, so a duration change takes effect the next time that step runs -
+        which is the only sane reading of "make the pump 2 s longer" while a
+        pump is already counting down.
+
+        Only LIVE_STEP_FIELDS move, and only when the fresh recipe has the same
+        shape (same ops in the same order). A change that restructures the
+        recipe - enabling a gas that was off, so the setup grows a step - is
+        applied where it can be and left where it cannot; the caller's own diff
+        is what gets reported to the operator either way.
+        """
+        for old_list, new_list in ((recipe_now.setup, fresh.setup),
+                                   (recipe_now.steps, fresh.steps),
+                                   (recipe_now.teardown, fresh.teardown)):
+            if len(old_list) != len(new_list):
+                continue
+            for o, n in zip(old_list, new_list):
+                if o.op != n.op:
+                    continue
+                for f in self.LIVE_STEP_FIELDS:
+                    new_val = getattr(n, f, None)
+                    if new_val is not None and getattr(o, f, None) != new_val:
+                        setattr(o, f, new_val)
+
+        recipe_now.cycles = fresh.cycles
+        self.progress.cycles_total = fresh.cycles
+
+        # Gas: mutate the live schedule objects so the flows in flight follow,
+        # and keep the runner's own copy pointing at the same objects.
+        #
+        # Switching a gas OFF mid-run has to be honoured too, and used not to
+        # be: an unticked gas simply vanishes from `fresh.gas_schedules`, the
+        # lookup below missed it, and the ORIGINAL schedule object stayed in
+        # `self._gas_schedules` cycling its old flow on and off for the rest of
+        # the run - the operator sees a line they switched off being commanded
+        # to 0.8 sccm every cycle, with 0 in every field (Zach, 2026-09-09).
+        # So a gas that is gone gets shut off and dropped, and one that appears
+        # is picked up. `_gas_on` is cleared for both so the next window
+        # boundary re-asserts rather than trusting a stale "already on".
+        by_mfc = {g.mfc: g for g in fresh.gas_schedules}
+        dropped = [g for g in self._gas_schedules if g.mfc not in by_mfc]
+        for g in dropped:
+            self._gas_schedules.remove(g)
+            self._gas_on.pop(g.mfc, None)
+            task = asyncio.create_task(self._gas_set(g, 0.0),
+                                       name=f"gas-off-{g.mfc}")
+            self._gas_off_tasks.add(task)
+            task.add_done_callback(self._gas_off_tasks.discard)
+        live = {g.mfc for g in self._gas_schedules}
+        for mfc_id, n in by_mfc.items():
+            if mfc_id not in live:
+                self._gas_schedules.append(n)
+                self._gas_on.pop(mfc_id, None)
+        for g in self._gas_schedules:
+            n = by_mfc.get(g.mfc)
+            if n is None:
+                continue
+            g.order, g.pct, g.flow_sccm = n.order, n.pct, n.flow_sccm
+        self._gas_overlap_s = fresh.gas_overlap_s
+        recipe_now.gas_overlap_s = fresh.gas_overlap_s
+
+        # The countdown is cycle length x cycles, so both halves have to be
+        # re-derived or "est. remaining" would keep quoting the old run.
+        self._cycle_len = recipe_now.cycle_seconds()
+        # _run aliases the recipe's own list, so the add/remove above is already
+        # visible to the recipe (and to its teardown). Kept explicit here so a
+        # future change that copies the list does not silently lose that.
+        recipe_now.gas_schedules = self._gas_schedules
+        if recipe_now.mode == "cvd":
+            self._gas_plan = self._build_gas_plan()
+
     def pause(self) -> None:
+        """Freeze the run: the clock stops AND the step's action stops.
+
+        Operator, 2026-09-01: "It needs to stop the current action (e-beam or
+        dose) and stop the timer. The step should resume with the correct
+        timing on resume." Before this, pause only took effect at the next step
+        BOUNDARY - a pump kept counting down, and a beam step froze its
+        exposure budget while leaving the plasma on the sample.
+
+        What each step does about it is the step's own business (see _sleep's
+        on_pause/on_resume, _electron_beam and _beam_watch): the dose valve
+        closes, the plasma ground goes back on, and both are undone on resume
+        with the step's remaining time intact. The sample bias and the
+        scheduled gases are deliberately NOT touched - operator's call, same
+        day, when asked.
+        """
         if self.busy and self.progress.state == "running":
             self._pause.clear()
+            self._paused.set()
             self.progress.state = "paused"
+            self.progress.step_pause_start = self.clock.elapsed()
             self._cycle_pause("operator", True)   # freeze cycle progress too
 
     def resume(self) -> None:
         if self.busy and self.progress.state == "paused":
+            self._paused.clear()
             self._pause.set()
             self.progress.state = "running"
+            if self.progress.step_pause_start is not None:
+                self.progress.step_paused_accum += self.clock.elapsed() - self.progress.step_pause_start
+                self.progress.step_pause_start = None
             self._cycle_pause("operator", False)
 
     async def abort(self) -> None:
@@ -319,6 +480,7 @@ class RecipeRunner:
             return
         self.progress.state = "aborting"
         self._abort.set()
+        self._paused.clear()
         self._pause.set()
         try:
             await asyncio.wait_for(self._task, timeout=10.0)
@@ -343,12 +505,32 @@ class RecipeRunner:
                 if s.op == "electron_beam":
                     break
                 beam_runway_s += s.seconds or 0.0
-            first_gas = next((g for g in self._gas_schedules if g.order == "first"), None)
+            # The same runway carries the sample bias's lead-in (EE-ALD). The
+            # bias comes up bias_lead_s before the beam step starts, which is
+            # inside dose/pump A, and goes down bias_trail_s after it ends,
+            # which is inside pump B - so the stage is only energised around
+            # the beam and the stage thermocouple reads clean everywhere else.
+            beam_step = next((s for s in recipe.steps if s.op == "electron_beam"), None)
 
             self.progress.phase = "cycling"
-            for cycle in range(1, recipe.cycles + 1):
+            # A while loop, not `for cycle in range(recipe.cycles)`: the count
+            # is re-read every pass so it can be changed mid-run (2026-09-01).
+            # Raised, the run simply keeps going; LOWERED below the cycle in
+            # progress, that cycle finishes and the run ends there with its
+            # full teardown - the operator's call when asked, so the data never
+            # contains a half cycle.
+            cycle = 0
+            while True:
                 if self._abort.is_set():
                     break
+                cycle += 1
+                if cycle > recipe.cycles:
+                    break
+                beam_runway_s = 0.0
+                for step in recipe.steps:
+                    if step.op == "electron_beam":
+                        break
+                    beam_runway_s = beam_runway_s + (step.seconds or 0.0)
                 self.progress.cycle = cycle
                 self._begin_cycle_clock()
                 if recipe.mode == "cvd":
@@ -358,10 +540,26 @@ class RecipeRunner:
                     # next cycle.
                     self._cycle_clock = 0.0
                     await self._apply_cvd_gas(0.0)
-                elif first_gas is not None:
+                else:
+                    # Gases already flowing when the beam step starts, so they
+                    # need leading in during dose/pump A: the "first" gas, or -
+                    # when the window is not divided at all - every simultaneous
+                    # one. Re-read EVERY cycle, not captured before the loop: a
+                    # gas can be switched off (or on) mid-run, and a stale list
+                    # here would keep leading in a gas the operator had just
+                    # unticked - the same class of bug as the one fixed in
+                    # apply_params on 2026-09-09.
+                    lead_gases = [g for g in self._gas_schedules
+                                  if g.order in ("first", "simultaneous")]
                     delay = max(0.0, beam_runway_s - self._gas_overlap_s)
-                    self._gas_lead_tasks.append(asyncio.create_task(
-                        self._fire_gas_lead(first_gas, delay), name="gas-lead-in"))
+                    for gas in lead_gases:
+                        self._gas_lead_tasks.append(asyncio.create_task(
+                            self._fire_gas_lead(gas, delay),
+                            name=f"gas-lead-in-{gas.mfc}"))
+                if recipe.mode != "cvd" and beam_step is not None:
+                    self._schedule_bias(
+                        beam_step, True,
+                        max(0.0, beam_runway_s - beam_step.bias_lead_s))
                 await self._run_steps(recipe.steps)
 
             self._cycle_start_elapsed = None       # cycle progress stops after cycling
@@ -384,7 +582,14 @@ class RecipeRunner:
             for t in self._gas_lead_tasks:
                 if not t.done():
                     t.cancel()
+            if self._gas_lead_tasks:
+                await asyncio.gather(*self._gas_lead_tasks, return_exceptions=True)
             self._gas_lead_tasks = []
+            for task in list(self._gas_off_tasks):
+                task.cancel()
+            if self._gas_off_tasks:
+                await asyncio.gather(*self._gas_off_tasks, return_exceptions=True)
+            self._gas_off_tasks.clear()
             # EE-CVD holds the beam on across the whole run, so an abort or a
             # crash must not leave the watchdog running or the beam energised.
             # The teardown's beam_stop covers the happy path; this covers the
@@ -395,6 +600,12 @@ class RecipeRunner:
                     await self.sup.set_valve(
                         self._beam_switch, True, reason="run end - beam off")
                 self._beam_switch = None
+            # Same invariant for the sample bias: a queued flip must never fire
+            # after the run, and the stage must never be left energised by an
+            # abort or a crash. (finish_run switches every DC supply output off
+            # below as well - this is the one that also kills the timers.)
+            with contextlib.suppress(Exception):
+                await self._bias_off_now()
             # However the run ends (finished, aborted, or crashed), hand off to
             # the supervisor's end-of-run cleanup: it always stops the background
             # fill regulation, and for an ALD run also zeroes the MFCs and closes
@@ -410,11 +621,13 @@ class RecipeRunner:
             await self._pause.wait()
             self.progress.step_index = i
             self.progress.step_op = step.op
-            self.progress.step_desc = step.describe()
+            self.progress.step_desc = step.describe(self.gas_names())
             self.progress.step_duration = step.seconds
             self.progress.step_started = self.clock.wall()
             self.progress.step_elapsed_started = self.clock.elapsed()
             self.progress.step_remaining_hint = None
+            self.progress.step_paused_accum = 0.0
+            self.progress.step_pause_start = self.clock.elapsed() if self.progress.state == "paused" else None
             await self._exec(step)
         self.progress.step_duration = None
         self.progress.step_started = None
@@ -429,9 +642,20 @@ class RecipeRunner:
             # A dose is a pulse: open, hold, close. The close in `finally` is part
             # of the operation, so an aborted dose still ends with its own valve
             # returned to where it started.
+            #
+            # A pause closes the valve too and reopens it on resume, with the
+            # rest of the pulse still to run (2026-09-01). A paused dose used to
+            # hold the valve open for as long as the operator was away, dumping
+            # precursor - the one place where "pause only takes effect at the
+            # next step" was actively harmful rather than merely wrong.
             await sup.set_valve(step.valve, True, reason="recipe dose")
             try:
-                await self._sleep(step.seconds)
+                await self._sleep(
+                    step.seconds,
+                    on_pause=lambda: sup.set_valve(step.valve, False,
+                                                   reason="dose paused"),
+                    on_resume=lambda: sup.set_valve(step.valve, True,
+                                                    reason="dose resumed"))
             finally:
                 await sup.set_valve(step.valve, False, reason="recipe dose end")
 
@@ -491,11 +715,104 @@ class RecipeRunner:
             if self._abort.is_set():
                 return
             await self._pause.wait()
+            # It has been counting down for a whole dose+pump-A; the gas may
+            # have been switched off in the meantime.
+            if schedule not in self._gas_schedules:
+                return
             await self.sup.set_mfc_setpoint(schedule.mfc, schedule.flow_sccm)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.sup.report_event("error", f"gas lead-in ({schedule.mfc}): {exc}")
+            self.sup.report_event("error", f"gas lead-in ({gas_display_name(schedule.mfc, self.gas_names())}): {exc}")
+
+    # -- sample bias bracketing the beam ------------------------------------ #
+
+    async def _set_bias(self, on: bool, step: Step | None = None) -> None:
+        """Switch the sample-bias output, arming the level on the first ON.
+
+        Never raises: a bias that will not respond is an event, not a reason to
+        drop the beam step around it. The operator sees it in the event log and
+        on the Hardware tab's supply card.
+        """
+        step = step or self._bias_step
+        if step is None or not step.bias_v:
+            return
+        try:
+            if on and not self._bias_armed:
+                await self.sup.set_sample_bias_output(
+                    True, volts=step.bias_v, polarity=step.bias_polarity,
+                    reason="beam bracket")
+                self._bias_armed = True
+            else:
+                await self.sup.set_sample_bias_output(
+                    on, reason="beam bracket")
+            self._bias_on = on
+        except Exception as exc:
+            self.sup.report_event("error", f"sample bias {'on' if on else 'off'}: {exc}")
+
+    def _schedule_bias(self, step: Step, on: bool, delay_s: float) -> None:
+        """Flip the sample bias `delay_s` from now.
+
+        A separate task, like the gas lead-in, so the lead counts down inside
+        the step that precedes the beam and the trail inside the one that
+        follows it. Neither is ever awaited by a step, so bracketing the beam
+        cannot stretch a cycle past the sum of its step durations.
+
+        The newest instruction wins from its own deadline onward: scheduling a
+        flip cancels every pending flip due at or after it, and leaves earlier
+        ones alone. That is what makes the awkward settings behave. With a
+        trail longer than pump B + dose + pump A, the next cycle's ON falls
+        before the pending OFF, supersedes it, and the bias simply stays up
+        across the boundary instead of blinking off just as the beam returns.
+        """
+        if not step.bias_v:
+            return
+        self._bias_step = step
+        deadline = self.clock.elapsed() + max(0.0, delay_s)
+        keep: list[tuple[float, asyncio.Task]] = []
+        for due, task in self._bias_pending:
+            if task.done():
+                continue
+            if due >= deadline:
+                task.cancel()           # superseded by this flip
+            else:
+                keep.append((due, task))
+        self._bias_pending = keep
+
+        async def _flip() -> None:
+            try:
+                if delay_s > 0:
+                    await asyncio.sleep(delay_s)
+                if on:
+                    if self._abort.is_set():
+                        return      # an abort never energises the stage
+                    # Nor does an operator pause: the beam this is leading is
+                    # held too, so energising now would sit a bias on the stage
+                    # for the length of the pause with no beam to justify it.
+                    # (Turning OFF is never gated - that direction is always
+                    # safe to take immediately.) Same rule as _fire_gas_lead.
+                    await self._pause.wait()
+                await self._set_bias(on, step)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.sup.report_event("error", f"sample bias schedule: {exc}")
+
+        self._bias_pending.append((deadline, asyncio.create_task(
+            _flip(), name=f"bias-{'on' if on else 'off'}")))
+
+    async def _bias_off_now(self) -> None:
+        """Cancel every pending flip and drop the bias immediately. Run-end
+        teardown: the stage must never be left energised by a crash or an
+        abort, whatever a queued task was about to do."""
+        pending, self._bias_pending = self._bias_pending, []
+        for _due, task in pending:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        if self._bias_on:
+            await self._set_bias(False)
 
     async def _electron_beam(self, step: Step) -> None:
         """Beam ON (plasma ground OFF), hold `seconds` of exposure with current.
@@ -519,6 +836,12 @@ class RecipeRunner:
         total = float(step.seconds)
         first = next((g for g in self._gas_schedules if g.order == "first"), None)
         second = next((g for g in self._gas_schedules if g.order == "second"), None)
+        # Simultaneous gases do not divide the exposure - they all cover the
+        # whole of it, each at its own flow (operator, 2026-08-26). Validation
+        # guarantees this is all-or-nothing, so when `simul` is non-empty
+        # `first` and `second` are both None and the handoff arithmetic below
+        # is inert rather than fighting it.
+        simul = [g for g in self._gas_schedules if g.order == "simultaneous"]
         # Handoff point: where "first" ends and "second" starts. The single
         # overlap moves the incoming gas earlier, same as in EE-CVD.
         handoff_s = (first.pct / 100.0 * total) if first else 0.0
@@ -526,6 +849,7 @@ class RecipeRunner:
         second_off_s = min(total, handoff_s + (second.pct / 100.0 * total if second else 0.0))
         first_on = False
         second_on = False
+        simul_on = False
 
         await sup.set_valve(step.switch, False, reason="beam on")   # plasma ground off
         # That flip IS the strike - one is always required to start the beam.
@@ -543,21 +867,48 @@ class RecipeRunner:
         # it counts as exposure, so `seconds` includes that elapsed interval.
         strike_at = self.clock.elapsed()
         try:
+            # Defensive re-assert, same reasoning as the gas below: the lead-in
+            # task scheduled at the start of the cycle should already have
+            # raised the bias, but this step is the one that actually needs it
+            # up, so an unbiased deposition is not left to a missed timer.
+            if step.bias_v and not self._bias_on:
+                await self._set_bias(True, step)
             if first is not None:
                 # Defensive re-assert: the lead-in task should already have
                 # turned this on before this step started, but this step is
                 # the one place that actually needs it on, so make sure.
                 await self._gas_set(first, first.flow_sccm)
                 first_on = True
+            if simul:
+                # Same re-assert, and the only place these are switched on -
+                # they have no window boundary to cross, so the tick loop below
+                # never touches them.
+                for gas in simul:
+                    await self._gas_set(gas, gas.flow_sccm)
+                simul_on = True
 
             remaining = total
             while remaining > 0 and not self._abort.is_set():
-                await self._pause.wait()
+                if not self._pause.is_set():
+                    # An operator pause takes the beam OFF THE SAMPLE, not just
+                    # off the clock (2026-09-01). It used to freeze the exposure
+                    # budget and leave the plasma running on the wafer for as
+                    # long as the operator was away.
+                    await sup.set_valve(step.switch, True, reason="paused - beam off")
+                    self.progress.message = "paused - beam off"
+                    await self._pause.wait()
+                    if self._abort.is_set():
+                        break
+                    await sup.set_valve(step.switch, False, reason="resumed - beam on")
+                    # The re-strike gets the same grace a first strike does, or
+                    # the tick after it reads as "extinguished" and reignites.
+                    strike_at = self.clock.elapsed()
+                    continue
                 t0 = self.clock.elapsed()
                 # Clamp the last tick to what is actually left. A fixed 0.2 s
                 # tick overshot the step by up to a full tick every time it ran
                 # (0.1 s on average), which across 150 cycles is minutes.
-                await asyncio.sleep(min(BEAM_TICK_S, remaining))
+                await self._tick(min(BEAM_TICK_S, remaining))
                 dt = self.clock.elapsed() - t0            # unaffected by pausing
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
@@ -604,8 +955,14 @@ class RecipeRunner:
                 await self._gas_set(first, 0.0)
             if second_on and second is not None:
                 await self._gas_set(second, 0.0)
+            if simul_on:
+                for gas in simul:
+                    await self._gas_set(gas, 0.0)
             # Beam OFF between phases = plasma ground ON.
             await sup.set_valve(step.switch, True, reason="beam off")
+            # ...and the bias follows it down bias_trail_s later, inside pump B.
+            # Scheduled, not awaited: pump B starts on time either way.
+            self._schedule_bias(step, False, step.bias_trail_s)
 
     # -- EE-CVD: beam held on for the whole run ----------------------------- #
 
@@ -624,6 +981,13 @@ class RecipeRunner:
         thing it would lead is the previous cycle's second gas, which is exactly
         what the re-arm above expresses.
         """
+        simul = [g for g in self._gas_schedules if g.order == "simultaneous"]
+        if simul:
+            # No windows to compute: every simultaneous gas covers the whole
+            # cycle, which in EE-CVD (beam on all run) means it simply flows
+            # from the first cycle to the end of the run. Supervisor.finish_run
+            # zeroes it, the same as any other scheduled gas.
+            return {"simultaneous": simul}
         first = next((g for g in self._gas_schedules if g.order == "first"), None)
         second = next((g for g in self._gas_schedules if g.order == "second"), None)
         if first is None and second is None:
@@ -670,7 +1034,7 @@ class RecipeRunner:
         try:
             await self.sup.set_mfc_setpoint(schedule.mfc, sccm)
         except Exception as exc:
-            self.sup.report_event("error", f"gas schedule ({schedule.mfc}): {exc}")
+            self.sup.report_event("error", f"gas schedule ({gas_display_name(schedule.mfc, self.gas_names())}): {exc}")
 
     async def _apply_cvd_gas(self, in_cycle: float) -> None:
         """Drive both scheduled gases to the state `in_cycle` calls for.
@@ -686,17 +1050,24 @@ class RecipeRunner:
         plan = self._gas_plan
         if not plan:
             return
+        if plan.get("simultaneous"):
+            # On once, then left alone - there is no boundary to cross.
+            for gas in plan["simultaneous"]:
+                if self._gas_on.get(gas.mfc) is not True:
+                    await self._gas_set(gas, gas.flow_sccm)
+                    self._gas_on[gas.mfc] = True
+            return
         first, second = plan["first"], plan["second"]
         if first is not None:
             want = in_cycle < plan["handoff"] or in_cycle >= plan["first_rearm"]
-            if want != self._gas_on["first"]:
+            if want != self._gas_on.get(first.mfc):
                 await self._gas_set(first, first.flow_sccm if want else 0.0)
-                self._gas_on["first"] = want
+                self._gas_on[first.mfc] = want
         if second is not None:
             want = plan["second_on"] <= in_cycle < plan["second_off"]
-            if want != self._gas_on["second"]:
+            if want != self._gas_on.get(second.mfc):
                 await self._gas_set(second, second.flow_sccm if want else 0.0)
-                self._gas_on["second"] = want
+                self._gas_on[second.mfc] = want
 
     async def _beam_start(self, step: Step) -> None:
         """Turn the beam on and hand it to the background watchdog."""
@@ -704,8 +1075,15 @@ class RecipeRunner:
             raise ValueError("beam_start needs 'switch'")
         await self._kill_beam_watch()          # never run two watchdogs
         self._gas_plan = self._build_gas_plan()
-        self._gas_on = {"first": None, "second": None}
+        self._gas_on = {}
         self._beam_switch = step.switch
+        # The bias leads the strike. Awaited rather than scheduled: this runs in
+        # SETUP, before the cycling phase the run clock counts, so the lead
+        # cannot push a cycle out - and there is no preceding step to hide it
+        # in the way EE-ALD's pump A hides it.
+        if step.bias_v:
+            await self._set_bias(True, step)
+            await asyncio.sleep(step.bias_lead_s)
         await self.sup.set_valve(step.switch, False, reason="beam on (EE-CVD)")
         # Same as _electron_beam: this flip is the strike, so let the current
         # settle before the watchdog starts judging - otherwise the watchdog's
@@ -715,13 +1093,19 @@ class RecipeRunner:
             self._beam_watch(step), name="beam-watch")
 
     async def _beam_stop(self, step: Step) -> None:
-        """Stop the watchdog and ground the beam."""
+        """Stop the watchdog, ground the beam, and drop the bias behind it."""
         await self._kill_beam_watch()
         switch = step.switch or self._beam_switch
         if switch:
             await self.sup.set_valve(switch, True, reason="beam off (EE-CVD)")
         self._beam_switch = None
         self.progress.beam = None
+        # Teardown, so the trail is awaited: nothing is waiting on this step's
+        # length. On an ABORT the teardown is skipped entirely and _run's
+        # finally drops the bias at once - safety over the trailing 0.2 s.
+        if step.bias_v and self._bias_on:
+            await asyncio.sleep(step.bias_trail_s)
+            await self._set_bias(False, step)
 
     async def _kill_beam_watch(self) -> None:
         task, self._beam_task = self._beam_task, None
@@ -750,11 +1134,22 @@ class RecipeRunner:
         ticks.
         """
         sup = self.sup
+        strike_at = self.clock.elapsed()
         try:
             while True:
-                await self._pause.wait()
+                if not self._pause.is_set():
+                    # Same as EE-ALD: a pause grounds the beam rather than just
+                    # freezing the clocks (2026-09-01). Skipping the rest of the
+                    # tick also stops the watchdog reading its own grounded beam
+                    # as a dead plasma and reigniting into a pause.
+                    await sup.set_valve(step.switch, True, reason="paused - beam off")
+                    self.progress.message = "paused - beam off"
+                    await self._pause.wait()
+                    await sup.set_valve(step.switch, False, reason="resumed - beam on")
+                    strike_at = self.clock.elapsed()
+                    continue
                 t0 = self.clock.elapsed()
-                await asyncio.sleep(BEAM_TICK_S)
+                await self._tick(BEAM_TICK_S)
                 dt = self.clock.elapsed() - t0
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
@@ -782,8 +1177,9 @@ class RecipeRunner:
                     self._cycle_clock += dt
                     await self._apply_cvd_gas(self._cycle_clock)
 
-                if not lit:
+                if not lit and self.clock.elapsed() - strike_at >= step.reignite_settle_s:
                     await self._reignite(step)
+                    strike_at = self.clock.elapsed()
         finally:
             self.progress.beam = None
             self._cycle_pause("reignite", False)
@@ -822,15 +1218,62 @@ class RecipeRunner:
             f"pressure did not reach the target within {step.timeout_s:g} s"
         )
 
-    async def _sleep(self, seconds: float) -> None:
-        """Sleep `seconds`, returning early if the run is aborted.
+    async def _tick(self, seconds: float) -> None:
+        """Sleep up to `seconds`, cut short by an abort or an operator pause.
 
-        One timed wait, not a poll loop: the scheduler's lateness is never
-        re-added per iteration, so a busy UI cannot stretch a dose.
+        The beam loops tick on this rather than a bare asyncio.sleep so that
+        pressing Pause grounds the relay within milliseconds instead of at the
+        end of the tick in flight - and so the exposure clock is charged only
+        for time the beam was really on the sample (2026-09-01).
         """
         if seconds <= 0:
             return
+        waiters = [asyncio.ensure_future(self._abort.wait()),
+                   asyncio.ensure_future(self._paused.wait())]
         try:
-            await asyncio.wait_for(self._abort.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            return       # slept the full duration
+            await asyncio.wait(waiters, timeout=seconds,
+                               return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for w in waiters:
+                w.cancel()
+
+    async def _sleep(self, seconds: float, *, on_pause=None, on_resume=None) -> None:
+        """Sleep `seconds` of RUN time, returning early if the run is aborted.
+
+        Run time, not wall time: an operator pause stops the clock and the step
+        resumes with exactly what was left of it. `on_pause` / `on_resume` are
+        awaited around the held time, which is how a dose hands its valve back
+        and takes it again (see _exec).
+
+        Still one timed wait per stretch, not a poll loop: the scheduler's
+        lateness is never re-added per iteration, so a busy UI cannot stretch a
+        dose. A pause splits the sleep into stretches, and only the un-slept
+        remainder is carried into the next one.
+        """
+        remaining = float(seconds)
+        while remaining > 0:
+            if self._abort.is_set():
+                return
+            t0 = self.clock.elapsed()
+            # Wake on whichever comes first: the duration, an abort, or a pause.
+            waiters = [asyncio.ensure_future(self._abort.wait()),
+                       asyncio.ensure_future(self._paused.wait())]
+            try:
+                done, _ = await asyncio.wait(waiters, timeout=remaining,
+                                             return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waiters:
+                    w.cancel()
+            remaining -= self.clock.elapsed() - t0
+            if self._abort.is_set():
+                return
+            if not done:
+                return                      # slept the whole duration
+            # Paused. Stop doing whatever this step does, wait it out, resume.
+            if on_pause is not None:
+                await on_pause()
+            await self._pause.wait()
+            if self._abort.is_set():
+                return
+            if on_resume is not None:
+                await on_resume()

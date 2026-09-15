@@ -20,8 +20,10 @@ clock and sleep. These checks were added and passed before the model:
   inside it count. A dead sample triggers restrike only if its **start** was
   outside initial grace. Repeated restrikes use pulse and settle sleeps; those
   intervals earn no exposure.
-- Operator pause prevents starting the next sample. It does not interrupt an
-  already running sample or restrike. It does not itself ground the beam.
+- Operator pause grounds the beam at the next loop boundary and re-strikes on
+  resume, preserving earned exposure. Production sampling waits wake on pause;
+  the deterministic model characterizes the boundary trace. An in-flight
+  restrike completes its pulse and settle before the pause is handled.
 - Plasma loss and operator pause are separate overlapping reasons for freezing
   progress. Resuming the operator pause does not clear the plasma-loss reason.
 - Graceful abort sets the production abort flag and lets the current iteration
@@ -88,7 +90,7 @@ In particular, cancellation invalidates model acknowledgments but cannot undo a
 command already executing in an adapter. A real adapter would need serialized
 commands and a reviewed cleanup ordering policy.
 
-For `reactor-e1j.11`, adopt the smaller independent improvement: inject named
+Production now includes the smaller independent improvement: inject named
 elapsed and wall-clock sources. Use monotonic time for duration/deadline and
 pause accumulation while retaining wall time for experiment timestamps and
 operator history. [Python's clock documentation](https://docs.python.org/3/library/time.html#time.monotonic)

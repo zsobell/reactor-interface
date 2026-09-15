@@ -101,6 +101,31 @@ approximately what the LabVIEW version ran at anyway.
 | `cDAQ1Mod2/ai1` | 24.54 °C | connected, unidentified (`aux.tc_b`) |
 | the other five | 2385 °C | open circuit — nothing attached |
 
+### No millivolts from a thermocouple channel
+
+Asked 2026-08-27, worth writing down: **this program cannot show you the raw
+thermocouple voltage.** Every TC channel is created with DAQmx's
+`add_ai_thrmcpl_chan(units=DEG_C)`, so the module and the driver do the
+cold-junction compensation and the linearisation, and what arrives here is
+already °C. The millivolt signal is never in this process.
+
+Nor can it simply be read alongside: DAQmx gives **one task exclusive use of a
+module's analog input**, which is the same constraint that makes the LabVIEW VI
+and this program mutually exclusive. A parallel voltage task on the same
+channel would be refused with "resource reserved".
+
+Two ways to get volts if they are ever wanted, both changes to how the channel
+is acquired rather than additions to it:
+
+1. Declare the channel `kind: "voltage"` in `config/reactor.yaml`. It then
+   reports volts (and the UI's Voltage row fills in, it is already wired for
+   this) — but it stops reporting °C, because nothing in this program does
+   cold-junction compensation.
+2. Read the task's raw samples and apply only the device scaling coefficients
+   (`ai_dev_scaling_coeff`) to recover volts alongside the °C. Plausible,
+   untested here, and it touches the working temperature path — so it needs
+   Zach's go-ahead and a bench check, not a guess.
+
 2385 °C is the NI 9211's open-circuit full-scale, not a temperature.
 
 **The stage TC was identified by connect-and-compare**, which is worth reusing
@@ -130,8 +155,8 @@ the campus address.
 | ID | Gas | Address | Reachable |
 |---|---|---|---|
 | `ar` | Ar — HCPES | `192.168.2.221:502` | ✅ unit id 1 |
-| `h2` | H2 — reactive background | `192.168.2.222:502` | ✅ unit id 1 |
-| `n2` | N2 — reactive background | `192.168.2.223:502` | ✅ unit id 1 |
+| `mfc1` | MFC 1 — reactive background (H2 originally, NH3 since 2026-09) | `192.168.2.222:502` | ✅ unit id 1 |
+| `mfc2` | MFC 2 — reactive background (N2) | `192.168.2.223:502` | ✅ unit id 1 |
 
 These are **MKS G50** units (product `G_MFC_A_Modbus`), each with its own small
 web server. Verified from the devices themselves:
@@ -139,8 +164,8 @@ web server. Verified from the devices themselves:
 | ID | Gas | **Full scale** | Model | Serial | GCF | Valve |
 |---|---|---|---|---|---|---|
 | `ar` | 4: Ar | **29 sccm** | GM50A013501RBM020 | 21999844 | 1.39 | N.C. |
-| `h2` | 4: H2 | **10 sccm** | GM50A013101RMM020 | 23291683 | 1.00 | N.C. |
-| `n2` | 32: N2 | **50 sccm** | GM50A013501RBM020 | 21999843 | 1.00 | N.C. |
+| `mfc1` | 2: NH3 (was 4: H2) | **7 sccm** | GM50A013101RMM020 | 23291683 | 1.00 | N.C. |
+| `mfc2` | 32: N2 | **50 sccm** | GM50A013501RBM020 | 21999843 | 1.00 | N.C. |
 
 All calibrated on N2. All valves normally closed.
 

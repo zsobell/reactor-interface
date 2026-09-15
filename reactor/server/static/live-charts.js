@@ -12,6 +12,10 @@ let MARKS = [];
 let RUN_PLASMA = "plasma_ground";
 let MFC_IDS = [];        // populated from live state each frame
 let MFC_LABELS = {};     // id -> current display label (tracks renames)
+let MFC_GAS = {};
+function gasName(id){
+  return MFC_GAS[id] || (MFC_LABELS[id] || id).split(" - ")[0];
+}
 let CUR_UNIT = {mul:1e6, unit:"µA", dp:2};         // current panel's display unit
 
 function makeChartCtl(defaultWindowS){
@@ -170,7 +174,7 @@ function drawPanel(g, title, x0, y0, W, H, pts, X, log, series, mul=1, rangePts=
 
 // --- MFC flow strip: own time window, hover, and drag-to-zoom, same as the
 // run monitor. ---
-const MFC_COLORS = {ar: "#58a6ff", h2: "#3fb950", n2: "#d29922"};
+const MFC_COLORS = {ar: "#58a6ff", mfc1: "#3fb950", mfc2: "#d29922"};
 const MFC_FALLBACK_COLORS = ["#a371f7", "#f85149", "#56d4dc"];
 function drawMfcChart(){
   const cv = $("mfcChart");
@@ -203,12 +207,14 @@ function drawMfcChart(){
   g.fillText(clock(t0), PADL+26, h-4);
   g.fillText(clock(t1), PADL+W-26, h-4);
 
-  drawOverlaysFor(g, w, h, ctl, s => [clock(s.t), ...series.map(ser =>
-    `${(MFC_LABELS[ser.key.slice(4)]||ser.key).slice(0,14)} `
-    + (typeof s[ser.key]==="number" ? num(s[ser.key],2) : "—") + " sccm")]);
+  drawOverlaysFor(g, w, h, ctl, s => [clock(s.t), ...series.map(ser => ({
+    color: ser.color,
+    text: `${gasName(ser.key.slice(4)).slice(0,14)} `
+      + (typeof s[ser.key]==="number" ? num(s[ser.key],2) : "—") + " sccm",
+  }))]);
 
   setHtml($("mfcLegend"), series.map(s =>
-    `<span><i style="background:${s.color}"></i>${esc(MFC_LABELS[s.key.slice(4)]||s.key)}</span>`
+    `<span><i style="background:${s.color}"></i>${esc(gasName(s.key.slice(4)))}</span>`
   ).join("") + (ctl.view.follow ? "" : `<span style="color:var(--warn)">paused — press Follow live</span>`));
 }
 
@@ -308,18 +314,33 @@ function drawOverlaysFor(g, w, h, ctl, lineBuilder){
     }
   }
 
-  const lines = lineBuilder(s);
+  /* A line is either a plain string or {text, color}. A coloured line gets a
+     short rule of that colour in front of it, so "which trace is this number
+     from" is answerable without counting series (operator, 2026-08-26 - the
+     MFC flow plot has three lines and the names alone did not say which). */
+  const lines = lineBuilder(s).map(l => typeof l === "string" ? {text: l} : l);
   g.font = "11px system-ui"; g.textBaseline = "top";
-  const padB = 6, lh = 14;
-  const bw = Math.max(...lines.map(l => g.measureText(l).width)) + padB*2;
+  const padB = 6, lh = 14, swW = 11, swGap = 5;
+  const indent = lines.some(l => l.color) ? swW + swGap : 0;
+  const bw = Math.max(...lines.map(
+    l => g.measureText(l.text).width + (l.color ? indent : 0))) + padB*2;
   const bh = lines.length*lh + padB*2;
   let bx = x + 10; if(bx + bw > w - 4) bx = x - 10 - bw;
   const by = GEOM.top + 4;
   g.save();
   g.fillStyle = "rgba(13,17,23,0.92)"; g.strokeStyle = "#2a323d";
   g.fillRect(bx, by, bw, bh); g.strokeRect(bx, by, bw, bh);
-  g.fillStyle = "#e6edf3"; g.textAlign = "left";
-  lines.forEach((l,i) => g.fillText(l, bx + padB, by + padB + i*lh));
+  g.textAlign = "left";
+  lines.forEach((l,i) => {
+    const ty = by + padB + i*lh;
+    if(l.color){
+      g.fillStyle = l.color;
+      // Same 11x3 rule the static legend uses, centred on the text.
+      g.fillRect(bx + padB, ty + 5, swW, 3);
+    }
+    g.fillStyle = "#e6edf3";
+    g.fillText(l.text, bx + padB + (l.color ? indent : 0), ty);
+  });
   g.restore();
 }
 
@@ -405,6 +426,7 @@ return {
     RUN_PLASMA = s.run_valves?.plasma || "plasma_ground";
     MFC_IDS = (s.mfcs || []).map(m => m.id);
     MFC_LABELS = Object.fromEntries((s.mfcs || []).map(m => [m.id, m.label || m.id]));
+    MFC_GAS = Object.fromEntries((s.mfcs || []).map(m => [m.id, m.gas_name || ""]));
   },
 };
 }

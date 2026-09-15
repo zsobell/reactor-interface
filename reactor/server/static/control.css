@@ -1,4 +1,4 @@
-  :root{
+:root{
     --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --line:#2a323d;
     --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff;
     --ok:#3fb950; --warn:#d29922; --bad:#f85149; --hot:#ff7b39;
@@ -42,10 +42,18 @@
   /* Latest loud event, pinned in the header: the event log lives on the
      Diagnostics tab, so without this a fill-pressure flag would be invisible
      from the Run tab. Display only — it never changes reactor behaviour. */
-  .alertchip{max-width:min(46vw,540px);overflow:hidden;text-overflow:ellipsis;
+  /* Up to MAX_CHIPS of them side by side (operator, 2026-09-01: "up to 4
+     warnings should display at once in the upper right"). They wrap onto a
+     second header line rather than squeezing, and each is individually
+     ellipsised so one long message cannot crowd the other three out. */
+  .alertchips{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;
+              max-width:min(60vw,760px)}
+  .alertchips:empty{display:none}
+  .alertchip{max-width:min(46vw,360px);overflow:hidden;text-overflow:ellipsis;
              white-space:nowrap;font-size:12px;padding:5px 11px;border-radius:6px;
              cursor:pointer;background:#332701;border:1px solid var(--warn);color:#f0c674}
   .alertchip.bad{background:#3d1113;border-color:var(--bad);color:#ffb3b0}
+  .alertchip.more{background:transparent;border-color:var(--line);color:var(--dim)}
 
   main{padding:14px 16px 16px}
   .pane{display:grid;gap:14px;align-content:start}
@@ -108,13 +116,33 @@
      single-column-flow layout. */
   .hwtop{display:grid;grid-template-columns:minmax(380px,1.12fr) minmax(340px,1fr);
          gap:14px}
-  .hwbottom{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));
-            gap:14px}
+  /* Four fixed columns, not auto-fit: the four sensor/instrument cards are one
+     row of peers and should stay one row, rather than the track count changing
+     with the window and leaving the wide supply card spanning empty tracks. */
+  .hwbottom{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+  /* Five supplies in one narrow column is a very tall stack, and the tiles
+     overflowed the card. Give it the whole row, above the four. */
+  #supplyCard{grid-column:1/-1}
+  @media(max-width:1240px){ .hwbottom{grid-template-columns:repeat(2,minmax(0,1fr))} }
   @media(max-width:1000px){ .hwtop{grid-template-columns:1fr} }
+  @media(max-width:700px){ .hwbottom{grid-template-columns:1fr} }
 
   /* ---- Diagnostics tab ------------------------------------------------- */
   .diagtop{display:grid;grid-template-columns:minmax(380px,1.15fr) minmax(330px,1fr);
            gap:14px}
+  /* A card that collapses. The summary is styled as the card's own h2 so it
+     reads identically whether it is open or shut. */
+  details.card{display:block}
+  details.card>summary{padding:9px 14px;font-size:12px;letter-spacing:.09em;
+        text-transform:uppercase;color:var(--dim);background:var(--panel2);
+        display:flex;align-items:center;gap:9px;cursor:pointer;list-style:none}
+  details.card[open]>summary{border-bottom:1px solid var(--line)}
+  details.card>summary::-webkit-details-marker{display:none}
+  details.card>summary::before{content:"\25B8";font-size:11px;transition:transform .15s}
+  details.card[open]>summary::before{transform:rotate(90deg)}
+  details.card>summary .sum{text-transform:none;letter-spacing:0;opacity:.75;
+        margin-left:auto;font-size:11px}
+  .idcard{margin-top:14px}
   .diagcol{display:grid;gap:14px;align-content:start;min-width:0}
   @media(max-width:1000px){ .diagtop{grid-template-columns:1fr} }
 
@@ -122,7 +150,10 @@
   .tilegrid{display:grid;gap:10px}
   #mfcs{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
   #instruments,#gauges,#aux{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
-  #supplies{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+  /* auto-FIT, not auto-fill: with the card spanning the row, the five tiles
+     share the width evenly instead of leaving empty phantom tracks. The floor
+     is what a 2260B tile needs for its V/I inputs plus the Set button. */
+  #supplies{grid-template-columns:repeat(auto-fit,minmax(238px,1fr))}
   /* Status chips on a supply tile: neutral by default, coloured when asserted. */
   .chips{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0 2px}
   .chip{font-size:11px;padding:1px 7px;border-radius:10px;
@@ -155,6 +186,11 @@
   .valve .rename{margin-left:auto}
   .note{font-size:12px;color:var(--dim);margin-top:7px;overflow-wrap:anywhere}
   .note:empty{display:none}
+  /* Divider inside a card body, for blocks folded in from elsewhere. */
+  .subhead{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+           color:var(--dim);margin:12px 0 5px;padding-bottom:3px;
+           border-bottom:1px solid var(--line)}
+  .subhead:first-child{margin-top:0}
 
   /* ---- valves ---------------------------------------------------------- */
   #valves{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:8px}
@@ -179,10 +215,25 @@
   th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line)}
   th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;
      letter-spacing:.06em}
+  /* Columns come from the <colgroup>, not from the cell contents, so a Detail
+     cell that grows cannot shove the Device column sideways. */
+  .conntable{table-layout:fixed}
+  .conntable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .conntable td:last-child{white-space:normal;overflow-wrap:anywhere}
 
-  #events{max-height:min(46vh,440px);overflow-y:auto;font-family:var(--mono);font-size:12px}
-  #events div{padding:2px 0;border-bottom:1px solid #1b2027}
-  #events .t{color:var(--dim);margin-right:7px}
+  /* Sized to the tab, not to a fixed strip: it sits in the big top-left slot
+     now (2026-08-26) and should be the tall thing on the page. The card body
+     is the scroll container so the header stays put. */
+  #events{max-height:min(72vh,760px);min-height:340px;overflow-y:auto;
+          font-family:var(--mono);font-size:12px}
+  /* Same list, its own panel: the errors are what get hunted for, and hunting
+     them meant scrolling the event log (2026-09-09). Shorter, because if this
+     one is long something is badly wrong. */
+  #errors{max-height:min(38vh,320px);min-height:120px;overflow-y:auto;
+          font-family:var(--mono);font-size:12px}
+  #events div,#errors div{padding:2px 0;border-bottom:1px solid #1b2027}
+  #events .t,#errors .t{color:var(--dim);margin-right:7px}
+  #errors .quiet{color:var(--dim);border:0}
   /* one class per event kind the supervisor emits (see Supervisor._event) */
   .k-error{color:var(--bad)} .k-flag{color:var(--warn);font-weight:600}
   .k-valve,.k-valve-id{color:var(--hot)}
@@ -192,6 +243,11 @@
   button.primary{background:#193a2a;border-color:#2ea043;color:#7ee787;font-weight:600}
   button.primary:hover:not(:disabled){border-color:#3fb950}
   button.mini{padding:3px 8px;font-size:12px}
+  /* Shown while a run is running, because the fields below then retune THAT
+     run rather than setting up the next one (2026-09-01). */
+  .livebadge{font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+             padding:2px 7px;border-radius:999px;background:#241206;
+             border:1px solid var(--hot);color:var(--hot);font-weight:600}
   .params{display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:9px}
   .params label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--dim)}
   .params label.adv{opacity:.85}

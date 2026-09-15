@@ -91,6 +91,15 @@ async def main() -> int:
         c.check("levels still untouched after an abort",
                 (hv.voltage, hv.current) == (900.0, 150.0),
                 f"{hv.voltage} V / {hv.current} mA")
+        # An abort never reaches the teardown, which is where a clean run parks
+        # the relay. Before 2026-09-09 an abort between beams therefore left it
+        # ENERGISED, draining the 9 V battery the relay box runs off.
+        c.check("and the beam relay is parked de-energised",
+                vr.sup.valve_state.get("plasma_ground") is False,
+                str(vr.sup.valve_state.get("plasma_ground")))
+        c.check("the run progress reads as ended, not still running",
+                vr.sup.recipes.progress.state == "idle",
+                vr.sup.recipes.progress.state)
 
     # ------------------------------------------------------------------ 3
     c.section("3. abort_prestart undoes a pre-start that already struck")

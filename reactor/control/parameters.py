@@ -12,7 +12,19 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Payload = dict[str, Any]
-GAS_SCHEDULE_MFCS = ("h2", "n2")
+GAS_SCHEDULE_MFCS = ("mfc1", "mfc2")
+
+
+def migrate_params(params: Payload) -> Payload:
+    """Canonical channel keys win over legacy gas keys, regardless of order."""
+    out = deepcopy(dict(params))
+    for key in list(out):
+        for old, new in (("h2_gas_", "mfc1_gas_"), ("n2_gas_", "mfc2_gas_")):
+            if key.startswith(old):
+                out.setdefault(new + key[len(old):], out[key])
+                del out[key]
+                break
+    return out
 
 
 @dataclass(frozen=True)
@@ -50,19 +62,20 @@ class BeamParameters:
 @dataclass(frozen=True)
 class GasParameters:
     mfc: str
-    order: Literal["first", "second"]
+    order: Literal["first", "second", "simultaneous"]
     pct: float
     flow_sccm: float
 
     @classmethod
     def enabled(cls, p: Payload) -> tuple[GasParameters, ...]:
+        p = migrate_params(p)
         result = []
         for mfc in GAS_SCHEDULE_MFCS:
             if not p.get(f"{mfc}_gas_enable"):
                 continue
             order = p.get(f"{mfc}_gas_order", "first")
-            if order not in ("first", "second"):
-                raise ValueError(f"{mfc}: gas order must be 'first' or 'second'")
+            if order not in ("first", "second", "simultaneous"):
+                raise ValueError(f"{mfc}: gas order must be 'first', 'second' or 'simultaneous'")
             result.append(cls(mfc, order, float(p.get(f"{mfc}_gas_pct", 100.0)),
                               float(p.get(f"{mfc}_gas_flow_sccm", 0.0))))
         return tuple(result)
@@ -98,7 +111,7 @@ class RunParameters:
             if p.mode != mode:
                 raise ValueError("run parameters belong to a different recipe mode")
             return p
-        raw = deepcopy(dict(p))
+        raw = migrate_params(p)
         # Disabled gases and CVD-only ignored ALD fields are never coerced.
         gases = GasParameters.enabled(raw)
         return cls(mode=mode, name=raw.get("name", "ALD + e-beam (precursor 1)" if mode == "ald"

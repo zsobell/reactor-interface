@@ -94,9 +94,79 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     }
   }
 
+
+  let shutdownGeneration = 0, shutdownTimer = null, shutdownWake = null;
+  function shutdownDelay(){
+    return new Promise(resolve => {
+      shutdownWake = resolve;
+      shutdownTimer = setTimeoutImpl(() => {shutdownTimer=null; shutdownWake=null; resolve();},250);
+    });
+  }
+  function cancelShutdownWatch(){
+    shutdownGeneration++;
+    if(shutdownTimer !== null) clearTimeoutImpl(shutdownTimer);
+    shutdownTimer = null;
+    if(shutdownWake) shutdownWake();
+    shutdownWake = null;
+  }
+
+  async function watchShutdown(receipt){
+    const generation = ++shutdownGeneration;
+    const hint = $("shutdownHint");
+    const released = (receipt && receipt.released) || [];
+    const failed   = (receipt && receipt.failed)   || [];
+    const killed   = (receipt && receipt.also_killed) || [];
+
+    // What was released, stated before the process is even gone.
+    const parts = [];
+    if(released.length) parts.push(`Released ${released.join(", ")}`);
+    if(killed.length)   parts.push(`killed ${killed.length} other instance(s)`);
+    const summary = parts.join(" · ");
+
+    const deadline = Date.now() + 8000;    // the server's own fallback is 3 s
+    while(Date.now() < deadline){
+      await shutdownDelay();
+      if(disposed || suspended || generation !== shutdownGeneration) return;
+      let alive = false;
+      try{
+        // no-store: a cached 200 would read as "still up" forever.
+        const r = await fetchImpl("/api/state", {cache: "no-store"});
+        alive = r.ok;
+      }catch(_){ alive = false; }
+      if(disposed || suspended || generation !== shutdownGeneration) return;
+      if(!alive){
+        if(failed.length){
+          // Released most of it, but not all - name what did not let go, because
+          // that is exactly what the next server will fail to open.
+          hint.textContent = `Server stopped, but ${failed.length} teardown step`
+            + `(s) failed: ${failed.map(f => f.what).join(", ")}. `
+            + `${summary}. Check server.log before starting again.`;
+          hint.style.color = "var(--warn)";
+          toast("Server stopped, but not everything was released", true);
+        }else{
+          hint.textContent = `✓ Stopped and released — ready to start again from `
+            + `the Reactor Interface shortcut.${summary ? "  " + summary + "." : ""}`;
+          hint.style.color = "var(--ok)";
+        }
+        return;
+      }
+    }
+    if(disposed || suspended || generation !== shutdownGeneration) return;
+    // Still answering past the server's own hard deadline. The teardown receipt
+    // above still stands - the devices ARE released - but the process is lingering,
+    // and a lingering process still owns port 8000.
+    $("shutdownBtn").disabled = false;
+    hint.textContent = (failed.length ? "Some teardown steps failed, and the PROCESS is still running " : "Devices were released, but the PROCESS is still running ")
+      + "— it still holds port 8000, so starting from the shortcut will fail to "
+      + "bind. End it from Task Manager (pythonw.exe), then start again.";
+    hint.style.color = "var(--bad)";
+    toast("Shutdown released the hardware but the process did not exit");
+  }
+
   function suspend(){
     if(disposed) return;
     suspended = true;
+    cancelShutdownWatch();
     stopSocket();
   }
 
@@ -110,10 +180,11 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     if(disposed) return;
     disposed = true;
     suspended = true;
+    cancelShutdownWatch();
     stopSocket();
     if(toastTimer !== null) clearTimeoutImpl(toastTimer);
     toastTimer = null;
   }
 
-  return {connect, dispose, post, resume, setLink, suspend, toast};
+  return {connect, dispose, post, resume, setLink, suspend, toast, watchShutdown};
 }
