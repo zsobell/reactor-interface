@@ -71,7 +71,7 @@ async def main():
     t = Time()
     runner = RecipeRunner(host, clock=t.sources)
     polls = 0
-    async def watch_sleep(seconds):
+    async def watch_sleep(seconds, **kwargs):
         nonlocal polls
         polls += 1
         if polls == 3:
@@ -85,12 +85,63 @@ async def main():
     c.check('CVD lit and cycle clocks advance together', abs(runner._lit_s - 0.4) < 1e-8
             and abs(runner._cycle_clock - 0.4) < 1e-8)
 
+    t = Time()
+    runner = RecipeRunner(host, clock=t.sources)
+    polls = 0
+    intervals = []
+    async def boundary_sleep(seconds, **kwargs):
+        nonlocal polls
+        polls += 1
+        intervals.append(seconds)
+        if polls == 1:
+            t.advance(0.15)  # pump begins inside an ungated watchdog tick
+            runner._lit_wait_started = t.elapsed
+            runner._lit_wait_remaining = 0.07
+            runner._clock_gated = True
+        elif polls == 2:
+            t.advance(seconds)
+        else:
+            raise asyncio.CancelledError
+    with patch.object(runner, '_tick', boundary_sleep):
+        try:
+            await runner._beam_watch(Step(op='beam_start', switch='plasma'))
+        except asyncio.CancelledError:
+            pass
+    c.check('CVD pump excludes prior dose time and clamps its last sample despite wall jumps',
+            abs(intervals[1] - 0.07) < 1e-8 and runner._lit_wait_remaining < 1e-8)
+
+    t = Time()
+    runner = RecipeRunner(host, clock=t.sources)
+    polls = 0
+    dark_intervals = []
+    async def dark_boundary_sleep(seconds, **kwargs):
+        nonlocal polls
+        polls += 1
+        dark_intervals.append(seconds)
+        if polls > 1:
+            raise asyncio.CancelledError
+        t.advance(0.15)
+        runner._lit_wait_started = t.elapsed
+        runner._lit_wait_remaining = 0.07
+        runner._clock_gated = True
+        host.snapshot['inst.ammeter'] = 0
+    with patch.object(runner, '_tick', dark_boundary_sleep):
+        try:
+            await runner._beam_watch(Step(op='beam_start', switch='plasma', reignite_settle_s=100))
+        except asyncio.CancelledError:
+            pass
+    c.check('CVD dark sample crossing pump entry retains ungated dose time',
+            abs(runner._cycle_clock - 0.15) < 1e-8 and runner._lit_wait_remaining == 0.07)
+    c.check('CVD short remaining pump budget does not accelerate dark-plasma polling',
+            dark_intervals[-1] == recipe_module.BEAM_TICK_S)
+    host.snapshot['inst.ammeter'] = 0.001
+
     for gated in (False, True):
         t = Time()
         runner = RecipeRunner(host, clock=t.sources)
         runner._clock_gated = gated
         polls = 0
-        async def dropout_sleep(seconds):
+        async def dropout_sleep(seconds, **kwargs):
             nonlocal polls
             t.advance(seconds)
             if seconds == recipe_module.BEAM_TICK_S:

@@ -50,6 +50,7 @@ PYTHON_GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "recording": (
         "test_file_naming",
+        "test_merge_acceptance",
         "test_recording_api",
         "test_recording_errors",
         "test_recording_worker",

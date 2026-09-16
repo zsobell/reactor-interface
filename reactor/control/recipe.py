@@ -163,8 +163,8 @@ class RecipeRunner:
         #: Held only so the loop keeps a reference; they discard themselves.
         self._gas_off_tasks: set[asyncio.Task] = set()
         # EE-CVD continuous beam. Two clocks, both advanced by _beam_watch:
-        #   _lit_s      total seconds with current present; what a lit_gated
-        #               wait counts down against.
+        #   _lit_s      total seconds with current present. A lit_gated wait
+        #               has its own budget, excluding earlier steps' samples.
         #   _cycle_clock seconds into the current cycle for the gas schedule.
         #               Advances whenever the running step's own clock advances,
         #               i.e. always during an ungated step (the dose) and only
@@ -173,6 +173,10 @@ class RecipeRunner:
         self._beam_task: asyncio.Task | None = None
         self._beam_switch: str | None = None
         self._lit_s = 0.0
+        self._lit_wait_remaining: float | None = None
+        self._lit_wait_started = 0.0
+        self._beam_wake = asyncio.Event()
+        self._beam_sampled = asyncio.Event()
         self._cycle_clock = 0.0
         self._clock_gated = False
         self._cycle_len = 0.0
@@ -1007,7 +1011,7 @@ class RecipeRunner:
     async def _sleep_lit(self, seconds: float) -> None:
         """Wait `seconds` of *lit* time - frozen whenever the plasma is out.
 
-        Used for EE-CVD's pump A. Falls back to a wall-clock sleep if no beam
+        Used for EE-CVD's pump A. Falls back to an elapsed-time sleep if no beam
         watchdog is running, so a lit_gated step can never hang waiting for a
         clock nothing is advancing.
         """
@@ -1016,14 +1020,22 @@ class RecipeRunner:
         if self._beam_task is None or self._beam_task.done():
             await self._sleep(seconds)
             return
-        target = self._lit_s + seconds
+        self._lit_wait_remaining = seconds
+        self._lit_wait_started = self.clock.elapsed()
         self._clock_gated = True
+        # Split the sample crossing this step boundary: dose time cannot pay
+        # for pump time. The watchdog also clamps its final wait to this budget.
+        self._beam_wake.set()
         try:
-            while self._lit_s < target and not self._abort.is_set():
+            while self._lit_wait_remaining > 0 and not self._abort.is_set():
                 await self._pause.wait()
-                self.progress.step_remaining_hint = max(0.0, target - self._lit_s)
-                await asyncio.sleep(0.05)
+                if self._lit_wait_remaining <= 0 or self._abort.is_set():
+                    break
+                self.progress.step_remaining_hint = self._lit_wait_remaining
+                self._beam_sampled.clear()
+                await self._beam_sampled.wait()
         finally:
+            self._lit_wait_remaining = None
             self._clock_gated = False
             self.progress.step_remaining_hint = None
 
@@ -1117,17 +1129,16 @@ class RecipeRunner:
     async def _beam_watch(self, step: Step) -> None:
         """Hold the beam lit for an entire EE-CVD run, and drive the gas schedule.
 
-        Two jobs, both on the same 0.2 s tick:
+        Two jobs, on a maximum 0.2 s tick (shortened at pump boundaries):
 
         1. Reignite. If |current| drops below min_current the plasma is out, so
            pulse the switch to restrike - the same protocol _electron_beam uses,
            just without an exposure budget to spend.
-        2. The two clocks. `_lit_s` advances only while current is present, and
-           is what a lit_gated pump A counts down against. `_cycle_clock`
+        2. The two clocks. `_lit_s` and the pump budget advance only while
+           current is present. `_cycle_clock`
            advances whenever the running step's own clock does - always during
-           an ungated step, only while lit during a gated one - so pump A ends
-           exactly as the cycle clock reaches the cycle length and the gas
-           windows stay locked to the valves.
+           an ungated step, only while lit during a gated one. Samples crossing
+           step/cycle boundaries exclude time belonging to the previous one.
 
         The window boundaries live in _build_gas_plan/_apply_cvd_gas, which _run
         also calls at each cycle boundary so a boundary is never missed between
@@ -1149,7 +1160,14 @@ class RecipeRunner:
                     strike_at = self.clock.elapsed()
                     continue
                 t0 = self.clock.elapsed()
-                await self._tick(BEAM_TICK_S)
+                self._beam_wake.clear()
+                interval = BEAM_TICK_S
+                if (self._lit_wait_remaining is not None and self._lit_wait_remaining > 0
+                        and "reignite" not in self._pause_reasons):
+                    # A tiny remaining budget must not accelerate dark-plasma
+                    # retries or repeatedly emit flags during the settle guard.
+                    interval = min(interval, self._lit_wait_remaining)
+                await self._tick(interval, wake=self._beam_wake)
                 dt = self.clock.elapsed() - t0
                 cur = sup.snapshot.get(step.ammeter)
                 lit = isinstance(cur, (int, float)) and abs(cur) >= step.min_current
@@ -1164,18 +1182,29 @@ class RecipeRunner:
                 self._cycle_pause("reignite", self._clock_gated and not lit)
                 if lit:
                     self._lit_s += dt
+                    if self._lit_wait_remaining is not None:
+                        credit = min(dt, max(0.0, self.clock.elapsed() - self._lit_wait_started))
+                        self._lit_wait_remaining = max(0.0, self._lit_wait_remaining - credit)
                 else:
                     self.progress.message = "plasma out - reigniting"
                     sup.report_event("flag", "plasma extinguished during EE-CVD - reigniting")
 
                 # The cycle clock tracks whatever the running step's own clock
                 # is doing: always during an ungated step (the dose), only while
-                # lit during a gated one (pump A). Pump A therefore ends exactly
-                # when this reaches the cycle length - the gas windows and the
-                # valves cannot drift apart.
-                if lit or not self._clock_gated:
-                    self._cycle_clock += dt
+                # lit during a gated one (pump A). A sample spanning a cycle
+                # boundary must not charge the new cycle for the previous one.
+                cycle_dt = dt if lit or not self._clock_gated else 0.0
+                if not lit and self._clock_gated and self._lit_wait_remaining is not None:
+                    # A boundary wake can split an ungated dose sample. Even
+                    # without plasma, the part before pump entry still counts.
+                    cycle_dt = max(0.0, min(dt, self._lit_wait_started - t0))
+                if cycle_dt > 0:
+                    if self._cycle_start_elapsed is not None:
+                        cycle_dt = min(cycle_dt, max(0.0, self.clock.elapsed() - self._cycle_start_elapsed))
+                    self._cycle_clock += cycle_dt
                     await self._apply_cvd_gas(self._cycle_clock)
+
+                self._beam_sampled.set()
 
                 if not lit and self.clock.elapsed() - strike_at >= step.reignite_settle_s:
                     await self._reignite(step)
@@ -1218,7 +1247,7 @@ class RecipeRunner:
             f"pressure did not reach the target within {step.timeout_s:g} s"
         )
 
-    async def _tick(self, seconds: float) -> None:
+    async def _tick(self, seconds: float, *, wake: asyncio.Event | None = None) -> None:
         """Sleep up to `seconds`, cut short by an abort or an operator pause.
 
         The beam loops tick on this rather than a bare asyncio.sleep so that
@@ -1230,6 +1259,8 @@ class RecipeRunner:
             return
         waiters = [asyncio.ensure_future(self._abort.wait()),
                    asyncio.ensure_future(self._paused.wait())]
+        if wake is not None:
+            waiters.append(asyncio.ensure_future(wake.wait()))
         try:
             await asyncio.wait(waiters, timeout=seconds,
                                return_when=asyncio.FIRST_COMPLETED)

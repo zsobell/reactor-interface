@@ -354,13 +354,13 @@ What the percentage is measured against depends on the mode:
   additionally leads the beam step's start by the overlap, scheduled on wall
   clock during dose/pump A (nothing is lit yet, so there is no exposure clock
   to measure against there).
-- **EE-CVD**: the whole cycle (dose + pump A). Because pump A is
-  `lit_gated`, this is exact, not driftable — pump A always ends the instant
-  the cycle's lit-time clock reaches the cycle length, so the gas windows and
-  the valves cannot come apart no matter how many reignites happen. Doses
-  themselves are never gated (see above), so the gas schedule and the dose
-  timing don't line up if the run has reignited recently — only pump A
-  freezes.
+- **EE-CVD**: the whole cycle (dose + pump A). Pump A is `lit_gated`:
+  its remaining budget advances only with qualified plasma samples. Starting
+  the pump wakes the watchdog so preceding dose time is excluded; the final
+  sample wait is capped to the remaining pump budget. Gas windows use the
+  same sampled clock and reset at every cycle boundary. Doses are never
+  gated; only pump A freezes during plasma loss. Sampling and actuator
+  latency still limit physical boundary accuracy.
 
 Gas names in the scheduler — the table rows, the prose under it, and the
 Start-time errors — are the MFCs' own display labels, so renaming an MFC on the
@@ -430,10 +430,11 @@ other is active (409); the UI greys out the buttons accordingly.
     `progress.beam = {remaining, current, lit}`.
   - `_beam_watch()` — EE-CVD's continuous-beam watchdog, started by
     `beam_start` and stopped by `beam_stop` or the run's own cleanup. Tracks
-    two clocks: `_lit_s` (total lit time, what a `lit_gated` wait counts
-    down against) and `_cycle_clock` (advances whenever the running step's
+    two clocks: `_lit_s` (total lit time) and `_cycle_clock` (advances whenever the running step's
     own clock does — always during the ungated dose, only while lit during
-    gated pump A — which is what locks the gas windows to the cycle).
+    gated pump A). A separate remaining pump budget excludes time before the
+    step began and caps the watchdog's final wait; operator pauses and
+    reignition do not spend that budget.
 - **`reactor/control/parameters.py`** — typed parameter views, legacy gas-key
   migration and stage-specific pre-start conversions.
 - **`reactor/control/run_coordinator.py`** — run admission, immutable cleanup
@@ -815,10 +816,10 @@ spectrum too.
 
 ## Likely next iterations
 
-- Audit EE-CVD cycle timing the way EE-ALD was audited — `reactor-2ou`. The
-  EE-ALD clock is now pinned to 0.1 s by `tests/test_run_timing.py`; EE-CVD's
-  cycle clock (`_lit_s` / `_cycle_clock`, driven by the 0.2 s watchdog tick) has
-  not had the same treatment.
+- Qualify EE-CVD timing on hardware. `reactor-2ou` added virtual-reactor
+  cycle/countdown measurements to `tests/test_run_timing.py` and fixed
+  watchdog rounding of pump durations. Both modes have a 0.1 s per-cycle
+  software regression budget; this does not qualify physical timing.
 - Identify the NI 9265 current outputs — `reactor-5u2` (low priority, not
   needed for normal operation).
 

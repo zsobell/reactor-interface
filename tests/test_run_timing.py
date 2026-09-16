@@ -27,7 +27,7 @@ import time
 sys.path.insert(0, ".")
 
 from reactor.testing.virtual_reactor import VirtualReactor
-from tests._support import Checker, autotick
+from tests._support import Checker, autotick, wait_for
 
 #: Per-cycle overrun the run clock is allowed. The old code spent 0.30 s of
 #: this budget on the beam step alone before the first valve moved.
@@ -154,6 +154,104 @@ async def main() -> int:
             await vr.sup.abort_recipe()
             while vr.sup.recipes.busy:
                 await asyncio.sleep(0.02)
+        finally:
+            tick_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tick_task
+
+    c.section("4. CVD cycle length and countdown without plasma loss")
+    # Off-grid durations expose rounding to the watchdog's 0.2 s sample.
+    for dose_s, pump_a_s in ((0.03, 0.41), (0.13, 0.27)):
+        params = dict(P, cycles=4, dose_s=dose_s, pump_a_s=pump_a_s)
+        nominal = dose_s + pump_a_s
+        async with VirtualReactor() as vr:
+            vr.instruments["ammeter"].value = 1.0e-3
+            tick_task = await autotick(vr, period=0.02)
+            marks = []
+            samples = []
+            end = None
+            try:
+                await vr.sup.start_cvd_run(params)
+                async with asyncio.timeout(15):
+                    while vr.sup.recipes.busy:
+                        pr = vr.sup.recipes.progress
+                        now = time.monotonic()
+                        if pr.phase == "cycling":
+                            if not marks or marks[-1][0] != pr.cycle:
+                                marks.append((pr.cycle, now))
+                            rem = vr.sup.recipes.run_remaining_s()
+                            if rem is not None:
+                                samples.append((now, rem))
+                        elif pr.phase == "teardown" and end is None:
+                            end = now
+                        await asyncio.sleep(0.005)
+            finally:
+                tick_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await tick_task
+            label = f"CVD dose {dose_s:.2f}s + pump {pump_a_s:.2f}s"
+            c.check(f"{label}: every cycle and teardown observed",
+                    len(marks) == params["cycles"] and end is not None)
+            if len(marks) == params["cycles"] and end is not None:
+                boundaries = [t for _, t in marks] + [end]
+                lengths = [b - a for a, b in zip(boundaries, boundaries[1:])]
+                worst = max(abs(length - nominal) for length in lengths)
+                c.check(f"{label}: each cycle within 100 ms of nominal",
+                        worst <= TOLERANCE_S,
+                        f"lengths {[round(x, 3) for x in lengths]}, nominal {nominal:.3f}s")
+                drift = end - marks[0][1] - params["cycles"] * nominal
+                c.check(f"{label}: total duration within accumulated budget",
+                        abs(drift) <= TOLERANCE_S * params["cycles"],
+                        f"drift {drift:+.3f}s")
+            c.check(f"{label}: countdown published", len(samples) > 10)
+            if samples:
+                c.check(f"{label}: countdown starts at nominal total",
+                        abs(samples[0][1] - params["cycles"] * nominal) <= TOLERANCE_S)
+                c.check(f"{label}: countdown never increases",
+                        all(b[1] <= a[1] + 1e-6 for a, b in zip(samples, samples[1:])))
+                # Bound drift at every sample, not only at the run's end.
+                drift = max(abs((t - samples[0][0]) - (samples[0][1] - rem))
+                            for t, rem in samples)
+                c.check(f"{label}: countdown follows elapsed time",
+                        drift <= TOLERANCE_S * params["cycles"], f"worst drift {drift:.3f}s")
+                c.check(f"{label}: countdown reaches zero", samples[-1][1] <= TOLERANCE_S)
+
+    c.section("5. CVD pump retains its budget through pause and plasma loss")
+    async with VirtualReactor() as vr:
+        vr.instruments["ammeter"].value = 1.0e-3
+        tick_task = await autotick(vr, period=0.02)
+        try:
+            await vr.sup.start_cvd_run(dict(P, cycles=1, dose_s=0.03, pump_a_s=2.0))
+            runner = vr.sup.recipes
+            c.check("CVD reached gated pump", await wait_for(lambda: runner._clock_gated, timeout=8))
+            runner.pause()
+            c.check("CVD pause grounds beam", await wait_for(
+                lambda: vr.daq.do_state.get("plasma_ground") is True, timeout=2))
+            held = runner._lit_wait_remaining
+            await asyncio.sleep(0.3)
+            c.check("CVD pump budget freezes during operator pause",
+                    held is not None and runner._lit_wait_remaining == held)
+            vr.instruments["ammeter"].value = 0.0
+            await asyncio.sleep(0.05)  # publish the dropout before resuming
+            runner.resume()
+            c.check("CVD detects plasma loss after resume", await wait_for(
+                lambda: runner.pause_reason == "reignite", timeout=2))
+            held = runner._lit_wait_remaining
+            eta = runner.run_remaining_s()
+            await asyncio.sleep(0.3)
+            c.check("CVD pump and countdown freeze through reignition",
+                    held is not None and runner._lit_wait_remaining == held
+                    and runner.run_remaining_s() == eta)
+            vr.instruments["ammeter"].value = 1.0e-3
+            c.check("CVD pump resumes spending its remaining budget", await wait_for(
+                lambda: runner._lit_wait_remaining is not None
+                and runner._lit_wait_remaining < held - 0.1, timeout=3))
+            await vr.sup.abort_recipe()
+            c.check("CVD abort releases pump waiter and powers down before parking",
+                    not runner.busy and runner._lit_wait_remaining is None
+                    and vr.supplies["hv"].hv_off_calls > 0
+                    and vr.supplies["hv"].hv_on is False
+                    and vr.daq.do_state.get("plasma_ground") is False)
         finally:
             tick_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

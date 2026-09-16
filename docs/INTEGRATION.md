@@ -31,6 +31,14 @@ simultaneous-gas test observes actual exposure samples rather than mistaking
 separate gas-off and relay-off timestamps at cleanup for a mid-exposure switch.
 The browser bootstrap harness checks that seeded event history is rendered
 without waiting for a new event.
+`test_merge_acceptance.py` covers event/error stream faults, report rewrites,
+nested diagnostic snapshots and bias scheduling across wall-clock jumps.
+
+The CVD timing audit also found pump durations rounded to the watchdog poll.
+The pump now wakes the watchdog at entry, excludes earlier dose time, and
+caps its final sample wait to the remaining lit-time budget. Off-grid CVD
+durations and countdown drift are covered alongside ALD timing; pause,
+reignition and abort are exercised with fake devices.
 
 ## Saved settings and recipes
 
@@ -47,10 +55,12 @@ IDs. Historical YAML and recorded experiment files are not rewritten.
 
 ## Validation and rollback
 
-The Windows acceptance run on 2026-09-15 passed all 43 Python modules and all
-three Node harnesses. Configuration-only `--check`, compilation and whitespace
-checks also passed. The later seeded-event fix passed the complete frontend
-group. Browser review used fake adapters, isolated state and a loopback port;
+The Windows acceptance runs on 2026-09-15 passed the initial 43 Python modules
+and all three Node harnesses. The final gate includes the additional acceptance
+module (44 Python modules total); its result is recorded in Beads `reactor-r1z.15`
+and `.merge-backup/integration-release-final.log`. Configuration-only `--check`,
+compilation and whitespace checks also passed. Browser review used fake adapters,
+isolated state and a loopback port;
 no physical hardware was connected. Linux CI remains a separate release gate
 in `reactor-r1z.15`; the current host has no usable WSL installation.
 
@@ -68,7 +78,8 @@ git show codex/pre-refactor-master-20260915:reactor/supervisor.py
 git log --graph --oneline --decorate --all
 ```
 
-If the integration merge is later promoted and needs reversing, inspect its
+If the integration merge is later promoted and needs reversing, first revert
+any later integration fix commits in reverse chronological order. Then inspect the merge's
 parents with `git show --no-patch --format=%P <merge-commit>` first. For this
 refactor-first merge, `git revert -m 2 <merge-commit>` keeps the master parent;
 using `-m 1` would keep the refactor parent instead. Review the resulting diff
