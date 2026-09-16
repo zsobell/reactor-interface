@@ -233,7 +233,7 @@ reactor/
     static/analysis.css       analysis-page styles
     static/analysis.js        finished-run and Auger analysis
   testing/virtual_reactor.py   fake hardware, real application/controllers, temporary files
-  testing/validate.py          focused/full cross-platform Python and Node validation
+  testing/validate.py          focused/full Windows Python and Node validation
   testing/timing_prototype.py  isolated event-driven ALD exposure experiment
 tools/
   discover_hardware.py         read-only hardware enumeration and identification

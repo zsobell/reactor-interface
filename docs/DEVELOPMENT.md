@@ -14,20 +14,17 @@ See [INTEGRATION.md](INTEGRATION.md) for branch provenance, compatibility and ro
 
 ## Environments
 
-The reactor host is Windows with NI-DAQmx and instrument drivers. Development
-can run on macOS or Linux without those drivers; tests inject fake hardware.
-Use Python 3.12 for a consistent development/CI environment. The existing suite
-also runs on the current Mac Python 3.11 environment. Create a local environment:
+Windows is the supported development, CI and reactor platform. The reactor host
+uses NI-DAQmx and instrument drivers; tests inject fake hardware. Use Python 3.12
+for a consistent development/CI environment. In PowerShell, create an environment:
 
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m tests.run_all
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m tests.run_all
 ```
 
-In Windows PowerShell use `py -3.12 -m venv .venv`, then
-`.venv\Scripts\python.exe -m pip install -r requirements.txt` and
-`.venv\Scripts\python.exe -m tests.run_all`. Commands below use `python` to mean
+Commands below use `python` to mean
 that environment's interpreter. Node is development tooling for browser-module
 checks, not a reactor runtime dependency. Do not start the hardware server to
 run tests. `python -m reactor --check` validates configuration without serving.
@@ -63,7 +60,7 @@ git diff --check
 
 Use `python -m reactor.testing.validate control` (or `recording`, `api`,
 `frontend`) for a focused group. Without `--require-node`, missing Node is
-reported as skipped. CI requires Node and runs on Linux and Windows.
+reported as skipped. CI requires Node and runs on Windows.
 
 Run the affected baseline before editing, add regression coverage for the
 behavior at stake, run focused checks after each step, and run the complete

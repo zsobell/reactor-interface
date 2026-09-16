@@ -1,4 +1,4 @@
-"""Cross-platform validation entry point for development and CI.
+"""Validation entry point for Windows development and CI.
 
 The project intentionally keeps its plain-script Python test runner.  This
 module adds stable focused groups and includes the JavaScript harnesses in the

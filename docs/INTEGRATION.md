@@ -55,14 +55,15 @@ IDs. Historical YAML and recorded experiment files are not rewritten.
 
 ## Validation and rollback
 
-The Windows acceptance runs on 2026-09-15 passed the initial 43 Python modules
-and all three Node harnesses. The final gate includes the additional acceptance
-module (44 Python modules total); its result is recorded in Beads `reactor-r1z.15`
-and `.merge-backup/integration-release-final.log`. Configuration-only `--check`,
+The final Windows acceptance run passed all 44 Python modules and all three
+Node harnesses. Its result is recorded in Beads `reactor-r1z.15` and
+`.merge-backup/integration-release-final.log`. Configuration-only `--check`,
 compilation and whitespace checks also passed. Browser review used fake adapters,
-isolated state and a loopback port;
-no physical hardware was connected. Linux CI remains a separate release gate
-in `reactor-r1z.15`; the current host has no usable WSL installation.
+isolated state and a loopback port; no physical hardware was connected.
+
+The user selected Windows-only support and removed the Linux release gate.
+Windows is the supported development, CI and reactor platform. The integration
+is accepted for local master; CI runs the same strict checks on Windows.
 
 Local rollback references are `codex/pre-refactor-master-20260915` and
 `codex/pre-refactor-architecture-20260915`. `.merge-backup/` contains the original

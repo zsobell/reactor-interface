@@ -248,7 +248,7 @@ real polling task startup/shutdown, and fake-device disconnection.
 `python -m reactor.testing.validate full` runs the Python suite and all discovered
 `tests/js/*.mjs` harnesses. Focus with `control`, `recording`, `api` or `frontend`.
 Missing Node is reported as a skip locally; `--require-node` makes it a failure
-for full/frontend checks. CI runs full strict checks on Linux and Windows.
+for full/frontend checks. CI runs full strict checks on Windows.
 
 - `test_parameters.py`: typed input defaults, coercions, raw report payloads and pre-start stages.
 - `test_clock_domains.py`: monotonic duration/deadline clocks remain independent of
@@ -263,7 +263,7 @@ for full/frontend checks. CI runs full strict checks on Linux and Windows.
 
 Shutdown tests replace process termination and registry access with isolated
 test boundaries. The local Windows symlink test uses a resolved-path adapter if
-the OS denies symlink creation; Linux CI exercises a real symlink as well.
+the OS denies symlink creation; otherwise it exercises a real symlink.
 
 `node tests/js/control-modules.mjs` covers transport reconnect/disposal, forms,
 ordered device commands and browser back-forward-cache lifecycle.

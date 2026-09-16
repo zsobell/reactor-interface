@@ -143,8 +143,8 @@ async def main() -> int:
     c.check("CI pins the Python setup action", "actions/setup-python@v5" in workflow)
     c.check("CI selects the supported Python version", 'python-version: "3.12"' in workflow)
     c.check("CI pins the Node setup action", "actions/setup-node@v4" in workflow)
-    c.check("CI covers Linux and Windows",
-            "ubuntu-latest" in workflow and "windows-latest" in workflow)
+    c.check("CI targets the supported Windows platform",
+            "runs-on: windows-latest" in workflow and "ubuntu-latest" not in workflow)
     c.check("CI installs the declared dependencies",
             "python -m pip install -r requirements.txt" in workflow)
     c.check("CI requires both Python and Node validation",
