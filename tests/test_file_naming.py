@@ -52,6 +52,11 @@ class FakePoint:
         self.t_recv = t
 
 
+def _has_parent_directory(path: Path, directory: Path) -> bool:
+    """Compare directory identity, including Windows long/8.3 aliases."""
+    return Path(path).parent.samefile(directory)
+
+
 async def main() -> int:
     c = Checker("test_file_naming")
 
@@ -65,7 +70,9 @@ async def main() -> int:
         for const in ("valves", "labels", "run_name", "run_params", "analysis_layout", "instances"):
             path = getattr(vr.sup.paths, const)
             c.check(f"{const} is redirected into the temp dir",
-                    tmp in Path(path).parents, str(path))
+                    _has_parent_directory(path, tmp), str(path))
+        c.check("the isolation check rejects a path outside the temp dir",
+                not _has_parent_directory(tmp.parent / "outside.json", tmp))
         # The real order of events: the FS-1 is already streaming when the
         # operator presses Start run, so the capture opens FIRST - unnamed, and
         # loose in data/ because no run folder exists yet.

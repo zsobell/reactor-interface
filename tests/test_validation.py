@@ -149,6 +149,8 @@ async def main() -> int:
             "python -m pip install -r requirements.txt" in workflow)
     c.check("CI requires both Python and Node validation",
             "python -m reactor.testing.validate full --require-node" in workflow)
+    c.check("CI validates branch pushes without rerunning release tags",
+            'branches:\n      - "**"' in workflow and "tags:" not in workflow)
 
     return c.summary()
 

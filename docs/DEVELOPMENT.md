@@ -69,6 +69,23 @@ sleep durations. Retain real asynchronous integration tests alongside any
 simulated-clock tests. A passing test with fake devices proves software
 sequencing, not valve response, physical timing or browser appearance.
 
+## Versioned push and release workflow
+
+Every authorized code push advances the smallest semantic-version component by
+default: increment the patch version (`2.0.0` becomes `2.0.1`). If Zach gives an
+explicit version for that push, use it instead. Numeric components never have
+leading zeroes, so use `2.0.1`, not `2.0.01`.
+
+Before pushing, update both `reactor.__version__` and the version displayed in
+`reactor/server/static/index.html`, and include those changes in the same commit.
+Push the branch without creating the release tag, monitor the GitHub `Validate`
+workflow, and require it to pass. Only then create and push an annotated
+`vMAJOR.MINOR.PATCH` tag on that exact green commit and verify the remote branch
+and tag refs. If validation fails, fix it in a new versioned commit and repeat;
+do not tag a failing commit or move an existing published tag unless Zach
+explicitly requests that history rewrite. Tag pushes do not rerun validation,
+because the tagged commit already passed before the tag was created.
+
 ## Runtime facts that must stay explicit
 
 The last-commanded valve state is not measured valve position. Recording errors
