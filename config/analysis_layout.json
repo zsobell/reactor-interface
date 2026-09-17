@@ -28,7 +28,7 @@
       "y1min": "",
       "y1max": "",
       "y1log": false,
-      "y2": "mfc_NH3",
+      "y2": "mfc_h2",
       "y2min": "",
       "y2max": "",
       "y2log": false
@@ -59,6 +59,21 @@
       "y1max": "",
       "y1log": false,
       "y2": "stage_temp",
+      "y2min": "",
+      "y2max": "",
+      "y2log": false
+    },
+    {
+      "id": 5,
+      "title": "",
+      "x": "cycle_number",
+      "xmin": "10",
+      "xmax": "50",
+      "y1": "Thick(A).1",
+      "y1min": "",
+      "y1max": "",
+      "y1log": false,
+      "y2": "dosing",
       "y2min": "",
       "y2max": "",
       "y2log": false

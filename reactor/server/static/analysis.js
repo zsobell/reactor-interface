@@ -272,7 +272,7 @@ function plotCard(p){
       <input class="title" data-f="title" placeholder="${esc(autoTitle(p))}"
              value="${esc(p.title)}">
       <button class="mini" data-act="png" title="Save this plot as a PNG">PNG</button>
-      <button class="mini" data-act="csv" title="Save this plot's data as a CSV">CSV</button>
+      <button class="mini" data-act="csv" title="Copy this plot's data as spreadsheet rows">Copy data</button>
       <button class="mini" data-act="dup" title="Duplicate">⧉</button>
       <button class="mini" data-act="del" title="Remove">✕</button>
     </div>
@@ -586,10 +586,9 @@ function download(blob, name){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
-/* Both exports name the file after the plot itself (its title, or the axis
-   pairing autoTitle builds), so a folder of exports says what each one is
-   without opening it. Same stem for the PNG and the CSV of a given plot, so the
-   picture and its numbers sit together in a directory listing. */
+/* Exports name the file after the plot itself (its title, or the axis pairing
+   autoTitle builds), so a folder of PNG exports says what each one is without
+   opening it. */
 function plotStem(p){
   const base = (p.title || autoTitle(p)).replace(/[^\w.-]+/g, "_")
                  .replace(/^_+|_+$/g, "").slice(0, 60);
@@ -605,27 +604,46 @@ function exportPng(p, el){
   cv._hover = null; drawPlot(p, el);            // no crosshair in the saved image
   cv.toBlob(b => { if(b) download(b, `${plotStem(p)}.png`); });
 }
-/* The rows behind one plot: its X and whichever Y axes are set, in axis order
-   and de-duplicated (an X plotted against itself would otherwise appear twice).
+/* The rows behind one plot: X, Y1 and Y2 in spreadsheet paste order.
    Rows where every Y is blank are dropped - they are gaps in the trace, not
-   zeros, and exporting them as empty rows makes the CSV harder to use. */
-function exportCsv(p){
+   zeros, and copying them as empty rows makes the pasted table harder to use. */
+async function copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  try{
+    if(!document.execCommand("copy")) throw new Error("copy command failed");
+  }finally{
+    ta.remove();
+  }
+}
+async function exportCsv(p){
   const D = dsFor(p);
   if(!D){ toast(p.auger ? "That spectrum is not loaded." : "No file loaded."); return; }
-  const cols = [];
-  for(const c of [p.x, p.y1, p.y2])
-    if(c && D.columns[c] && !cols.includes(c)) cols.push(c);
+  const cols = [p.x, p.y1, p.y2].filter(c => c && D.columns[c]);
   if(!cols.length){ toast("This plot has no columns from the loaded file."); return; }
-  const ys = cols.filter(c => c !== p.x);
+  const ys = [p.y1, p.y2].filter(c => c && D.columns[c]);
   const cell = v => (v == null || !isFinite(v)) ? "" : String(v);
-  const lines = [cols.join(",")];
+  const lines = [cols.join("\t")];
   for(let i = 0; i < D.n; i++){
     const vals = cols.map(c => D.columns[c][i]);
     if(ys.length && ys.every(c => !isFinite(D.columns[c][i]))) continue;
-    lines.push(vals.map(cell).join(","));
+    lines.push(vals.map(cell).join("\t"));
   }
-  download(new Blob([lines.join("\n")], {type: "text/csv"}), `${plotStem(p)}.csv`);
-  toast(`Exported ${lines.length - 1} rows`, true);
+  try{
+    await copyText(lines.join("\n"));
+    toast(`Copied ${lines.length - 1} spreadsheet rows`, true);
+  }catch(e){
+    toast(`Could not copy data: ${e.message || e}`);
+  }
 }
 
 /* ===========================================================================

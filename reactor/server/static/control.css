@@ -143,6 +143,8 @@
   details.card>summary .sum{text-transform:none;letter-spacing:0;opacity:.75;
         margin-left:auto;font-size:11px}
   .idcard{margin-top:14px}
+  .pageversion{font-family:var(--mono);font-size:11px;color:var(--dim);
+        text-align:right;margin-top:4px}
   .diagcol{display:grid;gap:14px;align-content:start;min-width:0}
   @media(max-width:1000px){ .diagtop{grid-template-columns:1fr} }
 
