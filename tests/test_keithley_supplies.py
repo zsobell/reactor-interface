@@ -113,6 +113,7 @@ async def main() -> int:
         c.check("stage bias voltage never set", bias.voltage_calls == [],
                 str(bias.voltage_calls))
 
+        await vr.sup.abort_prestart()
         await vr.sup.supplies_output_off(reason="test reset")
         await vr.sup.stop_fill_regulation()
         for k in ("stage_bias", *COILS):

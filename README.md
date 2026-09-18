@@ -136,9 +136,10 @@ Everything is editable **in the interface** — no YAML/code editing for normal 
   dose pressure, dose time, pump A, (EE-ALD: beam exposure, pump B), min
   current, gas scheduling, and advanced timing. They persist on the server in `config/run_params.json`; each browser keeps a
   localStorage cache.
-- Optional **Pre-start**: opens the Ar isolation valve, flows Ar, starts the
-  precursor fill pulse, strikes and holds the plasma (retries indefinitely
-  until stopped), then grounds the beam — priming the tool before Start run.
+- Optional **Pre-start**: select a server-owned recipe, review its resolved
+  start and abort sequences, then launch it. The protected **Current pre-start**
+  preserves the established Ar/fill/plasma sequence; duplicate it in the UI to
+  build alternate typed, capability-checked sequences without editing code.
 - **Start run** builds and launches the run (`POST /api/run/ald` or
   `/api/run/cvd`).
 - A **phase strip** highlights the active phase with a live countdown; the
@@ -189,7 +190,7 @@ shutdown, persistence and failure behavior.
 ```
 config/reactor.yaml           hardware addresses, channels and gauge scaling
 config/recipes/*.yaml         optional file-based recipes
-config/{labels,valve_state,last_run,run_params}.json  operator metadata/settings
+config/{labels,valve_state,last_run,run_params,prestart_recipes}.json  operator metadata/settings
 reactor/
   __main__.py                 CLI and single-process Uvicorn lifecycle
   dependencies.py             device factories and per-instance persistence paths
@@ -204,7 +205,9 @@ reactor/
     clock.py                  injected elapsed and wall-clock sources
     recipe_model.py           recipe schema and pure ALD/CVD builders
     recipe.py                 recipe execution, gas schedules and exposure clocks
-    prestart.py               pre-start sequence, stop and abort lifecycle
+    prestart_model.py         pre-start recipe schema, capabilities and pure resolution
+    prestart_store.py         atomic recipe-library persistence and revision checks
+    prestart.py               capability-driven execution, progress and abort lifecycle
     run_coordinator.py        run admission, immutable session metadata and cleanup lifecycle
     contracts.py              typed capabilities consumed by controllers
     parameters.py             typed run and staged pre-start parameters

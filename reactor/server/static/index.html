@@ -246,28 +246,16 @@
           <div class="dbody">
             <div class="params">
               <label class="adv">Run name<input type="text" id="p_run_name" placeholder="Mo-001" autocomplete="off"></label>
-              <label class="adv">Ar flow (sccm)<input type="number" id="p_pre_ar_sccm" step="0.1" min="0" value="4"></label>
-              <label class="adv">Ar valve settle (s)<input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1"></label>
-              <label class="adv">Current hold time (s)<input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5"></label>
             </div>
-            <div class="hint"><strong>Run name</strong> prefixes every file this
-              run writes (trace, by-cycle, parameters, ellipsometer), e.g.
-              <code>Mo-014_260817_142530_run.csv</code>. It pre-fills from the
-              last run you actually started, incremented — start Mo-014 and the
-              next one offers Mo-015. Editing it here is enough; there is nothing
-              to confirm.<br><br>
-              Opens the Ar pneumatic, waits, flows Ar, starts the
-              precursor fill pulse, then runs the reignite protocol until sample
-              current appears and holds it. <strong>The strike retries
-              indefinitely</strong> — it stops only when you press Abort
-              pre-start.
-              However it ends, the beam is grounded on the way out; Ar and the
-              fill pulse are left running.<br><br>
-              <strong>Abort pre-start</strong> is the undo, and stays available
-              after the plasma has struck: it stops Ar (flow then isolation
-              valve), stops the fill pulse and closes the fill valve, returns the
-              beam relay to de-energised, and commands the HV supply off — one
-              click.</div>
+            <!-- Kept as the persisted sources for the built-in recipe. The
+                 capability-rendered launch controls below are the visible UI. -->
+            <div hidden>
+              <input type="number" id="p_pre_ar_sccm" step="0.1" min="0" value="4">
+              <input type="number" id="p_pre_valve_delay_s" step="0.1" min="0" value="1">
+              <input type="number" id="p_pre_hold_s" step="0.1" min="0" value="5">
+            </div>
+            <div id="preSnapshotStatus" class="pre-snapshot-status"></div>
+            <div id="preRecipeEditor"></div>
           </div>
         </details>
 
@@ -609,7 +597,7 @@
         <div class="marks" id="idMarks"></div>
       </div>
   </details>
-  <div class="pageversion">Reactor Interface 2.0.1</div>
+  <div class="pageversion">Reactor Interface 2.0.2</div>
 </section>
 
 </main>

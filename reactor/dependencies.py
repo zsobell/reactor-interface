@@ -23,12 +23,14 @@ class StatePaths:
     run_params: Path | None = None
     analysis_layout: Path | None = None
     instances: Path | None = None
+    prestart_recipes: Path | None = None
 
     def __post_init__(self):
         directory = self.run_name.parent
         for field, name in (("run_params", "run_params.json"),
                             ("analysis_layout", "analysis_layout.json"),
-                            ("instances", "instances")):
+                            ("instances", "instances"),
+                            ("prestart_recipes", "prestart_recipes.json")):
             if getattr(self, field) is None:
                 object.__setattr__(self, field, directory / name)
 

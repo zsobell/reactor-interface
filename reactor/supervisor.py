@@ -23,6 +23,7 @@ from typing import Any
 from .config import ReactorConfig
 from .control.recipe import Recipe, RecipeRunner
 from .control.prestart import PrestartController
+from .control.prestart_store import PrestartRecipeStore
 from .control.fill import FillController
 from .control.sweep import SweepController
 from .control.run_coordinator import RunCoordinator, RunSession
@@ -126,6 +127,7 @@ class Supervisor:
             self.logger, lambda message: self._event("error", message, record=False),
             on_capture=lambda name: self._event("ellipsometer", f"acquisition start -> {name}"))
         self.runs = RunCoordinator(self, self.recipes, self.recording, clock=self.clock)
+        self.prestart_recipes = PrestartRecipeStore(self.paths.prestart_recipes, cfg)
 
         self.snapshot: dict[str, Any] = {}
         self.readings: dict[str, Reading] = {}
@@ -236,7 +238,8 @@ class Supervisor:
         # Valve identification sweep
         self._sweep = SweepController(self)
 
-        self._prestart = PrestartController(self, clock=self.clock)
+        self._prestart = PrestartController(
+            self, store=self.prestart_recipes, clock=self.clock)
 
         # Background fill-pressure regulation
         self._fill = FillController(self)
@@ -458,7 +461,7 @@ class Supervisor:
         #
         # Deliberately BEFORE the loops are cancelled and the devices are
         # disconnected below, or none of these commands could reach hardware.
-        if self.prestart.get("running") or self.prestart.get("done"):
+        if self.prestart.get("cleanup_available"):
             self._event("recipe",
                         "server stopping: aborting pre-start "
                         f"({'in progress' if self.prestart.get('running') else 'primed'})")
@@ -1092,13 +1095,21 @@ class Supervisor:
         return self._prestart.state
 
     async def start_prestart(self, params: dict) -> None:
-        await self._prestart.start(params)
+        params = dict(params or {})
+        recipe_id = params.pop("recipe_id", None)
+        revision = params.pop("recipe_revision", None)
+        await self._prestart.start(
+            params, recipe_id=recipe_id,
+            expected_revision=int(revision) if revision is not None else None)
 
     async def stop_prestart(self) -> None:
         await self._prestart.stop()
 
     async def abort_prestart(self) -> None:
         await self._prestart.abort()
+
+    def consume_prestart_primed(self) -> None:
+        self._prestart.consume_primed()
 
     async def hv_off(self, *, reason: str = "") -> None:
         """Command every HV supply's output OFF.
@@ -1300,6 +1311,25 @@ class Supervisor:
                               f"{'ON' if on else 'OFF'}{level_txt}{tail}")
         return True
 
+    async def arm_sample_bias(self, supply_id: str, *, volts: float,
+                              polarity: int = 1, reason: str = "") -> dict[str, Any]:
+        """Arm one configured sample-bias supply without energising its output."""
+        dev = self._supply(supply_id)
+        cfg = getattr(dev, "cfg", None)
+        if not getattr(cfg, "sample_bias", False):
+            raise RuntimeError(f"{supply_id} is not configured as the sample bias")
+        dev.polarity = -1 if polarity < 0 else 1
+        await dev.set_output(False)
+        magnitude = abs(float(volts))
+        if magnitude > 0:
+            await dev.set_voltage(magnitude)
+        sign = "-" if dev.polarity < 0 else "+"
+        tail = f" ({reason})" if reason else ""
+        self._event("recipe", f"{supply_id}: sample bias armed at "
+                              f"{sign}{magnitude:g} V, output OFF{tail}")
+        return {"id": supply_id, "voltage": magnitude,
+                "polarity": dev.polarity, "output_on": False}
+
     async def supplies_output_on(self, *, sample_bias_v: float = 0.0,
                                  polarity: int = 1, reason: str = "") -> None:
         """Switch ON every supply configured with `prestart_output`.
@@ -1456,6 +1486,11 @@ class Supervisor:
     @property
     def prestart_running(self) -> bool:
         return bool(self.prestart.get("running"))
+
+    @property
+    def prestart_cleanup_required(self) -> bool:
+        return bool(self.prestart.get("cleanup_available")
+                    and not self.prestart.get("primed"))
 
     async def finish_run(self) -> None:
         await self.runs.finish()

@@ -160,6 +160,9 @@ Supervisor integration with fake devices and isolated file/number processing.
 | `test_ee_ald_recipe.py` | Pulsed-beam mode: per-cycle beam pulse, gas lead/handoff off the single overlap, reignite mid-exposure, abort mid-dose |
 | `test_ee_cvd_recipe.py` | Continuous-beam mode: beam on/off lifecycle, reignite watchdog, the cycle-clock gas schedule staying locked across a reignite, abort |
 | `test_prestart.py` | The operator pre-start sequence: happy path, unlimited-retry strike, a drop mid-hold restarting the hold, grounding the beam however it ends |
+| `test_prestart_recipes.py` | Pre-start schema/capability coverage, protected Current recipe parity, typed parameter resolution and fail-closed target/action validation |
+| `test_prestart_recipe_api.py` | Recipe CRUD/select/preview APIs, revision conflicts, restart persistence, corrupt-schema refusal and atomic/concurrent writes without hardware construction |
+| `test_prestart_sequence.py` | Capability-driven custom execution, immutable launch/cleanup snapshots, alternate targets, partial-failure cleanup, abort idempotence and stale-review refusal before commands |
 | `test_run_export.py` | The automatic per-run files: run CSV opens on start and closes on completion/abort, back-to-back runs don't collide, and the run-parameters JSON is written with a correct gas-schedule summary in both modes |
 | `test_mfc_interlock.py` | The Ar MFC isolation interlock — the one check no earlier ad hoc harness could exercise, because it lives in `Supervisor` itself, which every earlier fake replaced wholesale |
 | `test_cycle_numbering.py` | Fractional cycle numbers: the clock freezing on a reignite/pause, monotonicity across a cycle boundary, the by-cycle export dropping frozen samples, and `recipe_step` naming a freeze itself (`reignite` vs `pause`) rather than a separate 0/1 column |

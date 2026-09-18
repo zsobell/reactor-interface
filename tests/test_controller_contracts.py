@@ -1,5 +1,6 @@
 """Controllers execute with only their declared capabilities."""
 import asyncio
+from types import SimpleNamespace
 from reactor.control.recipe import RecipeRunner, Recipe, Step
 from reactor.control.prestart import PrestartController
 from tests._support import Checker, wait_for
@@ -30,7 +31,7 @@ async def main():
     c.check('minimal host completes recipe', await wait_for(lambda: not runner.busy))
     c.check('dose command ordering preserved', host.commands == [('dose', True), ('dose', False)])
     c.check('cleanup returns to owner', host.finished)
-    pre = PrestartController(host)
+    pre = PrestartController(host, store=SimpleNamespace(catalog={"targets":[]}))
     host.run_in_progress = True
     try:
         await pre.start({})

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from reactor.control.clock import Clock
 from reactor.control import recipe as recipe_module, prestart as prestart_module
 from reactor.control.recipe import RecipeRunner, RecipeProgress, Recipe, Step
-from reactor.control.parameters import PrestartParameters
+from reactor.control.prestart_model import PrestartRecipe, PrestartStep
 from reactor.testing.virtual_reactor import VirtualReactor
 from tests._support import Checker
 
@@ -172,15 +172,36 @@ async def main():
     t = Time()
     async def command(*args, **kwargs):
         pass
-    for name in ('supplies_output_on', 'set_valve', 'set_mfc_setpoint', 'start_fill_regulation'):
-        setattr(host, name, command)
-    controller = prestart_module.PrestartController(host, clock=t.sources)
+    host.set_valve = command
+    host.run_in_progress = False
+    catalog = {"targets": [
+        {"id":"controller:plasma", "kind":"controller", "label":"Plasma",
+         "actions":[{"id":"plasma.strike_hold", "label":"Strike", "summary":"Strike",
+                     "fields":[
+                         {"id":"switch", "label":"Switch", "type":"target", "required":True,
+                          "target_kind":"valve"},
+                         {"id":"ammeter", "label":"Current", "type":"target", "required":True,
+                          "target_kind":"sensor"},
+                         *[{"id":key, "label":key, "type":"number", "required":True,
+                            "minimum":0.0} for key in
+                           ("min_current_a", "pulse_s", "settle_s", "hold_s")],
+                     ]}]},
+        {"id":"valve:plasma", "kind":"valve", "label":"Plasma switch", "meta":{"device_id":"plasma"}, "actions":[]},
+        {"id":"sensor:inst.ammeter", "kind":"sensor", "label":"Ammeter", "meta":{"read_key":"inst.ammeter"}, "actions":[]},
+    ]}
+    controller = prestart_module.PrestartController(
+        host, store=SimpleNamespace(catalog=catalog), clock=t.sources)
+    prestart = PrestartRecipe(id="clock-hold", name="Clock hold", start_steps=[
+        PrestartStep(id="hold", target="controller:plasma", action="plasma.strike_hold",
+                     args={"switch":"valve:plasma", "ammeter":"sensor:inst.ammeter",
+                           "min_current_a":0.0005, "pulse_s":0.1,
+                           "settle_s":0.0, "hold_s":0.39})])
     async def wait_for(coro, *, timeout):
         coro.close()  # simulate the timeout of Event.wait without leaving a coroutine
         t.advance(timeout)
         raise asyncio.TimeoutError
     with patch.object(prestart_module, 'asyncio', SimpleNamespace(wait_for=wait_for, TimeoutError=asyncio.TimeoutError)):
-        await controller._run(PrestartParameters.normalize(dict(hold_s=0.39, valve_delay_s=0)))
+        await controller._run(prestart, {}, prestart.revision)
     c.check('prestart hold credits elapsed time', controller.state['done']
             and abs(controller.state['held_s'] - 0.4) < 1e-8)
 

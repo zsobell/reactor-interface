@@ -69,6 +69,9 @@ class RunCoordinator:
         if self.host.prestart_running:
             raise RuntimeError('pre-start is running - stop it before starting a run '
                                '(both drive the plasma-ground relay)')
+        if getattr(self.host, "prestart_cleanup_required", False):
+            raise RuntimeError(
+                "pre-start did not complete - abort its cleanup before starting a run")
         self._cancelled = False
 
     async def start(self, recipe: Recipe, params: dict | None = None) -> Recipe:
@@ -118,6 +121,9 @@ class RunCoordinator:
         if self._cancelled or not self.host.server_running:
             raise RuntimeError('run start cancelled')
         await self.runner.start(recipe, started_at=started_at)
+        consume_primed = getattr(self.host, "consume_prestart_primed", None)
+        if consume_primed is not None:
+            consume_primed()
         self.phase = RunPhase.EXECUTING
         self.host.report_event('recipe', f"started '{recipe.name}' ({recipe.cycles} cycles)")
 

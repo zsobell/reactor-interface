@@ -2,6 +2,7 @@ import {createLiveCharts} from "./live-charts.js";
 import {createControlTransport, SHUTDOWN_HINT} from "./control-transport.js";
 import {createRunForms} from "./control-run-forms.js";
 import {createDevicePanels} from "./control-device-panels.js";
+import {createPrestartEditor} from "./prestart-editor.js";
 "use strict";
 
 /* ---------------------------------------------------------------------------
@@ -404,24 +405,27 @@ function recipe(s){
   runForms.setRunActive(running, r.started_at);
   cls($("liveEditBadge"), "hidden", !running);
   const pre = s.prestart || {};
+  prestartEditor.updateStatus(pre);
   // Pre-start and a run both drive the plasma-ground relay, so only one of them
   // can be armed at a time (the server refuses the overlap with a 409 too).
-  $("aldStart").disabled  = running || !!pre.running;
+  $("aldStart").disabled  = running || !!pre.running
+    || (!!pre.cleanup_available && !pre.primed);
   $("pauseBtn").disabled  = r.state !== "running";
   $("resumeBtn").disabled = r.state !== "paused";
   $("abortBtn").disabled  = !running;
-  $("preStartBtn").disabled = running || !!pre.running;
+  $("preStartBtn").disabled = running || !!pre.cleanup_available;
   // Abort is the only way out of a pre-start (2026-08-28). There used to be a
   // Stop button beside it that ended the SEQUENCE and left the tool primed -
   // Ar flowing, fill pulsing - so it greyed out at the moment the operator was
   // most likely to want out, and Abort had to be pressed anyway. Abort stays
   // live across the whole primed state, running or struck-and-held.
-  $("preAbortBtn").disabled = running || !(pre.running || pre.done);
+  $("preAbortBtn").disabled = running || !pre.cleanup_available;
 
   const pEl = $("preStatus");
   pEl.textContent = pre.running
     ? (pre.phase || "running") + (pre.strikes ? ` · ${pre.strikes} strikes` : "")
-    : (pre.done ? "complete — beam grounded, Ar and fill running" : "idle");
+    : (pre.primed ? `primed · ${pre.recipe_name || "recipe complete"}`
+      : (pre.state === "error" ? (pre.phase || "error") : (pre.state || "idle")));
   pEl.style.color = pre.running ? "var(--hot)" : "var(--dim)";
 
   // Standalone fill (pre-run precursor charge): available only when no run is
@@ -825,6 +829,23 @@ const devicePanels = createDevicePanels({$, document, cssEscape:value => CSS.esc
   confirmImpl:(...args) => confirm(...args), promptImpl:(...args) => prompt(...args)});
 const runForms = createRunForms({$, document, storage:localStorage, fetchImpl:fetch,
   cls, smoothing, drawChart});
+function prestartBaseValues(){
+  const P = key => parseFloat($("p_" + key).value);
+  const run = runForms.runParams();
+  return {
+    ar_sccm:P("pre_ar_sccm"), valve_delay_s:P("pre_valve_delay_s"),
+    hold_s:P("pre_hold_s"), dose_pressure_torr:run.dose_pressure_torr,
+    fill_pulse_on_s:run.fill_pulse_on_s, fill_pulse_off_s:run.fill_pulse_off_s,
+    tolerance_frac:run.tolerance_frac, min_current_a:run.min_current_a,
+    reignite_pulse_s:run.reignite_pulse_s,
+    reignite_settle_s:run.reignite_settle_s,
+    sample_bias_v:run.sample_bias_v,
+    sample_bias_polarity:run.sample_bias_polarity,
+  };
+}
+const prestartEditor = createPrestartEditor({$, document, windowObj:window,
+  fetchImpl:fetch, toast, confirmImpl:(...args)=>confirm(...args),
+  promptImpl:(...args)=>prompt(...args), getBaseValues:prestartBaseValues});
 
 // ---------------------------------------------------------------- tabs
 // Panes are display:none when inactive, which zeroes the canvases' size - so
@@ -903,37 +924,17 @@ $("aldStart").onclick = async () => {
 // commands hardware that cannot respond.
 $("preStartBtn").onclick = async () => {
   runForms.saveParams();
-  // The bias is the one output that energises the sample, so the dialog states
-  // it explicitly rather than leaving the operator to remember what is in the
-  // field - including the fact that pre-start now only ARMS it.
-  const biasV = Math.abs(parseFloat($("p_sample_bias_v").value) || 0);
-  const biasSign = parseInt($("p_sample_bias_polarity").value, 10) < 0 ? "−" : "+";
-  const biasLine = biasV > 0
-    ? `Sample bias: armed at ${biasSign}${biasV} V, output OFF — the stage is `
-      + `energised only around each beam, once the run starts.`
-    : "Sample bias: 0 V — stage bias stays off.";
-  if(!confirm("Set Ar Pneumatic, Plasma Ground, and Precursor Fill to Remote.\n"
-    + "Turn on HV at the Glassman front panel if you want plasma.\n\n"
-    + "Pre-start will switch ON the steering, grid and collimating supply "
-    + "outputs — they stay on for the whole run — then soft-open the Ar "
-    + "pneumatic (pulsed in, not one flip), flow Ar, start the precursor fill "
-    + "pulse, and strike the plasma and hold it. It retries the strike until "
-    + "you press Abort pre-start.\n\n"
-    + biasLine)) return;
-  const P = k => parseFloat($("p_"+k).value);
-  const p = runForms.runParams();
   try{
+    const launch = await prestartEditor.prepareLaunch(prestartBaseValues());
+    const readiness = launch.recipe_id === "current-prestart"
+      ? "Set Ar Pneumatic, Plasma Ground, and Precursor Fill to Remote.\n"
+        + "Turn on HV at the Glassman front panel if you want plasma.\n\n"
+      : "Verify every listed device is ready for remote control.\n"
+        + "The Glassman remains front-panel controlled; recipes can only command HV off.\n\n";
+    if(!confirm(readiness + prestartEditor.reviewText(launch.preview))) return;
     await post("/api/prestart/start", {
-      ar_sccm: P("pre_ar_sccm"),
-      valve_delay_s: P("pre_valve_delay_s"),
-      hold_s: P("pre_hold_s"),
-      dose_pressure_torr: p.dose_pressure_torr,
-      fill_pulse_on_s: p.fill_pulse_on_s, fill_pulse_off_s: p.fill_pulse_off_s,
-      tolerance_frac: p.tolerance_frac,
-      min_current_a: p.min_current_a,
-      reignite_pulse_s: p.reignite_pulse_s, reignite_settle_s: p.reignite_settle_s,
-      sample_bias_v: p.sample_bias_v,
-      sample_bias_polarity: p.sample_bias_polarity,
+      ...launch.values, recipe_id:launch.recipe_id,
+      recipe_revision:launch.recipe_revision,
     });
     $("preSection").open = true;
   }catch(_){}
@@ -1056,6 +1057,8 @@ let bootstrapComplete = false;
   runForms.mount();
   await runForms.loadParams();
   if(pageDisposed) return;
+  await prestartEditor.mount();
+  if(pageDisposed) return;
   runForms.applyMode();
   runForms.refreshRunName(false);
   $("shutdownHint").textContent = SHUTDOWN_HINT;
@@ -1076,6 +1079,7 @@ window.addEventListener("pagehide", event => {
   pageDisposed = true;
   devicePanels.dispose();
   runForms.dispose();
+  prestartEditor.dispose();
   disposeTransport();
 });
 window.addEventListener("pageshow", event => {

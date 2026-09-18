@@ -36,6 +36,10 @@ Desktop.ini
 /server.log
 /server.log.*
 /config/run_params.json
+/config/prestart_recipes.json
+
+# Local browser/visual-QA fixtures
+/.visual-state/
 
 # Per-instance runtime process registry
 config/instances/

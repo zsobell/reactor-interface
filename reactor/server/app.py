@@ -616,6 +616,51 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         await sup.start_prestart(params or {})
         return sup.prestart
 
+    @app.get("/api/prestart/capabilities")
+    async def prestart_capabilities() -> dict[str, Any]:
+        """Device/action schema used by validation, execution, and the editor."""
+        return sup.prestart_recipes.catalog
+
+    @app.get("/api/prestart/recipes")
+    async def prestart_recipes() -> dict[str, Any]:
+        return sup.prestart_recipes.payload()
+
+    @app.post("/api/prestart/recipes")
+    async def prestart_recipe_create(payload: dict = Body(default={})) -> dict[str, Any]:
+        recipe = sup.prestart_recipes.create(
+            str(payload.get("name") or "Untitled pre-start"),
+            from_id=str(payload.get("from_id") or "current-prestart"))
+        return recipe.model_dump(mode="json")
+
+    @app.put("/api/prestart/recipes/{recipe_id}")
+    async def prestart_recipe_save(
+        recipe_id: str, payload: dict = Body(...),
+    ) -> dict[str, Any]:
+        if "recipe" not in payload or "expected_revision" not in payload:
+            raise ValueError("save requires recipe and expected_revision")
+        recipe = sup.prestart_recipes.save(
+            recipe_id, payload["recipe"],
+            expected_revision=int(payload["expected_revision"]))
+        return recipe.model_dump(mode="json")
+
+    @app.delete("/api/prestart/recipes/{recipe_id}")
+    async def prestart_recipe_delete(recipe_id: str) -> dict[str, Any]:
+        if sup.prestart.get("cleanup_available") and (
+                sup.prestart.get("recipe_id") == recipe_id):
+            raise RuntimeError("cannot delete the active or primed pre-start recipe")
+        return sup.prestart_recipes.delete(recipe_id).model_dump(mode="json")
+
+    @app.post("/api/prestart/recipes/{recipe_id}/select")
+    async def prestart_recipe_select(recipe_id: str) -> dict[str, Any]:
+        library = sup.prestart_recipes.select(recipe_id)
+        return {"selected_id": library.selected_id}
+
+    @app.post("/api/prestart/preview")
+    async def prestart_preview(payload: dict = Body(default={})) -> dict[str, Any]:
+        return sup.prestart_recipes.preview(
+            str(payload.get("recipe_id")) if payload.get("recipe_id") else None,
+            dict(payload.get("values") or {}))
+
     @app.post("/api/prestart/abort")
     async def prestart_abort() -> dict[str, Any]:
         """Undo the pre-start in one call: Ar off, fill off, beam relay at rest,

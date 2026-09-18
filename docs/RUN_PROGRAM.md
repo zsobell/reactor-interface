@@ -374,10 +374,17 @@ next to the Gas scheduling panel's title (e.g. `NH3 on beam−0.50s · off
 beam+2.00s`), including the same order-collision check the server enforces
 with a 409, and the lone-Simultaneous refusal above.
 
-## Pre-start — bring the tool up to a struck, beam-off state
+## Pre-start recipes — prepare and prime the tool
 
-A separate button and sequence (`Supervisor.start_prestart`), not part of
-either run mode, for getting the tool ready before pressing Start:
+Pre-start is a server-owned library of versioned, user-editable recipes, not
+part of either run mode. The editor gets valid targets, actions and typed fields
+from the backend capability catalog. It can create, duplicate, select, reorder,
+enable and delete steps in separate start and abort sequences. Saving validates
+the entire recipe without connecting to or commanding hardware; stale revisions
+are refused instead of overwritten.
+
+The protected **Current pre-start** recipe reproduces the established sequence
+for getting the tool ready before pressing Start:
 
 1. Confirmation dialog: *"Set Ar Pneumatic, Plasma Ground, and Precursor Fill
    to Remote. Turn on HV at the Glassman front panel if you want plasma."* It
@@ -403,13 +410,19 @@ either run mode, for getting the tool ready before pressing Start:
    5 s — a drop mid-hold restarts the count, it is not cumulative), stop
    watching and set plasma-ground **OPEN**, i.e. beam **OFF**.
 
-On success or an internal stop, the beam is grounded and Ar and the fill pulse
-are left running: the tool is primed for **Start run** next. Operator Abort
-performs the full cleanup described in CONTROL_MODEL.md, including Ar and fill.
-A malformed opening field fails before commands; later failures ground the
-beam in the controller's cleanup. A run and pre-start
-both drive `plasma_ground`, so the server refuses to start one while the
-other is active (409); the UI greys out the buttons accordingly.
+Before actuation, the UI requests a backend preview of the resolved recipe and
+its exact revision. Launch snapshots the resolved parameter values, start steps
+and abort steps; later browser edits affect only a future launch. Invalid or
+stale recipes fail before the first command. Progress names the active step and
+preserves the abort action after successful priming or a partial failure.
+
+For the Current recipe, success leaves the beam grounded and Ar and the fill
+pulse running for **Start run**; Abort performs the established cleanup in
+CONTROL_MODEL.md. A custom recipe instead runs its explicit, snapshotted abort
+steps in order, continuing best-effort after an individual cleanup failure.
+When a plasma strike step exits unexpectedly, the controller still grounds its
+configured switch. A run and pre-start cannot overlap; the server refuses the
+second start (409) and the UI disables it.
 
 ## Where it lives
 
@@ -437,10 +450,16 @@ other is active (409); the UI greys out the buttons accordingly.
     reignition do not spend that budget.
 - **`reactor/control/parameters.py`** — typed parameter views, legacy gas-key
   migration and stage-specific pre-start conversions.
+- **`reactor/control/prestart_model.py`** — schema version 1, capability
+  catalog, protected Current recipe, validation, parameter resolution and pure
+  preview summaries.
+- **`reactor/control/prestart_store.py`** — server-owned recipe selection,
+  revision-checked CRUD and atomic `prestart_recipes.json` replacement.
 - **`reactor/control/run_coordinator.py`** — run admission, immutable cleanup
   identities, live edits and their history, recording preparation and drain.
 - **`reactor/control/fill.py`** — fill-pressure regulation and live tuning.
-- **`reactor/control/prestart.py`** — pre-start task, progress and cleanup.
+- **`reactor/control/prestart.py`** — capability dispatch through Supervisor,
+  immutable launch/cleanup snapshots, progress, primed ownership and abort.
 - **`reactor/supervisor.py`**
   - `start_fill_regulation()` / `stop_fill_regulation()` delegate to the fill
     controller, pulsing the fill valve (via `drive_fill_valve`,
@@ -451,7 +470,8 @@ other is active (409); the UI greys out the buttons accordingly.
     `_start_built_run`, which records the run's dose/plasma/fill valves and
     refuses to start while pre-start owns the plasma relay.
   - `start_prestart(params)` / `stop_prestart()` / `abort_prestart()` delegate
-    to the pre-start controller. Publishes `self.prestart` status.
+    to the pre-start controller. Start accepts a selected recipe id and reviewed
+    revision; `self.prestart` publishes recipe/step progress and cleanup state.
   - `self.marks` — every `set_valve` flip is recorded `{t, id, state,
     reason}` for the current-trace plasma overlay; recent ones are exposed
     in `state()`.
@@ -463,9 +483,10 @@ other is active (409); the UI greys out the buttons accordingly.
   CONTROL_MODEL.md; 409 if no run is running), `POST /api/run/estimate` (same
   body, starts nothing —
   returns the length of the run those parameters describe, for the Run tab's
-  idle estimate), `POST /api/prestart/start`, `POST /api/prestart/abort`. Plus
-  the existing `/api/recipe/*`, `/api/mfc/*`, `/api/valve/*`, `/api/label`
-  routes.
+  idle estimate), `POST /api/prestart/start`, `POST /api/prestart/abort`,
+  `GET /api/prestart/capabilities`, recipe CRUD/select routes under
+  `/api/prestart/recipes`, and `POST /api/prestart/preview`. Plus the existing
+  `/api/recipe/*`, `/api/mfc/*`, `/api/valve/*`, `/api/label` routes.
 - **`reactor/server/static/index.html`** — the GUI (below).
 
 ## Run parameters (all editable in the UI, persisted to localStorage)

@@ -9,6 +9,9 @@ from types import SimpleNamespace
 from reactor.control.recipe_model import build_ald_recipe, build_cvd_recipe
 from reactor.control.parameters import PrestartParameters, RunParameters
 from reactor.control.prestart import PrestartController
+from reactor.control.prestart_store import PrestartRecipeStore
+from reactor.config import load_config
+from reactor.testing.virtual_reactor import DEFAULT_CONFIG_PATH
 from reactor.run_report import format_run_params
 from tests._support import Checker
 
@@ -39,11 +42,15 @@ async def prestart_trace(params):
     events = []
     host = SimpleNamespace(run_in_progress=False, snapshot={"inst.ammeter": 0.001},
                            report_event=lambda *event: events.append(event))
-    for name in ("supplies_output_on", "set_valve", "set_mfc_setpoint", "start_fill_regulation"):
+    for name in ("set_valve", "set_mfc_setpoint", "start_fill_regulation",
+                 "stop_fill_regulation", "set_supply_output", "set_supply_voltage",
+                 "set_supply_current", "arm_sample_bias", "hv_off"):
         async def command(*args, _name=name, **kwargs):
             trace.append((_name, args, kwargs))
         setattr(host, name, command)
-    controller = PrestartController(host)
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    store = PrestartRecipeStore(Path("__prestart_trace_not_written__.json"), cfg)
+    controller = PrestartController(host, store=store)
     await controller.start(dict(valve_delay_s=0, hold_s=0, reignite_settle_s=0, **params))
     error = None
     try:
@@ -62,18 +69,11 @@ async def main():
             trace == [] and error is None and state["running"] is False
             and state["phase"].startswith("error:"))
     trace, events, state, error = await prestart_trace({"sample_bias_v": "bad"})
-    c.check("supply conversion failure runs only existing beam-ground cleanup",
-            [t[0] for t in trace] == ["set_valve"]
-            and trace[0][1] == ("plasma_ground", True) and error is None and not state["running"])
+    c.check("supply conversion failure is caught before every command",
+            trace == [] and error is None and not state["running"])
     trace, events, state, error = await prestart_trace({"dose_pressure_torr": "bad"})
-    c.check("fill conversion failure preserves preceding supply and Ar commands",
-            [t[0] for t in trace] == ["supplies_output_on", "set_valve", "set_mfc_setpoint", "set_valve"]
-            and trace[1][1] == ("ar_pneumatic", True) and trace[-1][1] == ("plasma_ground", True))
-    trace, events, state, error = await prestart_trace({"ar_sccm": "3.5", "sample_bias_polarity": "-1"})
-    c.check("representative prestart converts numbers and keeps full command ordering",
-            [t[0] for t in trace] == ["supplies_output_on", "set_valve", "set_mfc_setpoint",
-                                    "start_fill_regulation", "set_valve", "set_valve"]
-            and trace[0][2]["polarity"] == -1 and trace[2][1] == ("ar", 3.5) and state["done"])
+    c.check("fill conversion failure is caught before every command",
+            trace == [] and error is None and not state["running"])
     c.section("typed boundaries preserve raw snapshots and schema policy")
     raw = {"cycles": "2", "unknown": {"future": [1, 2]}}
     typed = RunParameters.normalize(raw, mode="ald")

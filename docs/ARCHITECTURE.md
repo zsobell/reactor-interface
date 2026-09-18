@@ -48,9 +48,14 @@ flowchart TD
   release tasks retain ownership, so a new sweep cannot overlap late I/O.
   Failed or timed-out releases report an unconfirmed output state instead of
   claiming the lines are low.
-- `control/prestart.py` owns pre-start's task, parameters and progress. It calls
-  Supervisor methods for every hardware action. Stop hands over primed; abort
-  runs the previously specified Ar/fill/relay/HV/DC-supply cleanup.
+- `control/prestart_model.py` owns the versioned recipe schema, device/action
+  capability catalog, parameter resolution and pure preview generation.
+  `control/prestart_store.py` owns the server-side library, atomic replacement
+  and optimistic revision checks. `control/prestart.py` snapshots one resolved
+  start/abort sequence, owns its task and progress, and calls Supervisor public
+  methods for every hardware action. Stop hands over primed; abort runs the
+  snapshotted recipe cleanup. The protected Current recipe retains the prior
+  Ar/fill/relay/HV/DC-supply behavior.
 - `telemetry.py` builds independent snapshots and manages bounded subscriber
   queues. A later reading cannot mutate an already published frame. Each slow
   viewer retains at most four frames; older frames are dropped.
@@ -140,7 +145,8 @@ page navigation suspends/resumes transport; final unload disposes handlers.
 Static assets revalidate on reload.
 
 Hardware mapping is YAML. Labels, last-commanded valve state, last-started run
-name, shared run parameters and the shared analysis layout are JSON. All state
+name, shared run parameters, the pre-start recipe library and the shared
+analysis layout are JSON. All state
 paths, including the process registry, are supplied through `StatePaths`.
 Browser localStorage caches parameters
 and stores display preferences. Experimental records are CSV/text under

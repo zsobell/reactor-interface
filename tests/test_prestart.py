@@ -65,7 +65,7 @@ async def main() -> int:
                 vr.daq.do_state["plasma_ground"] is True)
         c.check("reports done", vr.sup.prestart.get("done") is True,
                 str(vr.sup.prestart.get("phase")))
-        await vr.sup.stop_fill_regulation()
+        await vr.sup.abort_prestart()
 
         c.section("2. plasma never lights: retries until stopped, no timeout")
         vr.instruments["ammeter"].value = 0.0
@@ -86,7 +86,7 @@ async def main() -> int:
         c.check("not marked done", vr.sup.prestart.get("done") is False)
         c.check("Ar left flowing after stop", vr.mfcs["ar"].commanded_sccm == 4.0)
         c.check("fill left running after stop", vr.sup.regulator.get("running") is True)
-        await vr.sup.stop_fill_regulation()
+        await vr.sup.abort_prestart()
 
         c.section("3. plasma drops during the hold: hold restarts, still completes")
         vr.instruments["ammeter"].value = 1.0e-3
@@ -130,7 +130,7 @@ async def main() -> int:
         c.check("hold restarted rather than resuming (took noticeably > hold_s)",
                 elapsed > PARAMS["hold_s"] * 1.5, f"{elapsed:.2f}s")
         c.check("ends grounded", vr.daq.do_state["plasma_ground"] is True)
-        await vr.sup.stop_fill_regulation()
+        await vr.sup.abort_prestart()
 
         c.section("4. stop during the initial valve settle: never struck, still grounds")
         # Sentinel, not 0.0 - the same VirtualReactor (and its FakeMfc) has
@@ -152,6 +152,7 @@ async def main() -> int:
                 vr.daq.do_state["plasma_ground"] is True)
         c.check("never set Ar flow (still the -1.0 sentinel, untouched)",
                 vr.mfcs["ar"].commanded_sccm == -1.0, str(vr.mfcs["ar"].commanded_sccm))
+        await vr.sup.abort_prestart()
 
         c.section("5. run refused while pre-start owns the plasma relay, and vice versa")
         tick_task = await autotick(vr, period=0.05)
@@ -164,6 +165,7 @@ async def main() -> int:
             except RuntimeError as exc:
                 c.check("run refused while pre-start is running", True, str(exc))
             await vr.sup.stop_prestart()
+            await vr.sup.abort_prestart()
         finally:
             tick_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

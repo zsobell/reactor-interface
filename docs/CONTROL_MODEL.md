@@ -234,9 +234,18 @@ Two older decisions still stand and should not be quietly reversed:
 
 ## The pre-start abort (requested 2026-08-21)
 
-`Supervisor.abort_prestart()` is one click that undoes a pre-start: Ar flow to
-zero then the isolation valve closed, fill regulation stopped and the fill valve
-closed, the beam relay **de-energised**, and HV off.
+`Supervisor.abort_prestart()` is one click that runs the active pre-start
+recipe's snapshotted abort sequence. Editing or deleting the saved recipe after
+launch cannot change that cleanup. Abort continues best-effort through later
+steps if one cleanup command fails, retains the failure in status, and consumes
+the snapshot once so a repeated abort does not actuate again.
+
+The protected **Current pre-start** recipe preserves the requested cleanup: Ar
+flow to zero then the isolation valve closed, fill regulation stopped and the
+fill valve closed, HV off, DC outputs off, and the beam relay
+**de-energised**. Custom recipes expose every cleanup action for operator review
+before launch; the program does not invent inverse commands for their start
+steps.
 
 It exists because `stop_prestart` only ends the *sequence* and deliberately
 leaves the tool primed — Ar flowing, fill pulsing, beam grounded — which is the
