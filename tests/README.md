@@ -163,12 +163,12 @@ Supervisor integration with fake devices and isolated file/number processing.
 | `test_prestart_recipes.py` | Pre-start schema/capability coverage, protected Current recipe parity, typed parameter resolution and fail-closed target/action validation |
 | `test_prestart_recipe_api.py` | Recipe CRUD/select/preview APIs, revision conflicts, restart persistence, corrupt-schema refusal and atomic/concurrent writes without hardware construction |
 | `test_prestart_sequence.py` | Capability-driven custom execution, immutable launch/cleanup snapshots, alternate targets, partial-failure cleanup, abort idempotence and stale-review refusal before commands |
-| `test_run_export.py` | The automatic per-run files: run CSV opens on start and closes on completion/abort, back-to-back runs don't collide, and the run-parameters JSON is written with a correct gas-schedule summary in both modes |
+| `test_run_export.py` | The automatic per-run files: run CSV opens on start and closes on completion/abort, back-to-back runs don't collide, EE-ALD/EE-CVD rows retain aperture lifetime seconds, and the run-parameters report has a correct gas-schedule summary in both modes |
 | `test_mfc_interlock.py` | The Ar MFC isolation interlock — the one check no earlier ad hoc harness could exercise, because it lives in `Supervisor` itself, which every earlier fake replaced wholesale |
 | `test_cycle_numbering.py` | Fractional cycle numbers: the clock freezing on a reignite/pause, monotonicity across a cycle boundary, the by-cycle export dropping frozen samples, and `recipe_step` naming a freeze itself (`reignite` vs `pause`) rather than a separate 0/1 column |
 | `test_ellipsometer_decode.py` | The FS-1 wire format: record decoding against real captured bytes, resync past garbage, field-name-keyed parsing |
 | `test_ellipsometer_merge.py` | The post-run join: dyn-file parsing (both shapes, minutes vs seconds), the time-map fit, the combined by-cycle merge and its warnings |
-| `test_docs.py` | The docs still describe THIS program: poll rates, hardware addresses, the channel map, MFC register addresses and run-file names quoted in prose are checked against the config and code, every module and test is listed where it should be, and a handful of superseded claims are asserted absent. Reads files only |
+| `test_docs.py` | The docs still describe THIS program: poll rates, hardware addresses, the channel map, MFC register addresses and run-file names quoted in prose are checked against the config and code, every module and test is listed where it should be, and superseded claims plus HCPES mA/acquisition-order and active-only header-error semantics are pinned. Reads files only |
 | `test_sample_freshness.py` | The run export blanking a channel on rows where it was not resampled: state columns always filled, a slow channel blank on the ticks it missed and present on the ones it made, and the run-name prefix reaching the filename |
 | `test_keithley_supplies.py` | The four DC supplies: *IDN? parsing, and above all WHEN their outputs are switched — coils on at pre-start, off at run end/abort, untouched by a reignite; the sample bias only *armed* at pre-start since 2026-08-26. The "not cycled by a reignite" assertion is the load-bearing one |
 | `test_sample_bias_bracket.py` | The sample bias following the beam (2026-08-26, so the stage thermocouple reads clean while the beam is off): it comes up a lead time before every beam and drops a trail time after, once per beam in EE-ALD and once per run in EE-CVD, a reignite does not cycle it, the bracket does not lengthen a cycle, and an abort drops it at once with no queued flip able to bring it back |
@@ -215,9 +215,17 @@ test no longer requires a pre-existing repository `data/` directory.
 
 | Module | Behavior checked |
 |---|---|
+| `test_aperture_lifetime.py` | Versioned human-readable state validates and replaces atomically; monotonic active spans, gaps, restart, corrupt/future files, write failure and duplicate replacement preserve history |
+| `test_aperture_integration.py` | Existing Glassman/relay observations start and stop timing across grounded pulses, HV-off cleanup and disconnect gaps without extra reads or hardware writes |
+| `test_aperture_api.py` | State exposure and confirmed identity-guarded replacement are idempotent, reject active timing, and never actuate the DAQ |
 | `test_run_admission.py` | Duplicate and competing starts preserve accepted metadata; file recipes respect pre-start; abort cancels file preparation before hardware starts |
 | `test_recording_errors.py` | Failed header/row writes, flushes and closes produce telemetry/events, close sibling handles, and leave control usable |
 | `test_recording_worker.py` | Stalled disk does not block acquisition/commands; queued data is copied; backlog is bounded and overflow visible; accepted rows drain before close |
+| `test_hcpes_model.py` | Versioned HCPES grids validate every configured gas/supply target, expand lazily in reviewed order, estimate duration, and link only compatible polarity sessions |
+| `test_hcpes_controller.py` | Exclusive HCPES ownership, restricted prestart, independent retry/establishment/parameter timers, repeated recovery after settling dropout, drift timeout, next-fresh-reading qualified collection with aperture lifetime telemetry, inaccessible continuation, cleanup, and cancellation-safe recording preparation |
+| `test_hcpes_recording.py` | Raw and qualified streams stay ordered and durable; plain-text summary, concise timeline CSV and point-section YAML stay readable (operator currents in mA while explicit machine fields retain A); point tables retain gate/telemetry metadata including aperture lifetime seconds; linked polarity campaigns preserve both zero-bias rows |
+| `test_hcpes_api.py` | Server-owned plans are revisioned and previewed without hardware; only a saved reviewed revision launches; completed opposite-polarity runs automatically derive a signed linked campaign |
+| `test_hcpes_analysis.py` | Read-only analysis discovers completed/partial sessions and linked campaigns, types point telemetry with provenance, preserves signed zero ordering, reconstructs condition-completion order, exposes filtered raw intervals, and flags incompatible sources |
 | `test_data_routes.py` | HTTP file listing, containment and merging retain their contracts; analysis work does not block concurrent requests |
 | `test_telemetry.py` | Frames are stable snapshots; slow clients receive only the newest four frames |
 | `test_static_assets.py` | Served HTML, CSS, page modules and transitive module imports are reachable without a build |
@@ -235,6 +243,16 @@ format tests may call its synchronous methods directly when no worker is active.
 `node tests/js/control-bootstrap.mjs` also loads the real control page's ES
 modules against its actual HTML element IDs, checks server-setting/history
 bootstrap and chart integration, and verifies the HTTPS WebSocket URL.
+
+`node tests/js/aperture-card.mjs` checks lifetime/history formatting, cancel and
+confirmed replacement behavior, unavailable/active guards and teardown.
+`node tests/js/analysis-plot.mjs` pins exact auto-fit extents and independent
+nearest-finite sample selection for sparse/asynchronous plotted series.
+`node tests/js/hcpes-editor.mjs` checks plan editing, mA/A boundary conversion,
+settle/recovery help, progress/ETA and retry naming. `node
+tests/js/hcpes-analysis.mjs` checks signed ordering, mA display conversion,
+full-condition hover data, filters, slices and heat cells. `node
+tests/js/prestart-editor.mjs` checks visual pre-start recipe editing.
 
 `test_dependencies.py` checks simultaneous instance isolation, read-only startup,
 real polling task startup/shutdown, and fake-device disconnection.

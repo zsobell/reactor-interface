@@ -165,7 +165,7 @@ tasks:
 | --- | --- | --- |
 | `_control_loop` | `site.loop_hz` 2 Hz | DAQ analog inputs (thermocouple-limited) + the four Keithleys + the Glassman |
 | `_current_loop` | `site.current_hz` 5 Hz | DMM6500 sample current, telemetry publish, run-CSV row |
-| `_mfc_loop` | `site.mfc_hz` 6 Hz | the three MKS G50s — a slow read, kept off the telemetry tick on purpose |
+| `_mfc_loop` | `site.mfc_hz` 6 Hz | the three MKS G50s — fast Modbus plus periodic HTTP metadata/fallback, isolated from the telemetry tick |
 | `recipe` | event-driven | the run itself |
 
 The three polling loops keep time with an **absolute deadline that accumulates**
@@ -366,11 +366,11 @@ Gas names in the scheduler — the table rows, the prose under it, and the
 Start-time errors — are the MFCs' own display labels, so renaming an MFC on the
 Hardware tab (its ✎ button) renames it here in the same frame. The label's
 `"<name> - <purpose>"` tail is trimmed for the table. The head is the gas the
-unit reports (`NH3`), falling back to the channel (`MFC 1`) if it reports none -
-nothing static names a gas, because the gas on a line changes.
+unit currently reports, falling back to the channel (`MFC 1`) if it reports
+none—nothing static names a background gas, because the gas on a line changes.
 
 The UI computes the exact same numbers as `RecipeRunner` and shows them live
-next to the Gas scheduling panel's title (e.g. `NH3 on beam−0.50s · off
+next to the Gas scheduling panel's title (e.g. `MFC 1 on beam−0.50s · off
 beam+2.00s`), including the same order-collision check the server enforces
 with a 409, and the lone-Simultaneous refusal above.
 
@@ -489,7 +489,7 @@ second start (409) and the UI disables it.
   `/api/recipe/*`, `/api/mfc/*`, `/api/valve/*`, `/api/label` routes.
 - **`reactor/server/static/index.html`** — the GUI (below).
 
-## Run parameters (all editable in the UI, persisted to localStorage)
+## Run parameters (all editable in the UI, persisted by the server)
 
 | UI field | param key | default | notes |
 |---|---|---|---|
@@ -579,7 +579,7 @@ wheel-zoom — it would hijack page scroll.
 - **Client-side auto-download**: `recordRun()` accumulates a per-run buffer
   from the moment Start is pressed (keyed on `recipe.started_at`); on
   completion `downloadRun()` writes a CSV — columns `elapsed_s,
-  stage_temp_c, sample_current_a, precursor_dosing,
+  aperture_lifetime_s, stage_temp_c, sample_current_a, precursor_dosing,
   precursor_pressure_torr, chamber_pressure_torr`, time zeroed to the Start
   press. Requires the browser to stay open through the run.
 - **Server-side run export** (`DataLogger.start_run_export` /
@@ -590,7 +590,9 @@ wheel-zoom — it would hijack page scroll.
   default) straight from the same sample dict the trend buffer uses — no
   extra device I/O. Columns are the same sample dict, dynamically
   discovered, plus `recipe_cycle`/`cycle_number`/`recipe_step`, so it's a
-  *richer* trace than the client's fixed six columns.
+  *richer* trace than the client's fixed columns. Every EE-ALD and EE-CVD
+  row also carries `aperture_lifetime_s`, the projected cumulative runtime of
+  the installed HCPES aperture at that sample; the by-cycle export retains it.
 
   **This is the raw file** — every telemetry tick, nothing dropped, including
   the samples taken while the clock was frozen. `_bycycle.csv` and the merged
@@ -620,7 +622,7 @@ wheel-zoom — it would hijack page scroll.
   **A cell is filled only on the rows where that channel was actually
   read.** The three poll loops run at different rates — DAQ `site.loop_hz`
   (~2 Hz, which also carries the HV supply), instruments `site.current_hz`
-  (~5 Hz, and the row cadence), MFCs `site.mfc_hz` (~1 Hz) — so most rows
+  (~5 Hz, and the row cadence), MFCs `site.mfc_hz` (~6 Hz) — so most rows
   carry a fresh ammeter reading and a blank pressure, flow or HV value. That
   is deliberate: repeating the last value would claim measurements that never
   happened. Blank means *not sampled here*, not zero. Commanded state
@@ -733,13 +735,49 @@ below. Any valve, MFC, or Baratron can be renamed from its ✎ button —
 persisted to `config/labels.json`, blank reverts to the `reactor.yaml`
 default.
 
+The full-width **HCPES aperture lifetime** card is server-owned maintenance
+history. It accumulates hours only when the already-polled Glassman reports
+HV on **and** the plasma-ground relay is released. Both conditions matter:
+normal cleanup turns HV off and deliberately parks that relay released, so the
+relay alone would count idle time forever. A grounded pause/reignite pulse
+stops the timer, and the next observed beam-on state resumes it. No extra
+device read is made for this feature.
+
+The same projected total is published as `aperture_lifetime_s` in sampled
+reactor telemetry. EE-ALD/EE-CVD run exports record it on every row. HCPES
+characterization stores it with pressure, stage temperature, and the other
+numeric reactor channels in raw and qualified observations; point summaries
+include `aperture_lifetime_mean_s` and the full statistics remain available in
+`point_channels.jsonl`.
+
+The record is the human-readable, versioned
+`config/aperture_lifetime.json`. Runtime is integrated from a monotonic clock
+and checkpointed periodically; installation/replacement labels are UTC wall
+timestamps. On the first server version with this feature, **tracking since**
+is the time tracking began, because the software cannot recover the aperture's
+earlier installation date. **New Aperture Installed** requires a second
+confirmation, archives that date and runtime, and starts a new zero-hour
+record. It changes data only and never commands hardware. The action is
+unavailable while beam timing is active.
+
+If Glassman status is disconnected/unknown, or while the server is not
+running, the software does not invent elapsed time: the card shows an
+observation gap. Back up `aperture_lifetime.json` with other reactor state.
+If it is corrupt or from an unsupported future schema, the UI preserves it,
+shows the error, and disables replacement rather than overwriting history;
+copy it aside and repair or deliberately remove it before restarting tracking.
+Software tests validate bookkeeping and non-actuation, not physical aperture
+wear or the true state of unwatched hardware.
+
 ### Diagnostics tab
 
-Valve-identification sweep, data logging controls, the connections table,
-**ellipsometer sync**, and the event log. A pinned header chip surfaces the
-newest `error` or `flag` event for two minutes regardless of which tab is
-open, so a fill-pressure flag during a run on the Run tab isn't missed just
-because the log itself lives elsewhere.
+Valve-identification sweep, data logging controls, the visual HCPES plan
+builder/live monitor, the connections table, and event/error logs. Ellipsometer
+sync lives on the Analysis page beside the plots it feeds. Header chips report
+conditions that are wrong **right now** and clear when the condition clears;
+historical errors and flags remain in the Diagnostics logs and per-run files.
+A latched recording failure is promoted only while the exact recording stream
+that suffered it is still active.
 
 **Ellipsometer sync** closes the loop on the FS-1: during a run the reactor
 subscribes to the instrument's live broadcast and writes a per-acquisition
@@ -785,8 +823,12 @@ A **grid of plot cells** (1–4 columns, adjustable height). Each cell picks its
 own **Y1**, an optional **Y2** on a second right-hand axis, and an **X**
 column — defaulting to `cycle_number` when the file has one, which is the
 point of the by-cycle export. Every axis takes an explicit **min/max** (blank
-= auto-fit) and Y axes have a **log** toggle, since chamber pressure spans
-decades. Hovering gives a crosshair and a value readout; each plot exports to
+= exact finite data extent, with no added padding) and Y axes have a **log**
+toggle, since chamber pressure spans decades. Hovering keeps a guide under the
+cursor and selects the nearest valid sample independently for each visible
+series. A dot marks each actual sample, so a sparse point is visibly displaced
+from the cursor instead of producing `NaN` or pretending asynchronous streams
+share a row. Each plot exports to
 **PNG** or **CSV**, both named after the source file and the plot itself.
 
 A 0/1 column — `beam_on`, `dosing`, `paused` — is detected automatically and
@@ -820,6 +862,27 @@ spectrum too.
 
 **Confirmed on a real refit file end to end, 2026-08-25.**
 
+### HCPES characterization analysis
+
+The second Analysis tab discovers immutable HCPES session bundles and linked
+positive/negative campaigns. It can draw one-parameter line slices, two-axis
+heat maps, or a **run sequence / acquisition order** view. Acquisition order is
+simply the order conditions completed (separately connected within each source
+session); it is useful for finding slow drift over the experiment and should
+not be read as though its x axis were one physical parameter.
+
+Every plotted point hover identifies its source session/point, result, settle
+state and observed drift, then lists **every commanded condition**. Current
+setpoints and measurements are shown in mA by default. Line slices create a
+separate series for each unfiltered parameter; heat-map cells average matching
+conditions when a third parameter remains at All, and say so in the view hint
+and hover. Filter that parameter to inspect one unambiguous slice.
+
+The raw interval inspector reads the full audit stream on demand and can show
+all, qualified-only, or omitted intervals (settling, delays, pauses, plasma
+loss, reignition and recovery). It changes no source file and has no Supervisor
+or device dependency.
+
 ## To actually run it in the lab
 
 1. Close LabVIEW. Start `python -m reactor`, open in a real browser.
@@ -837,10 +900,9 @@ spectrum too.
 
 ## Likely next iterations
 
-- Qualify EE-CVD timing on hardware. `reactor-2ou` added virtual-reactor
-  cycle/countdown measurements to `tests/test_run_timing.py` and fixed
-  watchdog rounding of pump durations. Both modes have a 0.1 s per-cycle
-  software regression budget; this does not qualify physical timing.
+- Qualify EE-CVD and HCPES timing/cleanup on hardware. The virtual-reactor
+  tests pin command order, clock behavior and a 0.1 s per-cycle software
+  regression budget for normal runs; they do not qualify physical timing.
 - Identify the NI 9265 current outputs — `reactor-5u2` (low priority, not
   needed for normal operation).
 
@@ -853,9 +915,10 @@ sequence and the difference between stopping and aborting pre-start.
 
 Recording writes run in an ordered dedicated worker. The raw trace, by-cycle
 file and sidecar preserve their existing formats and per-channel freshness. A
-failed write or a full recording backlog shows a persistent recording error in
-the header chip and event log; later successful samples do not clear evidence
-of lost data. The experiment continues. Shutdown drains accepted writes.
+failed write or a full recording backlog remains latched in recording status
+and the event/error history; its header chip clears when the affected recording
+owner closes. Later successful samples do not erase evidence of lost data. The
+experiment continues. Shutdown drains accepted writes.
 
 A rejected duplicate Start request cannot rename the active experiment or
 change its configured valve identifiers. If Abort arrives while a start is

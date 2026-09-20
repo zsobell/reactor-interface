@@ -99,6 +99,12 @@ async def main() -> int:
     c.check("MFCs are not described as HTTP-read",
             "HTTP read / Modbus write" not in ALL
             and not re.search(r"MFCs?[^.\n]{0,30}HTTP read", ALL))
+    hardware = docs[Path("docs/HARDWARE.md")]
+    c.check("changeable background MFCs stay generic in durable docs",
+            "generic MFC 1 / MFC 2" in readme
+            and "MFC 1 — configurable background channel" in hardware
+            and "MFC 2 — configurable background channel" in hardware
+            and "Gas selection, correction factor and full scale are device state" in hardware)
     c.check("the HV supply is not described as never commanded",
             "never commands the supply" not in ALL
             and "It never commands it." not in ALL)
@@ -108,6 +114,12 @@ async def main() -> int:
             "_run_params.json" not in ALL.replace("_ald_run_params.json", ""))
     c.check("the ellipsometer sync is not placed on the Diagnostics tab",
             not re.search(r"Diagnostics[^.\n]{0,60}[Ee]llipsometer sync", ALL))
+    c.check("HCPES operator current units are documented as mA",
+            "operator-facing current controls" in ALL and "use mA" in ALL)
+    c.check("HCPES acquisition order is explained as completion sequence",
+            "order conditions completed" in ALL)
+    c.check("header recording errors are active-owner only",
+            "header chip clears when the affected recording" in ALL)
 
     c.section("6. every module and test is mentioned where it should be")
     modules = sorted(p for p in Path("reactor").rglob("*.py")

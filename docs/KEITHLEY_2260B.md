@@ -1,8 +1,9 @@
 # Keithley 2260B DC supplies
 
 Four programmable DC supplies drive the beam column and the sample stage. The
-reactor logs all four, switches their outputs on at pre-start and off at the end
-of a run, and sets the voltage of one of them from a run parameter.
+reactor logs all four. Normal ALD/CVD operation switches the three support
+outputs on at pre-start, brackets stage bias with the beam, and sets only stage
+voltage. HCPES characterization follows its own reviewed four-supply program.
 
 | Role | Model | Serial | Rated | Power |
 |---|---|---|---|---|
@@ -48,7 +49,7 @@ in plug order. Treat that as a snapshot, not a fact.
 
 ## What this program commands
 
-### Automatically (requested 2026-08-21)
+### Automatically during normal ALD/CVD operation (requested 2026-08-21)
 
 **`:OUTP ON` / `:OUTP OFF`.** The three coil supplies come on during pre-start
 and go off when a run ends, aborts, or crashes. The **sample bias** is switched
@@ -60,8 +61,22 @@ time after, and off whenever a run ends however it ends.
 on the first bracket of a run that did not go through pre-start. Not per cycle:
 a level changed by hand mid-run is not fought.
 
-Nothing sets a **current** automatically. `tests/test_keithley_supplies.py`
-asserts that a full pre-start-plus-run produces zero current writes.
+Nothing sets a **current** automatically in the normal run/pre-start workflow.
+`tests/test_keithley_supplies.py` asserts that a full pre-start-plus-run
+produces zero current writes.
+
+### Automatically during an HCPES characterization
+
+HCPES is the explicit exception. A saved, revision-checked plan programs stage
+and grid **voltage** plus steering and collimating **current**, turns all four
+HCPES support-supply outputs on before establishing plasma, and keeps them on
+across conditions and recovery attempts. Every completion, stop, failure and
+server-shutdown path commands all four outputs off. Manual supply changes are
+refused while HCPES owns them.
+
+The driver and machine-readable `points.csv`/JSONL records use A. The HCPES
+plan editor, live commanded-values panel, readable `points.yaml`, plots and
+hover details convert current to **mA** for operators.
 
 ### By hand, from the Hardware tab (requested 2026-08-25)
 
@@ -77,7 +92,8 @@ This supersedes an earlier rule worth recording, because the reasoning changed
 rather than being forgotten. Until 2026-08-25 the driver deliberately never
 touched a current limit at all: all four supplies were found with Zach's working
 setpoints dialled in, and those were his alone. He then asked for current fields,
-so `set_current` exists — but only the operator's field reaches it.
+so `set_current` exists. Outside an active HCPES characterization, only the
+operator's field reaches it.
 
 As found 2026-08-21, and still the values the supplies carry:
 
@@ -114,7 +130,8 @@ observed, including coils demonstrably running in constant current, so the UI
 confidently labelled everything CV (reported 2026-08-25). It evidently means
 something other than the present operating mode. `:STAT:QUES:COND?` reads `0` in
 every state seen too, so its CV/CC bits — if it has any — are no better. It was
-dropped from the poll, which also gave back ~10 ms a tick.
+dropped as the **mode source**, but remains in the compound poll as a raw fault
+indicator.
 
 The derived version needs no vendor decoding and is self-evidently correct,
 which the guessed register bit was not.
@@ -217,8 +234,10 @@ rather than inventing a meaning for it. Check the front panel.
 
 ### Logged channels
 
-Only measured voltage and current are logged; setpoints and the CV/CC mode go
-to the Hardware card, not the run file.
+Normal run files log measured voltage and current; setpoints and the derived
+CV/CC mode stay on the Hardware card. HCPES additionally records the reviewed
+condition setpoints and all numeric telemetry. Keithley current is stored in A
+in machine-oriented files and shown in mA in HCPES operator views.
 
 | Snapshot key | Run-export column | `logging.columns` |
 |---|---|---|

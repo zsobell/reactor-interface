@@ -265,35 +265,48 @@ async def isolated_checks() -> int:
     # over raw ASGI with no lifespan, so this never touches the DAQ or the
     # serial ports of the server actually running the reactor.
     from reactor.server import app as app_mod
+    from reactor.config import load_config
+    from reactor.dependencies import StatePaths
+    from reactor.supervisor import Supervisor
     from tests._support import asgi_call
 
-    app = app_mod.create_app()
-    asked = {"n": 0}
-    app.state.request_shutdown = lambda: asked.__setitem__("n", asked["n"] + 1)
+    # stop() checkpoints maintenance state even when devices were never
+    # connected. Keep that write in the test's temporary state directory;
+    # shutdown acceptance must never create config/aperture_lifetime.json.
+    with tempfile.TemporaryDirectory(prefix="shutdown_state_") as state_dir:
+        supervisor = Supervisor(
+            load_config(), paths=StatePaths.in_directory(Path(state_dir)))
+        app = app_mod.create_app(supervisor=supervisor)
+        asked = {"n": 0}
+        app.state.request_shutdown = lambda: asked.__setitem__("n", asked["n"] + 1)
 
-    t0 = time.monotonic()
-    status, body = await asgi_call(app, "POST", "/api/server/shutdown")
-    took = time.monotonic() - t0
+        t0 = time.monotonic()
+        status, body = await asgi_call(app, "POST", "/api/server/shutdown")
+        took = time.monotonic() - t0
 
-    c.check("200 from the button", status == 200, f"{status} {body}")
+        c.check("200 from the button", status == 200, f"{status} {body}")
     # Zach, 2026-09-10: "it needs to be a lot faster". The PowerShell sweep this
     # replaced cost 1-3 s of cold start on its own, every press, before the
     # browser heard anything at all.
-    c.check("it answered promptly", took < 2.0, f"{took:.2f}s")
-    for key in ("released", "failed", "ok", "elapsed_s", "also_killed"):
-        c.check(f"the receipt carries `{key}`", key in body, str(sorted(body)))
-    c.check("the receipt reports the teardown, not just an intention",
-            isinstance(body.get("released"), list))
+        c.check("it answered promptly", took < 2.0, f"{took:.2f}s")
+        for key in ("released", "failed", "ok", "elapsed_s", "also_killed"):
+            c.check(f"the receipt carries `{key}`", key in body, str(sorted(body)))
+        c.check("the receipt reports the teardown, not just an intention",
+                isinstance(body.get("released"), list))
     # Devices were never connected here (no lifespan), so nothing should be
     # reported as FAILING to disconnect - a spurious failure would put a red
     # warning in front of the operator on every clean shutdown.
-    c.check("a never-started server tears down cleanly",
-            body.get("ok") is True, str(body.get("failed")))
+        c.check("a never-started server tears down cleanly",
+                body.get("ok") is True, str(body.get("failed")))
+        c.check("maintenance checkpoint stays in isolated test state",
+                supervisor.paths.aperture_lifetime.exists()
+                and Path(state_dir) in supervisor.paths.aperture_lifetime.parents,
+                str(supervisor.paths.aperture_lifetime))
 
-    # The process exit is scheduled behind the response, not in front of it.
-    c.check("the process was not ended before answering", asked["n"] == 0)
-    await asyncio.sleep(0.4)
-    c.check("...and is requested just after", asked["n"] == 1, str(asked["n"]))
+        # The process exit is scheduled behind the response, not in front of it.
+        c.check("the process was not ended before answering", asked["n"] == 0)
+        await asyncio.sleep(0.4)
+        c.check("...and is requested just after", asked["n"] == 1, str(asked["n"]))
 
     return c.summary()
 

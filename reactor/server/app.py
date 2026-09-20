@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import secrets
 from pathlib import Path
 from typing import Any
@@ -25,11 +26,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .data import DataFiles, create_data_router, merged_name
+from .hcpes_analysis import HcpesAnalysisFiles, create_hcpes_analysis_router
 from .. import instances
 from ..config import ReactorConfig, load_config
 from ..control.recipe import Recipe, build_ald_recipe, build_cvd_recipe
+from ..control.hcpes_model import CURRENT_PLAN_ID, capability_catalog as hcpes_capabilities
+from ..control.hcpes_store import LinkedSession
 from ..supervisor import Supervisor
 from ..dependencies import StatePaths, DeviceFactory
+from ..aperture_lifetime import ApertureLifetimeConflict, ApertureLifetimeError
 
 log = logging.getLogger("reactor.server")
 
@@ -172,6 +177,7 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     app = FastAPI(title="Reactor Interface", lifespan=lifespan)
     app.state.supervisor = sup
     app.include_router(create_data_router(DataFiles(sup.logger.dir)))
+    app.include_router(create_hcpes_analysis_router(HcpesAnalysisFiles(sup.logger.dir)))
 
     # Optional login (see BasicAuthMiddleware). Off unless REACTOR_PASSWORD is
     # set, so localhost development is unchanged; set it before exposing the
@@ -225,6 +231,34 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     @app.get("/api/state")
     async def get_state() -> dict[str, Any]:
         return sup.state()
+
+    @app.post("/api/aperture/replaced")
+    async def replace_aperture(
+        expected_aperture_id: str = Body(..., embed=True),
+        confirm: bool = Body(default=False, embed=True),
+    ) -> dict[str, Any]:
+        """Archive one aperture record.  This is bookkeeping, not a command."""
+        if confirm is not True:
+            raise HTTPException(
+                status_code=400,
+                detail="confirm New Aperture Installed before replacing the record",
+            )
+        before = sup.aperture_lifetime.snapshot()
+        was_current = (before.get("available")
+                       and before.get("current", {}).get("id")
+                       == expected_aperture_id)
+        try:
+            state = sup.aperture_lifetime.replace(expected_aperture_id)
+        except ApertureLifetimeConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ApertureLifetimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if was_current:
+            sup.report_event(
+                "maintenance",
+                "new HCPES aperture installed; prior lifetime archived",
+            )
+        return {"ok": True, "aperture_lifetime": state}
 
     @app.get("/api/events")
     async def get_events(limit: int = 20000) -> dict[str, Any]:
@@ -670,6 +704,125 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         tool primed; it was dropped with its button (2026-08-28)."""
         await sup.abort_prestart()
         return sup.prestart
+
+    # -- HCPES hollow-cathode characterization -------------------------- #
+
+    @app.get("/api/hcpes/capabilities")
+    async def hcpes_capability_catalog() -> dict[str, Any]:
+        """Typed targets shared by plan validation and the visual editor."""
+        return hcpes_capabilities(cfg)
+
+    @app.get("/api/hcpes/plans")
+    async def hcpes_plans() -> dict[str, Any]:
+        return sup.hcpes_plans.payload()
+
+    @app.post("/api/hcpes/plans")
+    async def hcpes_plan_create(payload: dict = Body(default={})) -> dict[str, Any]:
+        plan = sup.hcpes_plans.create(
+            str(payload.get("name") or "Untitled HCPES plan"),
+            from_id=str(payload.get("from_id") or CURRENT_PLAN_ID),
+        )
+        return plan.model_dump(mode="json")
+
+    @app.put("/api/hcpes/plans/{plan_id}")
+    async def hcpes_plan_save(
+        plan_id: str, payload: dict = Body(...),
+    ) -> dict[str, Any]:
+        if "plan" not in payload or "expected_revision" not in payload:
+            raise ValueError("save requires plan and expected_revision")
+        plan = sup.hcpes_plans.save(
+            plan_id,
+            payload["plan"],
+            expected_revision=int(payload["expected_revision"]),
+        )
+        return plan.model_dump(mode="json")
+
+    @app.delete("/api/hcpes/plans/{plan_id}")
+    async def hcpes_plan_delete(plan_id: str) -> dict[str, Any]:
+        if sup.hcpes_running and sup.hcpes.get("plan_id") == plan_id:
+            raise RuntimeError("cannot delete the active HCPES plan")
+        return sup.hcpes_plans.delete(plan_id).model_dump(mode="json")
+
+    @app.post("/api/hcpes/plans/{plan_id}/select")
+    async def hcpes_plan_select(plan_id: str) -> dict[str, Any]:
+        library = sup.hcpes_plans.select(plan_id)
+        return {"selected_id": library.selected_id}
+
+    @app.post("/api/hcpes/preview")
+    async def hcpes_preview(payload: dict = Body(default={})) -> dict[str, Any]:
+        plan_id = str(payload.get("plan_id")) if payload.get("plan_id") else None
+        return sup.hcpes_plans.preview(plan_id, payload.get("plan"))
+
+    @app.post("/api/hcpes/start")
+    async def hcpes_start(payload: dict = Body(...)) -> dict[str, Any]:
+        required = {"plan_id", "expected_revision", "session_id", "polarity_confirmed"}
+        missing = sorted(required - set(payload))
+        if missing:
+            raise ValueError(f"HCPES start is missing: {', '.join(missing)}")
+        session_id = str(payload["session_id"])
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", session_id) is None:
+            raise ValueError(
+                "HCPES session id must use 1-80 letters, digits, dot, dash, or underscore")
+        if payload["polarity_confirmed"] is not True:
+            raise RuntimeError("confirm the physical stage-lead polarity before starting")
+        resolved = sup.hcpes_plans.resolve_saved(
+            str(payload["plan_id"]), int(payload["expected_revision"]))
+        if resolved.plan.builtin:
+            raise RuntimeError("duplicate and save the protected HCPES template before starting")
+        campaign_id = (
+            str(payload["campaign_id"]) if payload.get("campaign_id") else None)
+        await sup.start_hcpes(
+            resolved,
+            session_id,
+            polarity_confirmed=True,
+            campaign_id=campaign_id,
+        )
+        return sup.hcpes
+
+    @app.post("/api/hcpes/stop")
+    async def hcpes_stop() -> dict[str, Any]:
+        await sup.stop_hcpes()
+        return sup.hcpes
+
+    @app.post("/api/hcpes/plans/{plan_id}/opposite")
+    async def hcpes_opposite_plan(
+        plan_id: str, payload: dict = Body(...),
+    ) -> dict[str, Any]:
+        if "expected_revision" not in payload or "source_session_id" not in payload:
+            raise ValueError(
+                "opposite-polarity clone requires expected_revision and source_session_id")
+        source_session_id = str(payload["source_session_id"])
+        hcpes_state = sup.hcpes
+        recording_state = sup.recording.status().get("hcpes", {})
+        if (hcpes_state.get("session_id") != source_session_id
+                or hcpes_state.get("phase") != "complete"
+                or hcpes_state.get("plan_id") != plan_id
+                or recording_state.get("session_id") != source_session_id
+                or recording_state.get("status") != "complete"):
+            raise RuntimeError(
+                "the source must be the most recently completed HCPES session")
+        directory = Path(str(recording_state.get("directory", ""))).resolve()
+        if directory.parent != sup.logger.dir.resolve():
+            raise RuntimeError("completed HCPES session is outside the configured data directory")
+        source = sup.hcpes_plans.get(plan_id)
+        source_session = LinkedSession(
+            session_id=source_session_id,
+            plan_id=plan_id,
+            polarity=source.stage_polarity,
+            directory_name=directory.name,
+        )
+        opposite, campaign = sup.hcpes_plans.create_opposite(
+            plan_id,
+            expected_revision=int(payload["expected_revision"]),
+            name=str(payload.get("name") or f"{source.name} opposite polarity"),
+            campaign_name=str(payload.get("campaign_name") or f"{source.name} polarities"),
+            source_session=source_session,
+            source_signature=str(hcpes_state.get("plan_signature") or ""),
+        )
+        return {
+            "plan": opposite.model_dump(mode="json"),
+            "campaign": campaign.model_dump(mode="json"),
+        }
 
     @app.post("/api/recipe/start")
     async def start_recipe(file: str = Body(..., embed=True)) -> dict[str, Any]:

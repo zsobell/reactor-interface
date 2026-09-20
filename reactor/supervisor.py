@@ -24,7 +24,9 @@ from .config import ReactorConfig
 from .control.recipe import Recipe, RecipeRunner
 from .control.prestart import PrestartController
 from .control.prestart_store import PrestartRecipeStore
+from .control.hcpes_store import HcpesPlanStore
 from .control.fill import FillController
+from .control.hcpes import HcpesController, HCPES_SUPPLIES
 from .control.sweep import SweepController
 from .control.run_coordinator import RunCoordinator, RunSession
 from .control.clock import Clock
@@ -38,6 +40,7 @@ from .devices.glassman_fl import GlassmanFL
 from .devices.keithley_2260b import Keithley2260B
 from .devices.instrument import ScpiInstrument
 from .dependencies import DeviceFactory, StatePaths
+from .aperture_lifetime import ApertureLifetime, ApertureLifetimeError
 from .devices.nidaq import AiSpec, DaqPlan, DoSpec, NiDaqBackend
 
 log = logging.getLogger("reactor.supervisor")
@@ -121,15 +124,22 @@ class Supervisor:
         self.cfg = cfg
         self.devices = devices or DeviceFactory()
         self.paths = paths or StatePaths(LABELS_PATH, VALVE_STATE_PATH, RUN_NAME_PATH)
+        self.aperture_lifetime = ApertureLifetime(
+            self.paths.aperture_lifetime, clock=self.clock)
+        self._aperture_error_reported = ""
         self.recipes = RecipeRunner(self, clock=self.clock)
         self.logger = DataLogger(cfg)
         self.recording = RecordingService(
             self.logger, lambda message: self._event("error", message, record=False),
             on_capture=lambda name: self._event("ellipsometer", f"acquisition start -> {name}"))
         self.runs = RunCoordinator(self, self.recipes, self.recording, clock=self.clock)
+        self._hcpes = HcpesController(self, self.recording, clock=self.clock)
+        self.hcpes_plans = HcpesPlanStore(self.paths.hcpes_plans, cfg)
+        self._hcpes_campaign_task: asyncio.Task | None = None
         self.prestart_recipes = PrestartRecipeStore(self.paths.prestart_recipes, cfg)
 
         self.snapshot: dict[str, Any] = {}
+        self._refresh_aperture_lifetime_sample()
         self.readings: dict[str, Reading] = {}
         self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY_SAMPLES)
         #: A long scrollback, because 250 was nowhere near enough: one run emits
@@ -404,6 +414,11 @@ class Supervisor:
                         f"ellipsometer subscriber -> {self.cfg.ellipsometer.host}:"
                         f"{self.cfg.ellipsometer.port} (read-only)")
 
+        # Connecting and loading remain read-only.  The first real supply poll
+        # below establishes whether timing can begin; startup never assumes the
+        # persisted last-commanded relay state proves that a beam is present.
+        self._observe_aperture_lifetime()
+
     async def stop(self) -> dict:
         """Concurrent callers share one teardown and its truthful receipt."""
         if self._stop_task is None:
@@ -442,6 +457,14 @@ class Supervisor:
         self._stop_steps = []
         self._running = False
         await self._teardown("abort run", self.abort_recipe(), timeout=12.0)
+        await self._teardown("stop HCPES characterization",
+                             self._hcpes.shutdown(), timeout=12.0)
+        if self._hcpes_campaign_task is not None:
+            await self._teardown(
+                "finish linked HCPES campaign",
+                asyncio.shield(self._hcpes_campaign_task),
+                timeout=5.0,
+            )
 
         # Pre-start gets the full ABORT, not just a stop. Operator decision,
         # 2026-08-25 (reactor-4h9), and the reasoning is his: "any server
@@ -501,6 +524,16 @@ class Supervisor:
         if self.ellipsometer is not None:
             await self._teardown("stop ellipsometer subscriber",
                                  self.ellipsometer.stop())
+
+        # Bank the final in-process interval before serial sessions disappear.
+        # If HV was intentionally left on outside a managed run, the record
+        # stops here and the next process reports an observation gap rather
+        # than inventing runtime while no program was watching the hardware.
+        self._observe_aperture_lifetime()
+        if not self.aperture_lifetime.checkpoint(force=True):
+            self._stop_steps.append({
+                "what": "save aperture lifetime", "ok": False,
+                "note": self.aperture_lifetime.persistence_error, "holds": ""})
 
         # Power supplies are included here purely to close their serial ports.
         # GlassmanFL.disconnect() deliberately commands nothing - it does NOT
@@ -731,6 +764,7 @@ class Supervisor:
         self.recording.submit_manual_sample(
             self.snapshot, self.recipes.progress, sampled_at=self.clock.wall()
         )
+        self._observe_aperture_lifetime()
 
     async def _current_loop(self) -> None:
         """Fast loop: poll the bench instruments (the DMM6500 sample-current) at
@@ -776,10 +810,11 @@ class Supervisor:
     async def _mfc_loop(self) -> None:
         """Poll the MFCs on their own cadence (site.mfc_hz).
 
-        Deliberately NOT part of _current_cycle: an MFC HTTP read takes
-        0.45-0.9 s on this hardware, so gathering them there throttled the whole
-        telemetry/logging tick to ~2.1 Hz no matter what current_hz said. Flow
-        readings are for display and the log; no control path waits on them.
+        Deliberately NOT part of _current_cycle: the periodic HTTP identity
+        refresh/fallback can take 0.45-0.9 s on this hardware, so gathering it
+        there previously throttled the whole telemetry/logging tick to ~2.1 Hz
+        no matter what current_hz said. Normal flow reads use fast Modbus.
+        Readings are for display and the log; no control path waits on them.
         """
         period = 1.0 / self.cfg.site.mfc_hz
         loop = asyncio.get_running_loop()
@@ -822,6 +857,10 @@ class Supervisor:
                 return_exceptions=True,
             ))
 
+        # Derived maintenance telemetry is refreshed at the same boundary as
+        # the row that consumes it.  snapshot() projects an active interval
+        # from the monotonic clock; it performs no hardware I/O or disk write.
+        aperture_lifetime_s = self._refresh_aperture_lifetime_sample()
         snap = self.snapshot
         self._last_cycle = self.clock.wall()
         self._cycle_count += 1
@@ -852,6 +891,9 @@ class Supervisor:
             # never blanked out of a row.
             "dosing": bool(self.valve_state.get(self.runs.session.dose_valve)),
             "beam_on": not self.valve_state.get(self.runs.session.plasma_switch, True),
+            # State rather than a device reading, so every EE-ALD/EE-CVD row
+            # carries it instead of freshness-blanking alternate samples.
+            "aperture_lifetime_s": aperture_lifetime_s,
             **{col: snap.get(key) for col, key in src.items()},
         }
         # Channels NOT measured since the previous row: written blank rather
@@ -881,6 +923,70 @@ class Supervisor:
     # ====================================================================== #
     #  Commands
     # ====================================================================== #
+
+    def _aperture_beam_observation(self) -> tuple[bool | None, str]:
+        """Return the already-known beam-capable state without device I/O.
+
+        Cleanup deliberately parks the plasma relay ungrounded after turning
+        HV off, so the relay alone is not a lifetime signal.  A grounded relay
+        proves the beam is off.  Otherwise at least one configured Glassman
+        must be connected and explicitly reporting HV on.
+        """
+        plasma_switch = self.runs.session.plasma_switch or "plasma_ground"
+        if self.valve_state.get(plasma_switch, True):
+            return False, "plasma ground is engaged"
+        glassmans = [
+            dev for ps_id, dev in self.supplies.items()
+            if getattr(getattr(dev, "cfg", None), "driver", "") == "glassman_fl"
+        ]
+        if not glassmans:
+            return None, "no configured Glassman HV status is available"
+        known = []
+        for dev in glassmans:
+            status = dev.status()
+            reading = self.readings.get(f"hv.{dev.id}.voltage")
+            if (not status.get("connected") or status.get("hv_on") is None
+                    or reading is None or not reading.ok):
+                continue
+            known.append(bool(status["hv_on"]))
+        if any(known):
+            return True, "Glassman HV on and plasma ground released"
+        if len(known) == len(glassmans):
+            return False, "Glassman HV is off"
+        return None, "Glassman HV status is disconnected or unknown"
+
+    def _refresh_aperture_lifetime_sample(self) -> float | None:
+        """Publish the tracker's projected seconds into sampled telemetry."""
+        state = self.aperture_lifetime.snapshot()
+        current = state.get("current") if state.get("available") else None
+        raw = current.get("runtime_s") if isinstance(current, dict) else None
+        value = (float(raw)
+                 if isinstance(raw, (int, float)) and not isinstance(raw, bool)
+                 else None)
+        self.snapshot["aperture_lifetime_s"] = value
+        return value
+
+    def _observe_aperture_lifetime(self, forced: bool | None = None,
+                                    reason: str = "") -> None:
+        if not self.aperture_lifetime.snapshot().get("available"):
+            self._refresh_aperture_lifetime_sample()
+            error = self.aperture_lifetime.load_error
+            if error and error != self._aperture_error_reported:
+                self._aperture_error_reported = error
+                self._event("error", f"aperture lifetime unavailable: {error}")
+            return
+        active, observed_reason = (
+            (forced, reason) if forced is not None
+            else self._aperture_beam_observation())
+        try:
+            self.aperture_lifetime.observe(active, reason=observed_reason)
+        except ApertureLifetimeError as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            if detail != self._aperture_error_reported:
+                self._aperture_error_reported = detail
+                self._event("error", f"aperture lifetime update failed: {detail}")
+        finally:
+            self._refresh_aperture_lifetime_sample()
 
     def set_soft_open_params(self, params: dict) -> dict[str, float]:
         """Take the soft-open pulse settings from the UI's saved run params.
@@ -951,7 +1057,9 @@ class Supervisor:
             await self.drive_fill_valve(valve_id, False)
             await asyncio.sleep(gap_s)
 
-    async def set_valve(self, valve_id: str, state: bool, *, reason: str = "") -> None:
+    async def set_valve(self, valve_id: str, state: bool, *, reason: str = "",
+                        _owner=None) -> None:
+        self._assert_hcpes_write("valve", valve_id, _owner)
         if valve_id not in self.valve_state:
             raise KeyError(f"unknown valve '{valve_id}'")
         if self.daq is None:
@@ -969,6 +1077,8 @@ class Supervisor:
                            "state": bool(state), "reason": reason})
         self._event("valve", f"{valve_id} -> {'OPEN' if state else 'closed'}"
                              + (f" ({reason})" if reason else ""))
+        if valve_id in {self.runs.session.plasma_switch, "plasma_ground"}:
+            self._observe_aperture_lifetime()
 
         # Requested by operator: closing an MFC's isolation valve zeroes that
         # MFC's setpoint (the mirror of the check in set_mfc_setpoint, which
@@ -977,7 +1087,7 @@ class Supervisor:
             for m in self.cfg.mfcs:
                 if m.isolation_valve == valve_id and m.id in self.mfcs:
                     with contextlib.suppress(Exception):
-                        await self.set_mfc_setpoint(m.id, 0.0)
+                        await self.set_mfc_setpoint(m.id, 0.0, _owner=_owner)
 
     # -- valve identification sweep ---------------------------------------- #
 
@@ -1007,6 +1117,8 @@ class Supervisor:
         on_s: float = 1.0, off_s: float = 1.0, gap_s: float = 3.0,
         start_index: int = 0,
     ) -> None:
+        if self.hcpes_running:
+            raise RuntimeError("HCPES characterization owns automated hardware control")
         await self._sweep.start(lines, reps=reps, on_s=on_s, off_s=off_s,
                                 gap_s=gap_s, start_index=start_index)
 
@@ -1016,7 +1128,8 @@ class Supervisor:
     def mark_sweep_line(self, valve_id: str = "", note: str = "") -> dict:
         return self._sweep.mark(valve_id, note)
 
-    async def set_mfc_setpoint(self, mfc_id: str, sccm: float) -> float:
+    async def set_mfc_setpoint(self, mfc_id: str, sccm: float, *, _owner=None) -> float:
+        self._assert_hcpes_write("mfc", mfc_id, _owner)
         dev = self.mfcs.get(mfc_id)
         if dev is None:
             raise KeyError(f"unknown MFC '{mfc_id}'")
@@ -1079,12 +1192,112 @@ class Supervisor:
         pulse_on_s: float = 0.1, pulse_off_s: float = 0.3,
         tolerance_frac: float = 0.2,
     ) -> None:
+        if self.hcpes_running:
+            raise RuntimeError("HCPES characterization owns all MFCs; fill is unavailable")
         await self._fill.start(valve=valve, gauge=gauge, target_torr=target_torr,
                                pulse_on_s=pulse_on_s, pulse_off_s=pulse_off_s,
                                tolerance_frac=tolerance_frac)
 
     async def stop_fill_regulation(self) -> None:
         await self._fill.stop()
+
+    # ====================================================================== #
+    #  HCPES characterization
+    # ====================================================================== #
+
+    @property
+    def hcpes(self) -> dict[str, Any]:
+        return self._hcpes.state
+
+    @property
+    def hcpes_running(self) -> bool:
+        return self._hcpes.running
+
+    def hcpes_admission_conflict(self) -> str:
+        """Why a new exclusive HCPES session cannot start, or an empty string."""
+        if not self.server_running:
+            return "server is stopping or not started"
+        if self.run_in_progress:
+            return "a recipe is already running"
+        if self.prestart.get("running") or self.prestart.get("cleanup_available"):
+            return "the main pre-start is active or still owns primed hardware"
+        if self.regulator.get("running"):
+            return "background fill regulation is running"
+        if self.sweep_running:
+            return "valve identification is running"
+        if (self._hcpes_campaign_task is not None
+                and not self._hcpes_campaign_task.done()):
+            return "a linked HCPES campaign is still being finalized"
+        return ""
+
+    async def start_hcpes(self, resolved, session_id: str, *,
+                          polarity_confirmed: bool,
+                          campaign_id: str | None = None) -> None:
+        if campaign_id is not None:
+            self.hcpes_plans.validate_campaign_start(
+                campaign_id, resolved.plan, session_id)
+        await self._hcpes.start(
+            resolved, session_id, polarity_confirmed=polarity_confirmed)
+        if campaign_id is not None:
+            self._hcpes_campaign_task = asyncio.create_task(
+                self._finish_hcpes_campaign(
+                    campaign_id, resolved.plan, session_id, self._hcpes.task),
+                name=f"hcpes-campaign-{campaign_id}",
+            )
+
+    async def stop_hcpes(self) -> None:
+        await self._hcpes.stop()
+
+    async def _finish_hcpes_campaign(
+        self, campaign_id: str, plan, session_id: str,
+        controller_task: asyncio.Task | None,
+    ) -> None:
+        """Create the immutable combined bundle after the opposite run closes."""
+        try:
+            if controller_task is not None:
+                await asyncio.shield(controller_task)
+            status = self.recording.status().get("hcpes", {})
+            if (status.get("session_id") != session_id
+                    or status.get("status") != "complete"):
+                self._event(
+                    "hcpes",
+                    f"linked campaign {campaign_id} remains incomplete after "
+                    f"session {session_id} ({status.get('status', 'unknown')})",
+                )
+                return
+            directory_name = Path(str(status["directory"])).name
+            campaign, directories, followup = self.hcpes_plans.campaign_candidate(
+                campaign_id,
+                plan=plan,
+                session_id=session_id,
+                directory_name=directory_name,
+            )
+            paths = await self.recording.create_hcpes_campaign(
+                campaign, directories, self.clock.wall())
+            self.hcpes_plans.mark_campaign_complete(campaign_id, followup)
+            self._event(
+                "hcpes",
+                f"linked polarity campaign complete: {paths.directory.name}",
+            )
+        except Exception as exc:
+            self._event(
+                "error",
+                f"could not finalize linked HCPES campaign {campaign_id}: "
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _assert_hcpes_write(self, kind: str, device_id: str, owner) -> None:
+        """Refuse external writes to controls leased by an HCPES session."""
+        if not self.hcpes_running or owner is self._hcpes:
+            return
+        owned = (
+            kind == "mfc"
+            or (kind == "supply" and device_id in HCPES_SUPPLIES)
+            or (kind == "valve" and device_id in {"ar_pneumatic", "plasma_ground"})
+        )
+        if owned:
+            raise RuntimeError(
+                f"HCPES characterization owns {kind} {device_id}; stop it before changing it")
 
     # ====================================================================== #
     #  Pre-start sequence
@@ -1111,7 +1324,7 @@ class Supervisor:
     def consume_prestart_primed(self) -> None:
         self._prestart.consume_primed()
 
-    async def hv_off(self, *, reason: str = "") -> None:
+    async def hv_off(self, *, reason: str = "") -> list[dict[str, Any]]:
         """Command every HV supply's output OFF.
 
         The only write this program makes to the plasma supply, and it only ever
@@ -1124,18 +1337,39 @@ class Supervisor:
         the supply into REMOTE until LOC/REM is pressed. A failure is reported,
         never raised: this runs inside run teardown.
         """
+        receipts: list[dict[str, Any]] = []
+        saw_hv_control = False
+        confirmed_off = True
         for ps_id, dev in self.supplies.items():
             off = getattr(dev, "hv_off", None)
             if off is None:
                 continue
+            saw_hv_control = True
+            # GlassmanFL.hv_off is intentionally a no-op while disconnected.
+            # That remains a successful cleanup receipt, but it is not an
+            # observation that HV actually went off.
+            connected_before = bool(dev.connected)
             try:
                 await off()
             except Exception as exc:
+                confirmed_off = False
+                receipts.append({"id": ps_id, "ok": False,
+                                 "detail": f"{type(exc).__name__}: {exc}"})
                 self._event("error",
                             f"HV off failed for {ps_id}: {type(exc).__name__}: {exc}")
             else:
+                confirmed_off = confirmed_off and connected_before
+                receipts.append({"id": ps_id, "ok": True, "detail": ""})
                 tail = f" ({reason})" if reason else ""
                 self._event("recipe", f"HV commanded off: {ps_id}{tail}")
+        if saw_hv_control and confirmed_off and all(row["ok"] for row in receipts):
+            # The acknowledgement is newer than status().last_reply, which is
+            # refreshed on the next slow poll.  Stop timing at the successful
+            # command instead of carrying the stale HV-on reply for ~0.5 s.
+            self._observe_aperture_lifetime(False, "HV off command acknowledged")
+        else:
+            self._observe_aperture_lifetime()
+        return receipts
 
     # -- operator control of a single supply -------------------------------- #
     #
@@ -1156,7 +1390,9 @@ class Supervisor:
             raise RuntimeError(f"{supply_id} is not connected")
         return dev
 
-    async def set_supply_voltage(self, supply_id: str, volts: float) -> dict[str, Any]:
+    async def set_supply_voltage(self, supply_id: str, volts: float, *,
+                                 _owner=None) -> dict[str, Any]:
+        self._assert_hcpes_write("supply", supply_id, _owner)
         dev = self._supply(supply_id)
         setter = getattr(dev, "set_voltage", None)
         if setter is None:
@@ -1167,7 +1403,9 @@ class Supervisor:
         self._event("command", f"{supply_id}: voltage set to {float(volts):g} V")
         return {"id": supply_id, "voltage": float(volts)}
 
-    async def set_supply_current(self, supply_id: str, amps: float) -> dict[str, Any]:
+    async def set_supply_current(self, supply_id: str, amps: float, *,
+                                 _owner=None) -> dict[str, Any]:
+        self._assert_hcpes_write("supply", supply_id, _owner)
         dev = self._supply(supply_id)
         setter = getattr(dev, "set_current", None)
         if setter is None:
@@ -1248,7 +1486,9 @@ class Supervisor:
         out.sort(key=lambda d: -d["off_frac"])
         return out
 
-    async def set_supply_output(self, supply_id: str, on: bool) -> dict[str, Any]:
+    async def set_supply_output(self, supply_id: str, on: bool, *,
+                                _owner=None) -> dict[str, Any]:
+        self._assert_hcpes_write("supply", supply_id, _owner)
         dev = self._supply(supply_id)
         setter = getattr(dev, "set_output", None)
         if setter is None:
@@ -1312,8 +1552,10 @@ class Supervisor:
         return True
 
     async def arm_sample_bias(self, supply_id: str, *, volts: float,
-                              polarity: int = 1, reason: str = "") -> dict[str, Any]:
+                              polarity: int = 1, reason: str = "",
+                              _owner=None) -> dict[str, Any]:
         """Arm one configured sample-bias supply without energising its output."""
+        self._assert_hcpes_write("supply", supply_id, _owner)
         dev = self._supply(supply_id)
         cfg = getattr(dev, "cfg", None)
         if not getattr(cfg, "sample_bias", False):

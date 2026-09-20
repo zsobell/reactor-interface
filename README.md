@@ -16,18 +16,21 @@ underneath is plain, diffable, and greppable.
 
 ## What this reactor is
 
-A ultra-high-vacuum chamber for electron-beam-assisted ALD. Confirmed by querying
+An ultra-high-vacuum chamber for electron-beam-assisted ALD. Confirmed by querying
 the hardware (not by trusting the old VI, which is full of dead code):
 
 - **Cold-cathode chamber gauge** (base ~3e-8 Torr) + **3 Baratrons** (10 Torr heads)
-- **Sample thermocouple**, a precursor-bubbler thermocouple, + two more
+- **Sample-stage, precursor-bubbler and bakeout thermocouples**, plus two
+  connected but not yet functionally identified thermocouples
 - **Keithley DMM6500** measuring sample current (the plasma/e-beam diagnostic)
-- **3 MKS G50 mass flow controllers** (Ar, H2, N2) — flow, temperature and
+- **3 MKS G50 mass flow controllers** (Ar plus generic MFC 1 / MFC 2
+  background channels) — flow, temperature and
   setpoint all over Modbus; HTTP only for full scale and identity
 - **Film Sense FS-1 in-situ ellipsometer**, read-only over its live TCP stream
 - **XP Glassman FL1.5F1.0 high-voltage plasma supply** (1500 V / 1.0 A) on USB,
-  monitor-only apart from a commanded **HV off** at the end of a run or on an
-  abort — its voltage, current and arc count are logged; it is set by hand
+  monitor-only apart from a commanded **HV off** during requested run,
+  pre-start and HCPES cleanup — its voltage, current and arc count are logged;
+  it is set by hand
 - **4 Keithley 2260B DC supplies** — stage bias, steering coils, grid bias,
   collimating coils. Logged, and their outputs switched on at pre-start
 - **Pneumatic valves** across two control boxes, incl. precursor manifolds, a
@@ -93,11 +96,13 @@ channels. The MFCs (network devices) and the DMM (USB) are unaffected.
 ## The GUI
 
 The control page is [index.html](reactor/server/static/index.html), with
-`control.css`, `control.js`, and the `live-charts.js` ES module. It uses vanilla
+`control.css` and `control.js` composing the transport, run-form, device-panel,
+live-chart, pre-start, HCPES and aperture-card ES modules. It uses vanilla
 JavaScript with no build step or external libraries. It talks to the
-server over a WebSocket — DAQ-bound readings (pressure, thermocouples) publish
-at `site.loop_hz` (2 Hz default), while sample current and MFC flow publish at
-the faster `site.current_hz` (5 Hz default) since they have no DAQ coupling.
+server over a WebSocket. DAQ and supply readings use `site.loop_hz` (2 Hz
+default), sample current and telemetry publish use `site.current_hz` (5 Hz),
+and the MFCs have their own `site.mfc_hz` loop (6 Hz), so a slow network read
+cannot stall the plasma diagnostic.
 
 Three tabs:
 
@@ -113,14 +118,22 @@ Three tabs:
   controls and output toggles, and the Glassman monitor (HV off at run end), the **ellipsometer** readout (stream
   state, points banked this acquisition, live fit), and primary-sensor detail.
 - **Diagnostics** — a valve-identification sweep tool, data logging, a
-  connections table (every device, the FS-1 included), and the event log. A
+  visual **HCPES characterization** grid builder/live monitor, connections
+  table (every device, the FS-1 included), and the event log. A
   header chip shows any condition that is wrong **right now** — fill pressure
   off setpoint, a dead plasma, a disconnected device — and clears itself the
   moment the condition does; the log is the history. Post-run ellipsometer sync
   lives on the Analysis page, next to the plots it feeds.
 
 Plus a separate **[Analysis page](reactor/server/static/analysis.html)** at
-`/analysis` for post-run plotting — a persistent grid of
+`/analysis` for post-run plotting — a persistent run-data grid and a dedicated
+HCPES session/campaign tab with parameter slices, heat maps, a run-sequence
+view and a raw excluded-interval inspector. HCPES current inputs, plots and
+hover details default to mA; explicitly named machine fields remain in A. The
+run-sequence view plots each result in the order conditions completed and shows
+the complete commanded condition on hover, making it useful for spotting
+long-term drift rather than interpreting it as a one-parameter response curve.
+The run-data tab provides
 property-vs-cycle plots over the run CSVs and the ellipsometry-merged file,
 and a drop box for **Auger (AES) spectra**, each of which gets its own
 autoscaled plot alongside them.
@@ -175,6 +188,22 @@ data/Mo-015/
 An unnamed run gets a folder named for its timestamp instead. The parameters
 file is plain text, not JSON, and opens in Notepad.
 
+HCPES characterization writes a separate immutable directory per acquisition:
+open `run_summary.txt` for an immediate overview, `timeline.csv` for a concise
+chronological trace, or `points.yaml` for readable condition-by-condition
+subsections. The same directory retains `manifest.yaml`, full `raw.jsonl`,
+filtered `qualified.jsonl`, spreadsheet-ready `points.csv`, and nested
+all-channel statistics in `point_channels.jsonl`.
+These HCPES records include cumulative `aperture_lifetime_s` alongside chamber
+pressure, stage temperature, and the other sampled reactor channels; the
+compact point table exposes its per-condition mean.
+After settling, each condition accepts the next user-selected number of fresh
+sample-current readings (default five) at the instrument telemetry rate. It
+adds no separate sample interval or collection-duration target.
+Linked positive/negative acquisitions remain separate and a campaign directory
+adds `campaign.yaml` plus signed `combined_points.csv`; it never rewrites either
+source session.
+
 How the run actually behaves is documented in **[docs/RUN_PROGRAM.md](docs/RUN_PROGRAM.md)**.
 
 ---
@@ -190,15 +219,17 @@ shutdown, persistence and failure behavior.
 ```
 config/reactor.yaml           hardware addresses, channels and gauge scaling
 config/recipes/*.yaml         optional file-based recipes
-config/{labels,valve_state,last_run,run_params,prestart_recipes}.json  operator metadata/settings
+config/{labels,valve_state,last_run,run_params,prestart_recipes,hcpes_plans,aperture_lifetime}.json  operator metadata/settings
 reactor/
   __main__.py                 CLI and single-process Uvicorn lifecycle
+  aperture_lifetime.py        versioned HCPES runtime and replacement history
   dependencies.py             device factories and per-instance persistence paths
   instances.py                per-instance server registry and Windows sibling shutdown
   config.py                   validated hardware/configuration models
   supervisor.py               hardware ownership, polling, commands and run admission
   telemetry.py                stable snapshots and bounded WebSocket fan-out
   recording.py                ordered file work on a dedicated recording thread
+  hcpes_recording.py          immutable raw/qualified/point/campaign bundles
   datalog.py                  manual/run/by-cycle CSVs and ellipsometer sidecars
   run_report.py               pure formatting of readable run parameters
   control/
@@ -208,6 +239,9 @@ reactor/
     prestart_model.py         pre-start recipe schema, capabilities and pure resolution
     prestart_store.py         atomic recipe-library persistence and revision checks
     prestart.py               capability-driven execution, progress and abort lifecycle
+    hcpes_model.py            typed parameter grids, estimates and polarity compatibility
+    hcpes_store.py            revisioned HCPES plans and linked campaigns
+    hcpes.py                  exclusive characterization, settling, recovery and cleanup
     run_coordinator.py        run admission, immutable session metadata and cleanup lifecycle
     contracts.py              typed capabilities consumed by controllers
     parameters.py             typed run and staged pre-start parameters
@@ -225,6 +259,7 @@ reactor/
   server/
     app.py                    HTTP control, lifecycle, authentication and pages
     data.py                   analysis/file routes, with worker-based file operations
+    hcpes_analysis.py         read-only HCPES bundle validation and analysis routes
     static/index.html         control page markup
     static/control.css        control-page styles
     static/control.js         page composition and telemetry rendering
@@ -232,9 +267,13 @@ reactor/
     static/control-run-forms.js  run parameters, persistence and mode hints
     static/control-device-panels.js  supply/MFC/valve panels and commands
     static/live-charts.js     live plotting and chart interaction
+    static/hcpes-editor.js    Diagnostics parameter-space builder and run monitor
+    static/aperture-card.js   aperture history card and confirmed replacement flow
     static/analysis.html      analysis page markup
     static/analysis.css       analysis-page styles
     static/analysis.js        finished-run and Auger analysis
+    static/analysis-plot.js   reusable run/Auger plot rendering and interaction
+    static/hcpes-analysis.js  HCPES slices, heat maps, trends and raw inspector
   testing/virtual_reactor.py   fake hardware, real application/controllers, temporary files
   testing/validate.py          focused/full Windows Python and Node validation
   testing/timing_prototype.py  isolated event-driven ALD exposure experiment
@@ -247,17 +286,18 @@ tests/                        python -m tests.run_all
 ```
 
 Rejected duplicate starts leave the active run's metadata unchanged. Disk write
-failures and recording-backlog overflow appear in the alert chip, telemetry and
-event log; they do not stop the experiment. Errors remain visible for the server
-session because a subsequent successful row cannot restore lost data. Run files
-are drained on completion and shutdown.
+failures and recording-backlog overflow appear in telemetry and the event log;
+the header alert shows one only while the owner of that exact recording stream
+is active. They do not stop the experiment, and their history remains available
+for the server session because a subsequent successful row cannot restore lost
+data. Run files are drained on completion and shutdown.
 
 ---
 
-## Current state (2026-08-11)
+## Current state (2026-09-20)
 
 **Working and verified against real hardware:** all inputs (pressure, 3
-Baratrons, stage TC, bubbler TC + 2 more TCs, DMM current), all 3 MFCs (read +
+Baratrons, stage/bubbler/bakeout TCs + 2 more TCs, DMM current), all 3 MFCs (read +
 write, flow holds while the program stays connected), all 11 valves
 (individually actuable, each on its own DAQmx line so one write can't flip a
 sibling), valve state persisted across restarts, editable display labels, and
@@ -269,28 +309,23 @@ tuned on real hardware** (`reactor-alz`, `reactor-2z1`, confirmed
 
 **Logic-verified against the virtual reactor (`tests/`), not yet confirmed on
 real hardware:** the **EE-CVD** run (continuous beam, dosing on top of it), the
-operator **pre-start** sequence, gas scheduling (single overlap field, freezes
-with the plasma), and the ±20% fill-pressure flag. Those tests run the real
+operator **pre-start** sequence, HCPES characterization and linked-polarity
+analysis, gas scheduling (single overlap field, freezes with the plasma), and
+the ±20% fill-pressure flag. Those tests run the real
 `Supervisor` and recipe engine against fake devices — they prove sequencing and
 reaction, never anything about the physical reactor. See
 [tests/README.md](tests/README.md) for exactly where that line falls.
 
 **Editable entirely in the UI:** MFC setpoints, every valve, run mode and all
-its parameters, and every valve/MFC/gauge display name.
+its parameters, pre-start recipes, HCPES parameter-space plans and settle/retry
+profiles, aperture replacement history, and every valve/MFC/gauge display name.
 
-**Known open items** (`bd ready` for the live list):
-- A P1 bug under investigation: TC readings shift, correlated with ~1.5 mA
-  sample current with no beam (`reactor-7n0`).
-- **A beam step now delivers exactly the exposure you ask for.** It used to run
-  `reignite_settle_s` longer (10.2 s for a 10 s step), so runs before and after
-  2026-08-21 are not directly comparable at the same `beam_s` — `reactor-a3r`
-  has the detail and the conversion.
-- EE-CVD cycle timing has not been audited the way EE-ALD was (`reactor-2ou`).
-- Remote *setpoint* control of the Glassman is deliberately not built; only
-  HV-off is wired (see docs/CONTROL_MODEL.md). HV-off at run end is confirmed
-  working on hardware.
-- The NI 9265 current-output module's purpose is unknown, deferred
-  (`reactor-5u2`, low priority — not needed for normal operation).
+**Known open items** (`bd ready` is authoritative): physical qualification of
+the HCPES characterization/recovery/cleanup sequence and the aperture-runtime
+observation logic remains separate from the passing fake-device suite. Remote
+*setpoint* control of the Glassman is deliberately not built; only HV-off is
+wired (see docs/CONTROL_MODEL.md). The NI 9265 current-output module's purpose
+is still unknown and deferred (`reactor-5u2`, low priority).
 
 Full history of what's shipped and what's still open lives in the **bd**
 issue tracker (`bd list --status=closed` / `bd ready`), not just in this file.
@@ -347,9 +382,9 @@ Two things worth knowing:
 ## What this program will and will not do to the reactor
 
 **[docs/CONTROL_MODEL.md](docs/CONTROL_MODEL.md)** is the complete answer. Summary:
-commands execute exactly as given. There are **no** software interlocks, limits,
-clamps, or automatic actions, except two the operator explicitly asked for: a
-gentle "flag" when precursor fill pressure drifts >20% off setpoint (warns,
-never stops), and the Ar MFC refusing a nonzero setpoint while its isolation
-valve is closed. This is deliberate: Zach is the sole arbiter of reactor
-behavior.
+commands execute exactly as given except for the narrow, operator-requested
+guards and sequences documented there: pressure/setpoint warnings, Ar
+isolation and soft-open behavior, ownership/admission rules, and explicit
+run/pre-start/HCPES cleanup. HCPES additionally owns every MFC and its four
+support supplies for the acquisition, with each background MFC either swept or
+held at zero. This is deliberate: Zach is the sole arbiter of reactor behavior.

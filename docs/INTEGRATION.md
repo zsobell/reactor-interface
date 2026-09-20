@@ -1,5 +1,10 @@
 # Master and architecture integration
 
+> Historical release record: this file describes the 2026-09 architecture
+> integration and its acceptance counts, not the current feature inventory.
+> Use [DEVELOPMENT.md](DEVELOPMENT.md) for current validation commands and
+> `bd ready` for current work.
+
 The integration branch combines master `2e39978` with architecture refactor
 `59cd2a1`, based on `7dab6b3`. Beads epic `reactor-r1z` owns the exhaustive
 100-path disposition ledger and release gates. The merge uses the refactor as

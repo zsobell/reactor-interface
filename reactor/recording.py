@@ -11,11 +11,21 @@ import asyncio
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from .datalog import DataLogger
+from .hcpes_recording import (
+    HcpesCompletionStatus,
+    HcpesCampaignPaths,
+    HcpesObservation,
+    HcpesPointSummary,
+    HcpesSessionWriter,
+    write_hcpes_campaign,
+)
 
 if TYPE_CHECKING:
+    from .control.hcpes_model import PolarityCampaign, ResolvedHcpesPlan
     from .control.recipe import Recipe, RecipeProgress
     from .devices.ellipsometer import EllipsometerPoint
 
@@ -35,6 +45,10 @@ class RecordingService:
         self._status = logger.status()
         self._run_name = logger.run_name
         self._last_ell_recv = 0.0
+        # Accessed and mutated only on the single recording worker.  The
+        # snapshot is copied for event-loop status reads.
+        self._hcpes_writer: HcpesSessionWriter | None = None
+        self._hcpes_status: dict[str, Any] = {"active": False}
         logger.on_error = self._error
 
     def _error(self, message):
@@ -172,6 +186,89 @@ class RecordingService:
     async def stop_run_export(self) -> None:
         await self.run(self.logger.stop_run_export)
 
+    # HCPES sessions use the same ordered worker as every other recorder.  One
+    # observation call writes raw and (when accepted) qualified data together.
+
+    def _start_hcpes_session(
+        self,
+        resolved: ResolvedHcpesPlan,
+        session_id: str,
+        started_at: float,
+    ) -> Path:
+        if self._hcpes_writer is not None:
+            raise RuntimeError("an HCPES recording session is already active")
+        writer = HcpesSessionWriter(
+            self.logger.dir, resolved, session_id, started_at)
+        self._hcpes_writer = writer
+        self._hcpes_status = writer.snapshot()
+        return writer.paths.directory
+
+    async def start_hcpes_session(
+        self,
+        resolved: ResolvedHcpesPlan,
+        session_id: str,
+        started_at: float,
+    ) -> Path:
+        return await self.run(
+            self._start_hcpes_session, resolved, session_id, started_at)
+
+    def _write_hcpes_observation(self, observation: HcpesObservation) -> None:
+        if self._hcpes_writer is None:
+            raise RuntimeError("no HCPES recording session is active")
+        self._hcpes_writer.write_observation(observation)
+        self._hcpes_status = self._hcpes_writer.snapshot()
+
+    def submit_hcpes_observation(self, observation: HcpesObservation) -> bool:
+        return self._submit(self._write_hcpes_observation, observation)
+
+    def _write_hcpes_point(self, summary: HcpesPointSummary) -> None:
+        if self._hcpes_writer is None:
+            raise RuntimeError("no HCPES recording session is active")
+        self._hcpes_writer.write_point(summary)
+        self._hcpes_status = self._hcpes_writer.snapshot()
+
+    def submit_hcpes_point(self, summary: HcpesPointSummary) -> bool:
+        return self._submit(self._write_hcpes_point, summary)
+
+    def _finish_hcpes_session(
+        self, status: HcpesCompletionStatus, ended_at: float, error: str,
+    ) -> None:
+        if self._hcpes_writer is None:
+            return
+        writer = self._hcpes_writer
+        try:
+            writer.finish(status, ended_at, error)
+        finally:
+            self._hcpes_status = writer.snapshot()
+            self._hcpes_writer = None
+
+    async def finish_hcpes_session(
+        self,
+        status: HcpesCompletionStatus,
+        ended_at: float,
+        error: str = "",
+    ) -> None:
+        await self.run(self._finish_hcpes_session, status, ended_at, error)
+
+    async def create_hcpes_campaign(
+        self,
+        campaign: PolarityCampaign,
+        session_directories: dict[str, Path],
+        created_at: float,
+    ) -> HcpesCampaignPaths:
+        """Derive one linked signed-axis bundle on the recording worker."""
+        resolved_directories = {
+            session_id: self.logger.dir / directory
+            for session_id, directory in session_directories.items()
+        }
+        return await self.run(
+            write_hcpes_campaign,
+            self.logger.dir,
+            campaign,
+            resolved_directories,
+            created_at,
+        )
+
     def _completed(self, future):
         self._pending -= 1
         future.exception()  # failures were reported by _invoke; consume the result
@@ -198,6 +295,7 @@ class RecordingService:
     def status(self):
         status = copy.deepcopy(self._status)
         status["pending_samples"] = self._pending
+        status["hcpes"] = copy.deepcopy(self._hcpes_status)
         if self._queue_error:
             status["errors"]["queue"] = self._queue_error
         return status
@@ -207,7 +305,7 @@ class RecordingService:
 
     async def close(self):
         if self._close_task is None:
-            future = self._schedule(self.logger.close, (), {})
+            future = self._schedule(self._close_all, (), {})
             self._closed = True  # stop accepting samples before awaiting the drain
             self._close_task = asyncio.create_task(self._finish_close(future))
         await asyncio.shield(self._close_task)
@@ -217,3 +315,18 @@ class RecordingService:
             await asyncio.wrap_future(future)
         finally:
             await asyncio.to_thread(self._executor.shutdown, wait=True)
+
+    def _close_all(self) -> None:
+        failure = None
+        if self._hcpes_writer is not None:
+            try:
+                self._finish_hcpes_session(
+                    "interrupted", time.time(),
+                    "recording service closed while active")
+            except Exception as exc:
+                failure = exc
+        try:
+            self.logger.close()
+        finally:
+            if failure is not None:
+                raise failure

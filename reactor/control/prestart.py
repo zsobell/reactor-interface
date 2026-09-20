@@ -70,6 +70,8 @@ class PrestartController:
                 "a pre-start session is still active - start the run or abort it first")
         if self.sup.run_in_progress:
             raise RuntimeError("a run is in progress - abort it first")
+        if getattr(self.sup, "hcpes_running", False):
+            raise RuntimeError("HCPES characterization is running - stop it first")
 
         # Capture the recipe before scheduling the task. Validation and value
         # resolution happen inside _run before its first hardware command, so a

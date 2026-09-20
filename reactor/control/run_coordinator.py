@@ -72,6 +72,8 @@ class RunCoordinator:
         if getattr(self.host, "prestart_cleanup_required", False):
             raise RuntimeError(
                 "pre-start did not complete - abort its cleanup before starting a run")
+        if getattr(self.host, "hcpes_running", False):
+            raise RuntimeError("HCPES characterization is running - stop it first")
         self._cancelled = False
 
     async def start(self, recipe: Recipe, params: dict | None = None) -> Recipe:

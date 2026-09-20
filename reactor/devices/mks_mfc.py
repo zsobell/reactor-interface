@@ -26,9 +26,9 @@ that conclusion was wrong in two ways worth remembering. It swept with FC 3 only
 so `0x4000` answered "illegal data address" and looked like the wrong address -
 it is the right address, on the wrong function code. And it nearly labelled
 `0xC000` "flow" because that register sat at 0.1 while idle; `0xC000` is
-`Opt_Kp`, a PID gain, which is why it stayed at 0.1 while the Ar unit really
-flowed 5 sccm. Verified 2026-08-17: FC 4 `0x4000` tracks `iobuf.flow_sensor` on
-all three units, to 4 decimal places and including sign.
+`Opt_Kp`, a PID gain, which is why it did not follow actual flow. Verified
+2026-08-17: FC 4 `0x4000` tracks `iobuf.flow_sensor` on all three units, to 4
+decimal places and including sign.
 
 Reading over Modbus is also ~600x faster: ~1 ms against 450-900 ms for one
 `iobuf.js` GET. That is not a micro-optimisation - the HTTP poll was slower than
@@ -40,20 +40,20 @@ the whole telemetry tick and used to throttle every logged sample to ~2 Hz.
 `iobuf.js`, `deviceid.js`, `device_html.js` and `mfc.js` are plain
 `name = value;` files behind the web UI; fetching them is a GET, so read-only.
 
-    iobuf.full_scale = 29.000000     sccm  <-- differs per device AND per gas
+    iobuf.full_scale = <selected-gas engineering full scale in sccm>
 
 **Full scale must be read, not configured**, and it is not in the Modbus map.
-`0xC006` is called `Opt_FullScale` and is NOT it: it reads 100.0 on all three
-units, whose real full scales are 29 / 10 / 50 sccm. Full scale changes with the
-gas, and every flow percentage and setpoint limit scales with it, so it is read
+`0xC006` is called `Opt_FullScale` and is NOT it: it does not follow the
+selected-gas engineering scale. Full scale changes with the gas, and every flow
+percentage and setpoint limit scales with it, so it is read
 over HTTP at connect and on the slow identity refresh - never in the hot path.
 
 --------------------------------------------------------------------------
   SETPOINT UNITS
 --------------------------------------------------------------------------
 `0xA000` holds the setpoint in ENGINEERING UNITS (sccm), not percent of full
-scale. Confirmed: with full scale at 29 sccm the register read exactly 5.0 for a
-5 sccm setpoint; 5 % of 29 would be 1.45.
+scale. Direct write/readback testing confirmed it returns the commanded sccm
+value rather than a full-scale percentage.
 """
 
 from __future__ import annotations
@@ -252,7 +252,7 @@ class MksMfc(Device):
         # to throttle every logged sample; the same values over Modbus take
         # ~1 ms. Full scale still comes from HTTP (see _read_modbus): it is not
         # in the Modbus map, and 0xC006 "Opt_FullScale" is NOT it - it reads
-        # 100.0 on all three units whose real full scales are 29/10/50 sccm.
+        # a fixed value rather than the selected-gas engineering scale.
         if self._client is not None:
             got = await self._read_modbus(p)
             if got is not None:

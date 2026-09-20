@@ -79,9 +79,10 @@ programs able to drive a valve line.
 
 ### 2. The NI 9211 is slow
 
-Roughly 14 samples/second **total**, shared across its four channels. Reading one
-thermocouple at 2 Hz is comfortable. Reading all four, plus pressure, plus the
-DMM at 1 NPLC, may not keep up.
+Roughly 14 samples/second **total per NI 9211**, shared across that module's
+four channels. The current map reads three thermocouples on Mod4 and two on
+Mod2 at 2 Hz, below each module's aggregate limit. Pressure and the DMM are on
+different devices and polling paths.
 
 If the control loop starts falling behind, drop `site.loop_hz` to `1.0` — which is
 approximately what the LabVIEW version ran at anyway.
@@ -92,14 +93,16 @@ approximately what the LabVIEW version ran at anyway.
 
 `python -m tools.discover_hardware --survey-inputs`, 2026-07-30.
 
-### Thermocouples — three connected out of eight
+### Thermocouples — five connected out of eight
 
 | Channel | Reading | Role |
 |---|---|---|
 | **`cDAQ1Mod4/ai1`** | **21.1 °C** | **sample stage** — confirmed, see below |
+| `cDAQ1Mod4/ai0` | process-dependent | precursor bubbler — confirmed live 2026-08-03 |
+| `cDAQ1Mod4/ai2` | process-dependent | bakeout temperature 1 — connected 2026-09-11 |
 | `cDAQ1Mod2/ai0` | 26.33 °C | connected, unidentified (`aux.tc_a`) |
 | `cDAQ1Mod2/ai1` | 24.54 °C | connected, unidentified (`aux.tc_b`) |
-| the other five | 2385 °C | open circuit — nothing attached |
+| the other three | 2385 °C | open circuit — nothing attached |
 
 ### No millivolts from a thermocouple channel
 
@@ -152,46 +155,50 @@ thermocouple module, not four heater zones.
 On a dedicated subnet; this PC is `192.168.2.220` on the same NIC that carries
 the campus address.
 
-| ID | Gas | Address | Reachable |
+| ID | Stable role | Address | Reachable |
 |---|---|---|---|
 | `ar` | Ar — HCPES | `192.168.2.221:502` | ✅ unit id 1 |
-| `mfc1` | MFC 1 — reactive background (H2 originally, NH3 since 2026-09) | `192.168.2.222:502` | ✅ unit id 1 |
-| `mfc2` | MFC 2 — reactive background (N2) | `192.168.2.223:502` | ✅ unit id 1 |
+| `mfc1` | MFC 1 — configurable background channel | `192.168.2.222:502` | ✅ unit id 1 |
+| `mfc2` | MFC 2 — configurable background channel | `192.168.2.223:502` | ✅ unit id 1 |
 
 These are **MKS G50** units (product `G_MFC_A_Modbus`), each with its own small
 web server. Verified from the devices themselves:
 
-| ID | Gas | **Full scale** | Model | Serial | GCF | Valve |
-|---|---|---|---|---|---|---|
-| `ar` | 4: Ar | **29 sccm** | GM50A013501RBM020 | 21999844 | 1.39 | N.C. |
-| `mfc1` | 2: NH3 (was 4: H2) | **7 sccm** | GM50A013101RMM020 | 23291683 | 1.00 | N.C. |
-| `mfc2` | 32: N2 | **50 sccm** | GM50A013501RBM020 | 21999843 | 1.00 | N.C. |
+| ID | Model | Serial | Valve |
+|---|---|---|---|
+| `ar` | GM50A013501RBM020 | 21999844 | N.C. |
+| `mfc1` | GM50A013101RMM020 | 23291683 | N.C. |
+| `mfc2` | GM50A013501RBM020 | 21999843 | N.C. |
 
-All calibrated on N2. All valves normally closed.
+Gas selection, correction factor and full scale are device state, not durable
+channel identity. MFC 1 and MFC 2 change service; the UI follows the gas and
+full scale currently reported by each device. All valves are normally closed.
 
 #### Full scale comes over HTTP, not Modbus
 
 Flow, temperature and setpoint are read over Modbus (see the register map
 below). **Full scale is not in the Modbus map and must come over HTTP.**
-`0xC006` is called `Opt_FullScale` and is *not* it — it reads 100.0 on all three
-units, whose real full scales are 29 / 10 / 50 sccm.
+`0xC006` is called `Opt_FullScale` and is *not* the selected-gas engineering
+full scale reported by the web interface.
 
 Each device serves `iobuf.js`, `deviceid.js`, `device_html.js` and `mfc.js` —
 plain `name = value;` files behind the web UI. Fetching them is a GET, so it is
 read-only, and it is authoritative in a way a guessed register is not:
 
 ```
-iobuf.flow_sensor = 5.000144      actual flow, sccm
-iobuf.setpoint    = 5.000000      commanded setpoint, sccm
-iobuf.full_scale  = 29.000000     sccm
-iobuf.temp_sensor = 35.78         body temperature
+iobuf.flow_sensor = <actual flow, sccm>
+iobuf.setpoint    = <commanded setpoint, sccm>
+iobuf.full_scale  = <selected-gas full scale, sccm>
+iobuf.temp_sensor = <body temperature, degC>
 deviceid.over_temp / open_circuit / interface_error    health flags
 deviceid.conn_list                who is currently connected
 ```
 
-**Full scale is read live, every poll, and is never configured.** It changes with
-the selected gas — 29 / 10 / 50 sccm across these three — so a hardcoded value
-would silently mis-scale every flow number the moment a gas was changed.
+**Full scale is read on connect and refreshed with the slower HTTP identity
+read (every twentieth MFC poll by default); it is never configured.** The fast
+flow/temperature/setpoint path stays on Modbus. Full scale changes with the
+selected gas, so a hardcoded or documented snapshot would silently become
+wrong after a gas change.
 
 #### The Modbus register map — from the device itself
 
@@ -234,8 +241,8 @@ decimal places, including sign. Reading is also ~**600× faster** — ~1 ms vers
 #### Setpoint units — an ambiguity worth knowing about
 
 `0xA000` holds the setpoint in **engineering units (sccm), not percent of full
-scale**. With full scale at 29 sccm, a 5 sccm setpoint read back as exactly 5.0;
-5 % of 29 would be 1.45.
+scale**. Direct write/readback testing confirmed that the register returns the
+commanded sccm value rather than a full-scale percentage.
 
 Note how nearly this was missed: if full scale had been 100 sccm, sccm and percent
 would be numerically identical and no reading could have told them apart. Code
@@ -281,9 +288,10 @@ the post-run merge onto the reactor clock, and the merged file end to end.
 ### Glassman FL high-voltage supply
 
 The plasma supply. **XP Glassman FL1.5F1.0**, rated **1500 V / 1.0 A**, on USB
-into its rear-panel **J3**. Firmware revision 02. **Read-only** — the reactor
-polls its voltage/current/arc-count monitors at 2 Hz and logs them, and never
-commands it; Zach sets levels by hand on the front panel.
+into its rear-panel **J3**. Firmware revision 02. The reactor polls its
+voltage/current/arc-count monitors at 2 Hz and logs them. Zach sets levels and
+turns HV on by hand; the software's only command type is **HV OFF**, used by the
+requested run, pre-start and HCPES cleanup paths.
 
 Confirmed on the wire 2026-08-21:
 
@@ -342,13 +350,17 @@ Firmware is not uniform: the stage bias runs `01.84.20190904`, the other three
 
 As found 2026-08-21, all outputs off, with Zach's working setpoints dialled in
 — 20 V/0.5 A, 30.07 V/3.7 A, 100 V/0.2 A, 150 V/2.5 A. This program logs their
-voltage and current, switches their outputs on at pre-start and off at run end,
-and sets the sample-bias voltage only. Current limits are never touched. Full
-account in **[KEITHLEY_2260B.md](KEITHLEY_2260B.md)**.
+voltage and current. Normal ALD/CVD pre-start switches the three support outputs
+on, brackets the stage-bias output with the beam, and never writes a current
+limit. HCPES is deliberately different: its reviewed plan programs stage/grid
+voltage and steering/collimating current, turns all four outputs on for the
+acquisition, and turns all four off during cleanup. HCPES operator controls use
+mA; the driver and machine files retain A. Full account in
+**[KEITHLEY_2260B.md](KEITHLEY_2260B.md)**.
 
 ### End-to-end read verified
 
-Running `python -m reactor` against the live chamber: pressure, all three
+Running `python -m reactor` against the live chamber: pressure, all five
 thermocouples, the Baratrons, the DMM and all three MFCs read, and the log files
 write correctly.
 

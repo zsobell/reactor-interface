@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 PYTHON_GROUPS: dict[str, tuple[str, ...]] = {
     "control": (
+        "test_aperture_lifetime",
+        "test_aperture_integration",
         "test_clock_domains",
         "test_controller_contracts",
         "test_cycle_numbering",
@@ -29,6 +31,8 @@ PYTHON_GROUPS: dict[str, tuple[str, ...]] = {
         "test_fill_controller",
         "test_glassman_fl",
         "test_gas_simultaneous",
+        "test_hcpes_model",
+        "test_hcpes_controller",
         "test_hv_and_prestart_abort",
         "test_keithley_supplies",
         "test_mfc_interlock",
@@ -52,6 +56,7 @@ PYTHON_GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "recording": (
         "test_file_naming",
+        "test_hcpes_recording",
         "test_merge_acceptance",
         "test_recording_api",
         "test_recording_errors",
@@ -60,10 +65,13 @@ PYTHON_GROUPS: dict[str, tuple[str, ...]] = {
         "test_sample_freshness",
     ),
     "api": (
+        "test_aperture_api",
         "test_analysis_layout_api",
         "test_data_routes",
         "test_ellipsometer_decode",
         "test_ellipsometer_merge",
+        "test_hcpes_api",
+        "test_hcpes_analysis",
         "test_telemetry",
         "test_prestart_recipe_api",
         "test_server_shutdown",

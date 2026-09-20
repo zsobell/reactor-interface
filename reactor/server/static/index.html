@@ -401,6 +401,28 @@
       <div class="body"><div id="supplies" class="tilegrid"></div></div>
     </section>
 
+    <section class="card" id="apertureCard">
+      <h2>HCPES aperture lifetime
+        <span class="grow"></span><span id="apertureStatus" class="aperture-status">—</span>
+      </h2>
+      <div class="body aperture-layout">
+        <div class="aperture-current">
+          <div class="aperture-runtime"><span id="apertureHours">—</span><small>hours</small></div>
+          <div class="kv"><span>Installed / tracking since</span><span id="apertureInstalled">—</span></div>
+          <div class="kv"><span>Last valid observation</span><span id="apertureObserved">—</span></div>
+          <div class="note" id="apertureNote"></div>
+          <button id="newApertureBtn" class="mini" disabled>New Aperture Installed</button>
+        </div>
+        <div class="aperture-history">
+          <div class="subhead">Replacement history</div>
+          <table>
+            <thead><tr><th>Installed</th><th>Replaced</th><th>Runtime</th></tr></thead>
+            <tbody id="apertureHistory"><tr><td colspan="3" class="hint">No replacements recorded</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <!-- Chamber pressure and the stage TC used to sit in a separate "Primary
          sensor detail" card. They belong with the sensors they describe, which
          is what these two cards now are - hence the names. -->
@@ -481,6 +503,12 @@
 
 <!-- =========================== DIAGNOSTICS =============================== -->
 <section class="pane hidden" data-pane="diag">
+
+  <details class="card hcpes-card" id="hcpesCard" open>
+    <summary><span class="stitle">HCPES characterization</span>
+      <span class="sum">build and run a hollow-cathode parameter-space sweep</span></summary>
+    <div class="body" id="hcpesEditor"></div>
+  </details>
 
   <div class="diagtop">
     <!-- The event log is the thing actually read on this tab, so it gets the

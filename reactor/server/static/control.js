@@ -3,6 +3,8 @@ import {createControlTransport, SHUTDOWN_HINT} from "./control-transport.js";
 import {createRunForms} from "./control-run-forms.js";
 import {createDevicePanels} from "./control-device-panels.js";
 import {createPrestartEditor} from "./prestart-editor.js";
+import {createHcpesEditor} from "./hcpes-editor.js";
+import {createApertureCard} from "./aperture-card.js";
 "use strict";
 
 /* ---------------------------------------------------------------------------
@@ -121,6 +123,8 @@ function render(s){
   devicePanels.supplies(s);
   devicePanels.mfcs(s); devicePanels.valves(s); valveId(s); recipe(s); logging(s); conns(s);
   ellipsometer(s); events(s);
+  hcpesEditor.updateStatus(s.hcpes || {});
+  apertureCard.render(s.aperture_lifetime || {});
 
   charts.update(s);
   runForms.updateGasNames(s.mfcs || []);
@@ -133,6 +137,7 @@ function render(s){
     current: s.snapshot["inst.ammeter"],                  // sample current
     prec_pressure: s.snapshot["gauge.prec1_dose"],        // precursor dose pressure
     stage_temp: s.snapshot["stage.temp"],
+    aperture_lifetime_s: s.snapshot.aperture_lifetime_s,
     bubbler_temp: s.snapshot["aux.bubbler"],
     dosing: vopen[rv.dose] ? 1 : 0,
     // beam ON = plasma-ground relay OFF (valve closed)
@@ -529,6 +534,7 @@ function recordRun(s, sample){
       t: sample.t, stage_temp: sample.stage_temp, current: sample.current,
       dosing: sample.dosing, prec_pressure: sample.prec_pressure,
       pressure: sample.pressure,
+      aperture_lifetime_s: sample.aperture_lifetime_s,
     });
   }
   // on transition out of a running state into done/idle/error, export
@@ -547,12 +553,13 @@ function recordRun(s, sample){
   lastRunState = r.state;
 }
 function downloadRun(rd){
-  const cols = ["elapsed_s","stage_temp_c","sample_current_a","precursor_dosing",
+  const cols = ["elapsed_s","aperture_lifetime_s","stage_temp_c","sample_current_a","precursor_dosing",
                 "precursor_pressure_torr","chamber_pressure_torr"];
   const fmt = v => (v==null||Number.isNaN(v)) ? "" : v;
   const lines = [cols.join(",")];
   for(const r of rd.rows){
-    lines.push([ (r.t - rd.startT).toFixed(3), fmt(r.stage_temp), fmt(r.current),
+    lines.push([ (r.t - rd.startT).toFixed(3), fmt(r.aperture_lifetime_s),
+                 fmt(r.stage_temp), fmt(r.current),
                  fmt(r.dosing), fmt(r.prec_pressure), fmt(r.pressure) ].join(","));
   }
   const stamp = new Date(rd.startT*1000).toISOString().slice(0,19).replace(/[:T]/g,"-");
@@ -669,11 +676,26 @@ function tr(a,b,c,state,detail){
 // the operator had no way to tell a live problem from a stale one. Events are
 // history and the log keeps them; this is the live condition, and it clears the
 // moment the condition does. Display only - it never changes reactor behaviour.
-function liveAlerts(s){
+export function liveAlerts(s){
   const out = [];                            // {msg, bad} - bad = red, else amber
   const r = s.recipe || {};
-  for(const [stream, error] of Object.entries(s.logging?.errors || {}))
-    out.push({msg:`Recording failure (${stream}): ${error}`, bad:true});
+  const logging = s.logging || {};
+  // DataLogger intentionally latches errors for the Diagnostics history. A
+  // latched failure is not necessarily wrong RIGHT NOW, so only promote it to
+  // the header while the owner of that exact stream is active; once that
+  // stream closes, the chip clears and the error remains in the log.
+  const activeRecordingChannels = new Set();
+  if(logging.active) for(const channel of ["manual", "extended"])
+    activeRecordingChannels.add(channel);
+  if(logging.run_export?.active) for(const channel of ["run", "bycycle", "events", "parameters"])
+    activeRecordingChannels.add(channel);
+  if(logging.ellipsometer?.active) for(const channel of ["ellipsometer", "ellipsometer move"])
+    activeRecordingChannels.add(channel);
+  if(logging.hcpes?.active) for(const channel of ["worker", "queue"])
+    activeRecordingChannels.add(channel);
+  for(const [stream, error] of Object.entries(logging.errors || {}))
+    if(activeRecordingChannels.has(stream))
+      out.push({msg:`Recording failure (${stream}): ${error}`, bad:true});
 
   if(r.state === "error" && r.error) out.push({msg: r.error, bad: true});
 
@@ -846,6 +868,11 @@ function prestartBaseValues(){
 const prestartEditor = createPrestartEditor({$, document, windowObj:window,
   fetchImpl:fetch, toast, confirmImpl:(...args)=>confirm(...args),
   promptImpl:(...args)=>prompt(...args), getBaseValues:prestartBaseValues});
+const hcpesEditor = createHcpesEditor({$, windowObj:window, fetchImpl:fetch, toast,
+  confirmImpl:(...args)=>confirm(...args), promptImpl:(...args)=>prompt(...args)});
+const apertureCard = createApertureCard({$, document, post, toast,
+  confirmImpl:(...args)=>confirm(...args)});
+apertureCard.mount();
 
 // ---------------------------------------------------------------- tabs
 // Panes are display:none when inactive, which zeroes the canvases' size - so
@@ -1059,6 +1086,8 @@ let bootstrapComplete = false;
   if(pageDisposed) return;
   await prestartEditor.mount();
   if(pageDisposed) return;
+  await hcpesEditor.mount();
+  if(pageDisposed) return;
   runForms.applyMode();
   runForms.refreshRunName(false);
   $("shutdownHint").textContent = SHUTDOWN_HINT;
@@ -1080,6 +1109,8 @@ window.addEventListener("pagehide", event => {
   devicePanels.dispose();
   runForms.dispose();
   prestartEditor.dispose();
+  hcpesEditor.dispose();
+  apertureCard.dispose();
   disposeTransport();
 });
 window.addEventListener("pageshow", event => {

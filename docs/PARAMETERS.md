@@ -60,11 +60,11 @@ Abort retains the captured raw identifiers so it undoes the same valve/MFC selec
 ## Validation
 
 ```sh
-python3 -m tests.test_parameters
-python3 -m tests.test_prestart_invalid
-python3 -m tests.test_prestart
-python3 -m tests.test_run_admission
-python3 -m tests.test_run_export
+python -m tests.test_parameters
+python -m tests.test_prestart_invalid
+python -m tests.test_prestart
+python -m tests.test_run_admission
+python -m tests.test_run_export
 ```
 
 `test_parameters` compares complete recipes and parameter report text against

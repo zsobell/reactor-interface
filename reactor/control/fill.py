@@ -30,6 +30,8 @@ class FillController:
         another when it comes back - it never stops the run.
         """
         await self.stop()
+        if getattr(self.host, "hcpes_running", False):
+            raise RuntimeError("HCPES characterization owns all MFCs; fill is unavailable")
         if not self.host.has_valve(valve):
             raise KeyError(f"unknown valve '{valve}'")
         self.stop_event.clear()
