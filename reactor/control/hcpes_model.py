@@ -133,19 +133,38 @@ class StabilityProfile(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    trend_window_s: float = Field(gt=0)
     stable_window_s: float = Field(gt=0)
     maximum_wait_s: float = Field(gt=0)
     max_drift_a_per_min: float = Field(gt=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_trend_window(cls, value):
+        """Migrate saved profiles that predate a separate RoC window."""
+        if not isinstance(value, dict) or "trend_window_s" in value:
+            return value
+        data = dict(value)
+        # Five seconds is the establishment default.  Preserve enough of an
+        # older profile's deadline for the stable hold that now begins only
+        # after its first complete trend estimate.
+        stable = float(data.get("stable_window_s", 5.0))
+        maximum = float(data.get("maximum_wait_s", stable + 5.0))
+        available = maximum - stable
+        data["trend_window_s"] = min(5.0, stable, max(available, 1e-9))
+        return data
+
     @model_validator(mode="after")
     def _window_fits_deadline(self) -> "StabilityProfile":
-        if self.maximum_wait_s < self.stable_window_s:
-            raise ValueError("stability maximum wait must cover the full stable window")
+        if self.maximum_wait_s < self.stable_window_s + self.trend_window_s:
+            raise ValueError(
+                "stability maximum wait must cover the full trend and stable windows")
         return self
 
 
 def _establishment_profile() -> StabilityProfile:
     return StabilityProfile(
+        trend_window_s=5.0,
         stable_window_s=20.0,
         maximum_wait_s=60.0,
         max_drift_a_per_min=0.0001,
@@ -154,6 +173,7 @@ def _establishment_profile() -> StabilityProfile:
 
 def _parameter_profile() -> StabilityProfile:
     return StabilityProfile(
+        trend_window_s=3.0,
         stable_window_s=3.0,
         maximum_wait_s=10.0,
         max_drift_a_per_min=0.0003,
@@ -214,12 +234,34 @@ class HcpesPlan(BaseModel):
     stage_polarity: Literal[-1, 1] = 1
     settings: HcpesSettings = Field(default_factory=HcpesSettings)
     axes: list[SweepAxis]
+    initial_setpoints: dict[str, float] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _unique_targets(self) -> "HcpesPlan":
         targets = [axis.target for axis in self.axes]
         if len(targets) != len(set(targets)):
             raise ValueError("axis targets must be unique")
+        editable_targets = {
+            axis.target for axis in self.axes if not axis.locked
+        }
+        if not self.initial_setpoints:
+            # Legacy plans established plasma at their first Cartesian point.
+            # Materialize those same values as the independent startup block.
+            self.initial_setpoints = {
+                axis.target: axis.value_at(0)
+                for axis in self.axes if not axis.locked
+            }
+        supplied = set(self.initial_setpoints)
+        if supplied != editable_targets:
+            missing = sorted(editable_targets - supplied)
+            extra = sorted(supplied - editable_targets)
+            raise ValueError(
+                "initial setpoints must match every non-locked axis; "
+                f"missing={missing}, extra={extra}")
+        self.initial_setpoints = {
+            target: _finite_nonnegative(value, f"initial_setpoints.{target}")
+            for target, value in self.initial_setpoints.items()
+        }
         return self
 
 
@@ -349,6 +391,35 @@ class ResolvedHcpesPlan:
     def point_count(self) -> int:
         return math.prod(axis.count for axis in self.active_axes)
 
+    @property
+    def initial_setpoints(self) -> dict[str, float]:
+        """Complete startup command map, including locked background zeroes."""
+        return {
+            axis.target: (
+                0.0 if axis.locked
+                else self.plan.initial_setpoints[axis.target]
+            )
+            for axis in self.plan.axes
+        }
+
+    @property
+    def initial_transition_changes(self) -> int:
+        first = next(self.iter_points()).setpoints
+        return sum(
+            first[axis.target] != self.plan.initial_setpoints[axis.target]
+            for axis in self.active_axes
+        )
+
+    @property
+    def sweep_parameter_change_count(self) -> int:
+        """Sweep writes after startup, including startup-to-point-one changes."""
+        prefix = 1
+        changes_after_first = 0
+        for axis in self.active_axes:
+            prefix *= axis.count
+            changes_after_first += 0 if axis.count == 1 else prefix - 1
+        return changes_after_first + self.initial_transition_changes
+
     def iter_points(self) -> Iterator[SweepPoint]:
         active = self.active_axes
         selected: dict[str, float] = {}
@@ -373,13 +444,8 @@ class ResolvedHcpesPlan:
 
     @property
     def parameter_change_count(self) -> int:
-        """Writes needed when only changed active setpoints are written."""
-        prefix = 1
-        changes = 0
-        for axis in self.active_axes:
-            prefix *= axis.count
-            changes += 1 if axis.count == 1 else prefix
-        return changes
+        """All startup and sweep writes when unchanged targets are skipped."""
+        return len(self.active_axes) + self.sweep_parameter_change_count
 
     def estimate(self) -> NominalEstimate:
         samples = self.point_count * self.plan.settings.qualified_samples
@@ -391,18 +457,24 @@ class ResolvedHcpesPlan:
             # Initial setpoints are programmed before plasma exists and do not
             # consume per-change settling time.  Startup has one current gate;
             # only later changed parameters use the fixed delay.
-            later_changes = max(0, self.parameter_change_count - len(self.active_axes))
-            fixed = later_changes * self.plan.settings.parameter_settle_s
-            best_case = establishment.stable_window_s + fixed
+            fixed = (self.sweep_parameter_change_count
+                     * self.plan.settings.parameter_settle_s)
+            best_case = (establishment.trend_window_s
+                         + establishment.stable_window_s + fixed)
             timeout_case = establishment.maximum_wait_s + fixed
         else:
             # Current mode replaces per-change delays with one current gate per
             # later condition after all changed setpoints have been applied.
-            later_points = max(0, self.point_count - 1)
-            best_case = (establishment.stable_window_s
-                         + later_points * parameter.stable_window_s)
+            gated_points = max(0, self.point_count - 1)
+            if self.initial_transition_changes:
+                gated_points += 1
+            best_case = (
+                establishment.trend_window_s
+                + establishment.stable_window_s
+                + gated_points * (
+                    parameter.trend_window_s + parameter.stable_window_s))
             timeout_case = (establishment.maximum_wait_s
-                             + later_points * parameter.maximum_wait_s)
+                             + gated_points * parameter.maximum_wait_s)
         return NominalEstimate(
             points=self.point_count,
             parameter_changes=self.parameter_change_count,
@@ -416,6 +488,7 @@ class ResolvedHcpesPlan:
         return {
             "schema_version": self.plan.schema_version,
             "prestart_recipe_id": self.plan.prestart_recipe_id,
+            "initial_setpoints": self.plan.initial_setpoints,
             "settings": self.plan.settings.model_dump(mode="json"),
             "axes": [axis.model_dump(mode="json", exclude_none=True)
                      for axis in self.plan.axes],

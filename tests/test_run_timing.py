@@ -34,7 +34,10 @@ from tests._support import Checker, autotick, wait_for
 TOLERANCE_S = 0.10
 
 P = dict(
-    cycles=4, dose_s=0.10, pump_a_s=0.20, beam_s=0.60, pump_b_s=0.10,
+    # The 50 ms dose matches the current EE-ALD UI default.  The other
+    # intervals are shortened only to make ten independent scheduler cycles
+    # practical in the software regression suite.
+    cycles=10, dose_s=0.05, pump_a_s=0.20, beam_s=0.60, pump_b_s=0.10,
     dose_pressure_torr=0.02, min_current_a=5.0e-4, gas_overlap_s=0.0,
     reignite_settle_s=0.20,
 )
@@ -89,6 +92,45 @@ async def main() -> int:
             c.check("no systematic overrun (mean is not biased long)",
                     mean - NOMINAL_CYCLE_S <= TOLERANCE_S,
                     f"mean drift {(mean - NOMINAL_CYCLE_S)*1000:+.0f} ms/cycle")
+
+        # The cycle aggregate above could conceal a short dose followed by a
+        # long pump (or the reverse).  The fake DAQ records every requested
+        # valve transition, letting this test characterize the actual scheduler
+        # intervals without pretending to measure a physical valve.  Ignore
+        # setup's initial grounding command and retain only complete cycles;
+        # pump B is bounded by the next dose's opening.
+        edges = [(when, valve, state) for when, valve, state in vr.daq.do_writes
+                 if valve in {"prec1", "plasma_ground"}]
+        doses = [when for when, valve, state in edges
+                 if valve == "prec1" and state]
+        dose_ends = [when for when, valve, state in edges
+                     if valve == "prec1" and not state]
+        beam_starts = [when for when, valve, state in edges
+                       if valve == "plasma_ground" and not state]
+        beam_ends = [when for when, valve, state in edges
+                     if valve == "plasma_ground" and state
+                     and beam_starts and when >= beam_starts[0]]
+        count = min(len(doses), len(dose_ends), len(beam_starts), len(beam_ends))
+        phase_samples = {
+            "dose": [dose_ends[i] - doses[i] for i in range(count)],
+            "pump A": [beam_starts[i] - dose_ends[i] for i in range(count)],
+            "beam": [beam_ends[i] - beam_starts[i] for i in range(count)],
+            "pump B": [doses[i + 1] - beam_ends[i] for i in range(count - 1)],
+        }
+        expected_steps = {"dose": P["dose_s"], "pump A": P["pump_a_s"],
+                          "beam": P["beam_s"], "pump B": P["pump_b_s"]}
+        c.section("1b. every EE-ALD phase tracks its own requested duration")
+        for name, samples in phase_samples.items():
+            if not samples:
+                c.check(f"{name} intervals were captured", False, "no complete interval")
+                continue
+            errors = [sample - expected_steps[name] for sample in samples]
+            mean_error = sum(errors) / len(errors)
+            worst_error = max(abs(error) for error in errors)
+            c.check(f"{name} within {TOLERANCE_S*1000:.0f} ms per step",
+                    worst_error <= TOLERANCE_S,
+                    f"n={len(samples)}, mean {mean_error*1000:+.1f} ms, "
+                    f"worst |error| {worst_error*1000:.1f} ms")
 
         # The whole cycling phase, which is what the countdown promises.
         if cycle_marks:

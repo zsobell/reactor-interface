@@ -46,7 +46,7 @@ class HcpesObservation(BaseModel):
     captured_at: float
     elapsed_s: float = Field(ge=0)
     phase: Literal[
-        "setup", "parameter_change", "settle", "acquire", "pause",
+        "setup", "initial_parameter", "parameter_change", "settle", "acquire", "pause",
         "plasma_loss", "reignite", "recovery", "inaccessible", "cleanup",
         "complete", "abort", "error",
     ]
@@ -109,6 +109,7 @@ class HcpesStabilityGate(BaseModel):
     profile: Literal["establishment", "parameter_change"]
     outcome: Literal["settled", "timeout", "plasma_lost"]
     elapsed_s: float = Field(ge=0)
+    trend_window_s: float | None = Field(default=None, gt=0)
     stable_window_s: float = Field(gt=0)
     maximum_wait_s: float = Field(gt=0)
     max_drift_a_per_min: float = Field(gt=0)
@@ -204,6 +205,8 @@ class HcpesSessionWriter:
         self.point_rows = 0
         self.point_channel_rows = 0
         self.timeline_rows = 0
+        self.initial_settled: bool | None = None
+        self.initial_stability_gates: list[dict[str, Any]] = []
         self._summaries: list[HcpesPointSummary] = []
         folder = Path(root).resolve() / f"HCPES-{_safe_id(session_id)}"
         if folder.exists():
@@ -249,7 +252,8 @@ class HcpesSessionWriter:
             "sequence", "elapsed_s", "iso_time", "point_index", "phase", "reason",
             "changed_target", "requested_value", "requested_unit", "stage_current_mA", "qualified",
             "qualified_index", "exclusion_reason", "plasma_present",
-            "stability_profile", "retry_remaining_s", "settle_remaining_s",
+            "stability_profile", "stage_current_rate_mA_per_min",
+            "retry_remaining_s", "settle_remaining_s",
         ]
         self._timeline_csv = csv.DictWriter(
             self._timeline_fh, fieldnames=self._timeline_fields)
@@ -326,6 +330,12 @@ class HcpesSessionWriter:
             data["session"].update(ended_at_epoch=ended_at, ended_at=_iso(ended_at))
         if error:
             data["session"]["error"] = error
+        if self.initial_settled is not None:
+            data["initial_plasma"] = {
+                "setpoints": self.resolved.initial_setpoints,
+                "settled": self.initial_settled,
+                "stability_gates": self.initial_stability_gates,
+            }
         return data
 
     def _write_manifest(self, *, ended_at: float | None = None, error: str = "") -> None:
@@ -348,8 +358,6 @@ class HcpesSessionWriter:
             (item for item in self.resolved.capabilities if item.target == target), None)
         if capability is None:
             return value, ""
-        if capability.quantity == "current" and isinstance(value, (int, float)):
-            return float(value) * 1000, "mA"
         return value, capability.unit
 
     def _readable_setpoints(self, setpoints: dict[str, float]) -> dict[str, Any]:
@@ -392,6 +400,9 @@ class HcpesSessionWriter:
         self._raw_fh.flush()
         self.raw_rows += 1
         flags = observation.flags
+        if "initial_settled" in flags:
+            self.initial_settled = bool(flags["initial_settled"])
+            self.initial_stability_gates = list(flags.get("stability_gates", []))
         current = observation.measurements.get("inst.ammeter")
         requested_value, requested_unit = self._display_setpoint(
             observation.changed_target, observation.requested_value)
@@ -414,6 +425,11 @@ class HcpesSessionWriter:
             "exclusion_reason": observation.exclusion_reason,
             "plasma_present": flags.get("plasma_present", ""),
             "stability_profile": flags.get("stability_profile", ""),
+            "stage_current_rate_mA_per_min": (
+                float(flags["observed_drift_a_per_min"]) * 1000
+                if isinstance(flags.get("observed_drift_a_per_min"), (int, float))
+                and not isinstance(flags.get("observed_drift_a_per_min"), bool)
+                else ""),
             "retry_remaining_s": flags.get("retry_remaining_s", ""),
             "settle_remaining_s": flags.get("settle_remaining_s", ""),
         })
@@ -592,7 +608,16 @@ class HcpesSessionWriter:
             f"Plan: {self.resolved.plan.name} (revision {self.resolved.plan.revision})",
             f"Stage wiring orientation: {'positive' if self.resolved.plan.stage_polarity > 0 else 'negative'}",
             "",
+            "INITIAL PLASMA CONDITION (NOT A SWEEP POINT)",
+            *(f"  {target}: {value:g} {self._display_setpoint(target, value)[1]}"
+              for target, value in self.resolved.initial_setpoints.items()),
+            f"  Establishment result: " + (
+                "pending" if self.initial_settled is None
+                else "settled" if self.initial_settled else "timed out / never settled"),
+            "  Qualified sweep samples collected here: none",
+            "",
             "PLASMA ESTABLISHMENT / RE-ESTABLISHMENT",
+            f"  RoC rolling window: {settings.establishment.trend_window_s:g} s",
             f"  Stable window: {settings.establishment.stable_window_s:g} s",
             f"  Maximum settle wait: {settings.establishment.maximum_wait_s:g} s",
             f"  Maximum drift: {settings.establishment.max_drift_a_per_min * 1000:g} mA/min",
@@ -603,6 +628,7 @@ class HcpesSessionWriter:
             "BETWEEN PARAMETER CHANGES",
             f"  Mode: {settings.condition_settle_mode}",
             f"  Timed delay: {settings.parameter_settle_s:g} s per changed parameter",
+            f"  Current RoC rolling window: {settings.parameter_change.trend_window_s:g} s",
             f"  Current stable window: {settings.parameter_change.stable_window_s:g} s",
             f"  Current maximum settle wait: {settings.parameter_change.maximum_wait_s:g} s",
             f"  Current maximum drift: {settings.parameter_change.max_drift_a_per_min * 1000:g} mA/min",

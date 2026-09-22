@@ -69,9 +69,11 @@ async def main() -> int:
     resolved = resolve_plan(plan, cfg)
     defaults = HcpesSettings()
     c.check("approved HCPES defaults",
-            defaults.establishment.stable_window_s == 20
+            defaults.establishment.trend_window_s == 5
+            and defaults.establishment.stable_window_s == 20
             and defaults.establishment.maximum_wait_s == 60
             and defaults.establishment.max_drift_a_per_min == 0.0001
+            and defaults.parameter_change.trend_window_s == 3
             and defaults.parameter_change.stable_window_s == 3
             and defaults.parameter_change.maximum_wait_s == 10
             and defaults.parameter_change.max_drift_a_per_min == 0.0003
@@ -92,20 +94,44 @@ async def main() -> int:
     c.check("locked background flows remain explicit zeroes",
             all(point.setpoints["mfc:mfc1"] == 0
                 and point.setpoints["mfc:mfc2"] == 0 for point in points))
+    c.check("legacy plans migrate startup values from point one",
+            resolved.initial_setpoints == points[0].setpoints
+            and plan.initial_setpoints["mfc:ar"] == 1
+            and "mfc:mfc1" not in plan.initial_setpoints)
     estimate = resolved.estimate()
     c.check("preview counts changed-only writes and qualified samples",
             estimate.parameter_changes == 16
             and estimate.qualified_samples == 40
-            and estimate.best_case_s == 53
+            and estimate.best_case_s == 58
             and estimate.startup_timeout_case_s == 93,
             str(estimate.model_dump()))
     current_mode = plan.model_copy(deep=True)
     current_mode.settings.condition_settle_mode = "current"
     current_estimate = resolve_plan(current_mode, cfg).estimate()
     c.check("current-mode estimate uses independent establishment and parameter gates",
-            current_estimate.best_case_s == 41
+            current_estimate.best_case_s == 67
             and current_estimate.startup_timeout_case_s == 130,
             str(current_estimate.model_dump()))
+    independent = HcpesPlan.model_validate({
+        **plan_payload(),
+        "initial_setpoints": {
+            "mfc:ar": 5,
+            "supply:stage_bias": 20,
+            "supply:collimating": 1.5,
+            "supply:steering": 0.4,
+            "supply:grid_bias": 100,
+        },
+    })
+    independent_resolved = resolve_plan(independent, cfg)
+    c.check("independent startup adds the point-one transition",
+            independent_resolved.initial_transition_changes == 2
+            and independent_resolved.parameter_change_count == 18
+            and independent_resolved.estimate().best_case_s == 64,
+            str(independent_resolved.estimate().model_dump()))
+    independent.settings.condition_settle_mode = "current"
+    c.check("current settling gates a changed first sweep point",
+            resolve_plan(independent, cfg).estimate().best_case_s == 73
+            and resolve_plan(independent, cfg).estimate().startup_timeout_case_s == 140)
 
     huge = SweepAxis(target="mfc:ar", mode="linear",
                      start=0, stop=1_000_000, step=1)
@@ -120,14 +146,23 @@ async def main() -> int:
         lambda: resolve_plan(missing, cfg), "missing HCPES axis"))
     locked_ar = plan.model_copy(deep=True)
     locked_ar.axes[0] = SweepAxis(target="mfc:ar", mode="locked_zero")
+    locked_ar.initial_setpoints.pop("mfc:ar")
     c.check("Ar cannot use background locked-zero mode", raises(
         lambda: resolve_plan(locked_ar, cfg), "cannot be locked"))
     c.check("partial linear endpoints are rejected", raises(
         lambda: SweepAxis(target="mfc:ar", mode="linear",
                           start=0, stop=1, step=0.3), "exactly"))
+    c.check("initial block must cover every active control", raises(
+        lambda: HcpesPlan.model_validate({
+            **plan_payload(), "initial_setpoints": {"mfc:ar": 5},
+        }), "must match every non-locked axis"))
     c.check("stability window must fit maximum wait", raises(
         lambda: StabilityProfile(
             stable_window_s=40, maximum_wait_s=30,
+            max_drift_a_per_min=0.0001), "cover the full"))
+    c.check("deadline includes trend acquisition plus stable hold", raises(
+        lambda: StabilityProfile(
+            trend_window_s=3, stable_window_s=2, maximum_wait_s=4,
             max_drift_a_per_min=0.0001), "cover the full"))
     migrated = HcpesSettings.model_validate({
         "stability_window_s": 7,
@@ -136,6 +171,7 @@ async def main() -> int:
     })
     c.check("saved flat settings migrate into establishment only",
             migrated.establishment.stable_window_s == 7
+            and migrated.establishment.trend_window_s == 2
             and migrated.establishment.maximum_wait_s == 9
             and migrated.establishment.max_drift_a_per_min == 0.002
             and migrated.parameter_change == HcpesSettings().parameter_change)

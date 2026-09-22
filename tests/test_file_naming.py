@@ -69,7 +69,7 @@ async def main() -> int:
         tmp = data_dir.parent
         for const in ("valves", "labels", "run_name", "run_params", "analysis_layout",
                       "instances", "prestart_recipes", "hcpes_plans",
-                      "aperture_lifetime"):
+                      "aperture_lifetime", "lifecycle_events"):
             path = getattr(vr.sup.paths, const)
             c.check(f"{const} is redirected into the temp dir",
                     _has_parent_directory(path, tmp), str(path))

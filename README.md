@@ -56,9 +56,11 @@ To watch it live instead, run it with a console:
 .venv\Scripts\python.exe -m reactor --port 8000
 ```
 
-To pick up a code change, use **Diagnostics → Shut down server** (it also kills
-any other reactor server still running, so nothing is left holding the DAQ or
-the serial ports) and start it again from the shortcut.
+To pick up a code change, use **Diagnostics → Restart server**. It performs the
+same complete shutdown as **Shut down server**, starts one waiting replacement
+without opening another browser window, and confirms the replacement version in
+the existing tab. If a restart cannot be confirmed, check `server.log` before
+trying again.
 
 ---
 
@@ -128,8 +130,8 @@ Three tabs:
 Plus a separate **[Analysis page](reactor/server/static/analysis.html)** at
 `/analysis` for post-run plotting — a persistent run-data grid and a dedicated
 HCPES session/campaign tab with parameter slices, heat maps, a run-sequence
-view and a raw excluded-interval inspector. HCPES current inputs, plots and
-hover details default to mA; explicitly named machine fields remain in A. The
+view and a raw excluded-interval inspector. Measured stage current and its drift
+use mA/mA/min; steering and collimating supply settings remain in A. The
 run-sequence view plots each result in the order conditions completed and shows
 the complete commanded condition on hover, making it useful for spotting
 long-term drift rather than interpreting it as a one-parameter response curve.
@@ -190,16 +192,27 @@ file is plain text, not JSON, and opens in Notepad.
 
 HCPES characterization writes a separate immutable directory per acquisition:
 open `run_summary.txt` for an immediate overview, `timeline.csv` for a concise
-chronological trace, or `points.yaml` for readable condition-by-condition
-subsections. The same directory retains `manifest.yaml`, full `raw.jsonl`,
+chronological trace including the stage-current trend, or `points.yaml` for
+readable condition-by-condition subsections. The same directory retains
+`manifest.yaml`, full `raw.jsonl`,
 filtered `qualified.jsonl`, spreadsheet-ready `points.csv`, and nested
 all-channel statistics in `point_channels.jsonl`.
 These HCPES records include cumulative `aperture_lifetime_s` alongside chamber
 pressure, stage temperature, and the other sampled reactor channels; the
 compact point table exposes its per-condition mean.
+Each saved plan has a separate initial-plasma condition. The controller
+establishes and settles the plasma there, collects no qualified sweep samples,
+then moves to point 1 using the selected parameter-change settling rule. This
+lets a deliberately difficult first sweep point remain in the grid without
+making startup depend on it.
 After settling, each condition accepts the next user-selected number of fresh
 sample-current readings (default five) at the instrument telemetry rate. It
 adds no separate sample interval or collection-duration target.
+The displayed and recorded rate is a spike-resistant trend over a separate
+rolling window (default 5 s for establishment and 3 s after parameter changes).
+It remains “measuring” until enough fresh readings exist. The longer stability
+timer counts how long that rolling rate stays below its limit, and the point
+summary includes the trend through the final accepted reading.
 Linked positive/negative acquisitions remain separate and a campaign directory
 adds `campaign.yaml` plus signed `combined_points.csv`; it never rewrites either
 source session.

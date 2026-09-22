@@ -179,7 +179,7 @@ Supervisor integration with fake devices and isolated file/number processing.
 | `test_glassman_fl.py` | The HV supply's protocol codec, checked against byte strings printed in the vendor manual (and two captured off the real supply) rather than against itself, plus the readings reaching the snapshot and the run CSV |
 | `test_run_timing.py` | ALD and off-grid CVD cycle durations within a 0.1 s software budget; countdown accuracy, plasma-loss freeze, and CVD pump pause/resume/abort. Written after Mo-015 ran 124 s long on 150 cycles |
 | `test_merge_acceptance.py` | Event/error stream open/write/flush/close faults, report rewrite failure, nested diagnostic snapshots and bias scheduling across wall-clock jumps |
-| `test_server_shutdown.py` | The Shut down button actually stopping the process (2026-08-28): a WebSocket that never closes must not park the stop - uvicorn's connection drain is unbounded by default and runs BEFORE the lifespan shutdown, so one sleeping Tailscale client left the old server holding the DAQ and COM8-COM12 while the next one bound port 8000 and found nothing. Also checks the entry point defines every global it uses, after the 20 s hard deadline turned out to die on a NameError |
+| `test_server_shutdown.py` | Shutdown/restart lifecycle: a WebSocket that never closes cannot park bounded teardown; the entry point always exits; the Windows parent waiter observes a real child process; restart requires one non-browser-opening child's readiness handshake before teardown; launch failures stay logged and retryable; the API identifies the replacement target/version for same-tab confirmation. |
 | `test_param_migration.py` | The 2026-09-09 channel rename's escape hatch: run parameters saved as `h2_gas_*`, or posted by a browser still holding the old page, are renamed onto `mfc1_gas_*` on every read path with their values intact - and the old names never come back. Drives the real FastAPI app over raw ASGI |
 | `test_pause.py` | Pause stopping the ACTION as well as the clock (2026-09-01): a wait step's countdown holding still, the dose valve closing and reopening with the rest of its pulse intact, the beam relay grounding and re-striking with the exposure budget frozen across it - and the two things pause deliberately does NOT touch, the sample bias and the scheduled gases |
 | `test_live_params.py` | Changing run parameters mid-run (2026-09-01): a gas flow reaching the MFC immediately rather than at the next window, cycle length and the countdown re-derived, the fill regulator retuned rather than restarted, a lowered cycle count finishing the cycle in progress and stopping, every edit landing in the parameters report's CHANGES section - plus setpoint-vs-measurement warnings appearing, clearing themselves, and never refusing a value |
@@ -222,8 +222,8 @@ test no longer requires a pre-existing repository `data/` directory.
 | `test_recording_errors.py` | Failed header/row writes, flushes and closes produce telemetry/events, close sibling handles, and leave control usable |
 | `test_recording_worker.py` | Stalled disk does not block acquisition/commands; queued data is copied; backlog is bounded and overflow visible; accepted rows drain before close |
 | `test_hcpes_model.py` | Versioned HCPES grids validate every configured gas/supply target, expand lazily in reviewed order, estimate duration, and link only compatible polarity sessions |
-| `test_hcpes_controller.py` | Exclusive HCPES ownership, restricted prestart, independent retry/establishment/parameter timers, repeated recovery after settling dropout, drift timeout, next-fresh-reading qualified collection with aperture lifetime telemetry, inaccessible continuation, cleanup, and cancellation-safe recording preparation |
-| `test_hcpes_recording.py` | Raw and qualified streams stay ordered and durable; plain-text summary, concise timeline CSV and point-section YAML stay readable (operator currents in mA while explicit machine fields retain A); point tables retain gate/telemetry metadata including aperture lifetime seconds; linked polarity campaigns preserve both zero-bias rows |
+| `test_hcpes_controller.py` | Exclusive HCPES ownership, independent initial-plasma condition, restricted prestart, retry/establishment/parameter timers, repeated recovery after settling dropout, long-baseline spike-resistant drift, point drift through the final qualified reading, next-fresh-reading collection with aperture lifetime telemetry, inaccessible continuation, cleanup, and cancellation-safe recording preparation |
+| `test_hcpes_recording.py` | Raw and qualified streams stay ordered and durable; plain-text summary, concise timeline CSV and point-section YAML stay readable (stage current in mA; steering/collimating settings in A); point tables retain gate/telemetry metadata including aperture lifetime seconds; linked polarity campaigns preserve both zero-bias rows |
 | `test_hcpes_api.py` | Server-owned plans are revisioned and previewed without hardware; only a saved reviewed revision launches; completed opposite-polarity runs automatically derive a signed linked campaign |
 | `test_hcpes_analysis.py` | Read-only analysis discovers completed/partial sessions and linked campaigns, types point telemetry with provenance, preserves signed zero ordering, reconstructs condition-completion order, exposes filtered raw intervals, and flags incompatible sources |
 | `test_data_routes.py` | HTTP file listing, containment and merging retain their contracts; analysis work does not block concurrent requests |
@@ -248,14 +248,17 @@ bootstrap and chart integration, and verifies the HTTPS WebSocket URL.
 confirmed replacement behavior, unavailable/active guards and teardown.
 `node tests/js/analysis-plot.mjs` pins exact auto-fit extents and independent
 nearest-finite sample selection for sparse/asynchronous plotted series.
-`node tests/js/hcpes-editor.mjs` checks plan editing, mA/A boundary conversion,
+`node tests/js/hcpes-editor.mjs` checks plan editing, stage-current versus
+support-supply unit boundaries,
 settle/recovery help, progress/ETA and retry naming. `node
-tests/js/hcpes-analysis.mjs` checks signed ordering, mA display conversion,
+tests/js/hcpes-analysis.mjs` checks signed ordering, stage-current mA display,
+support-supply A display, heat-map colour mapping,
 full-condition hover data, filters, slices and heat cells. `node
 tests/js/prestart-editor.mjs` checks visual pre-start recipe editing.
 
 `test_dependencies.py` checks simultaneous instance isolation, read-only startup,
-real polling task startup/shutdown, and fake-device disconnection.
+real polling task startup/shutdown, fake-device disconnection, and DMM current
+responses normalized from explicit A/mA/µA forms into base amperes.
 
 ## Maintenance regression checks
 

@@ -504,12 +504,6 @@
 <!-- =========================== DIAGNOSTICS =============================== -->
 <section class="pane hidden" data-pane="diag">
 
-  <details class="card hcpes-card" id="hcpesCard" open>
-    <summary><span class="stitle">HCPES characterization</span>
-      <span class="sum">build and run a hollow-cathode parameter-space sweep</span></summary>
-    <div class="body" id="hcpesEditor"></div>
-  </details>
-
   <div class="diagtop">
     <!-- The event log is the thing actually read on this tab, so it gets the
          big top-left slot. Valve identification, which is a one-off bring-up
@@ -563,11 +557,10 @@
             </tr></thead>
             <tbody id="conns"></tbody>
           </table>
-          <!-- Restarting picks up changed code. It is a graceful shutdown +
-               re-exec, not a kill, so Supervisor.stop() runs normally. The
-               consequences are spelled out in the confirm dialog rather than
-               here, because that is where they get read. -->
+          <!-- Restart uses the same full shutdown receipt, then the original
+               page reconnects to one replacement process in this same tab. -->
           <div class="row" style="margin-top:12px">
+            <button id="restartBtn">Restart server</button>
             <button id="shutdownBtn" class="danger">Shut down server</button>
             <span class="hint" id="shutdownHint" style="flex:1"></span>
           </div>
@@ -625,7 +618,14 @@
         <div class="marks" id="idMarks"></div>
       </div>
   </details>
-  <div class="pageversion">Reactor Interface 2.0.2</div>
+
+  <details class="card hcpes-card" id="hcpesCard">
+    <summary><span class="stitle">HCPES characterization</span>
+      <span class="sum">build and run a hollow-cathode parameter-space sweep</span></summary>
+    <div class="body" id="hcpesEditor"></div>
+  </details>
+
+  <div class="pageversion">Reactor Interface 2.1.0</div>
 </section>
 
 </main>

@@ -30,7 +30,7 @@ from .control.hcpes import HcpesController, HCPES_SUPPLIES
 from .control.sweep import SweepController
 from .control.run_coordinator import RunCoordinator, RunSession
 from .control.clock import Clock
-from . import datalog
+from . import datalog, instances
 from .datalog import DataLogger
 from .recording import RecordingService
 from .telemetry import Telemetry
@@ -155,6 +155,12 @@ class Supervisor:
         #: scrolling the event log (Zach, 2026-09-09). Same entries, same
         #: objects - a subset, not a second source of truth.
         self.errors: deque[dict[str, Any]] = deque(maxlen=200000)
+        # Restart spans two processes. Import its compact durable journal so
+        # the replacement's ordinary Event Log and Error Log explain what the
+        # parent did and why a failed child may have disappeared.
+        lifecycle = instances.read_lifecycle_events(path=self.paths.lifecycle_events)
+        self.events.extend(lifecycle)
+        self.errors.extend(e for e in lifecycle if e.get("kind") in self.ERROR_KINDS)
 
         self.daq: NiDaqBackend | None = None
         self.mfcs: dict[str, Device] = {}
@@ -1401,7 +1407,11 @@ class Supervisor:
         await setter(volts)
         self._setpoint_changed[f"psu.{supply_id}"] = self.clock.elapsed()
         self._event("command", f"{supply_id}: voltage set to {float(volts):g} V")
-        return {"id": supply_id, "voltage": float(volts)}
+        return {
+            "id": supply_id,
+            "voltage": float(getattr(dev, "voltage_setpoint", volts)),
+            "output_on": bool(getattr(dev, "output_on", False)),
+        }
 
     async def set_supply_current(self, supply_id: str, amps: float, *,
                                  _owner=None) -> dict[str, Any]:
@@ -1412,8 +1422,13 @@ class Supervisor:
             raise RuntimeError(
                 f"{supply_id} has no current control in this program")
         await setter(amps)
+        self._setpoint_changed[f"psu.{supply_id}"] = self.clock.elapsed()
         self._event("command", f"{supply_id}: current limit set to {float(amps):g} A")
-        return {"id": supply_id, "current": float(amps)}
+        return {
+            "id": supply_id,
+            "current": float(getattr(dev, "current_setpoint", amps)),
+            "output_on": bool(getattr(dev, "output_on", False)),
+        }
 
     def _settling(self, key: str) -> bool:
         """True while a device is still on its way to a newly commanded value."""
@@ -1768,12 +1783,23 @@ class Supervisor:
         """Publish controller events through the application event owner."""
         self._event(kind, message)
 
+    def report_lifecycle_event(self, kind: str, message: str, *,
+                               record: bool = True) -> dict[str, Any]:
+        """Publish and persist a server lifecycle event across restarts."""
+        entry = instances.append_lifecycle_event(
+            kind, message, path=self.paths.lifecycle_events,
+            timestamp=self.clock.wall())
+        self._event(kind, message, timestamp=entry["t"], record=record)
+        return entry
+
     #: Event kinds that belong in the error log as well as the event log.
     #: One list, defined next to the writer that also uses it.
     ERROR_KINDS = datalog.ERROR_KINDS
 
-    def _event(self, kind: str, message: str, *, record=True) -> None:
-        entry = {"t": self.clock.wall(), "kind": kind, "message": message}
+    def _event(self, kind: str, message: str, *, record=True,
+               timestamp: float | None = None) -> None:
+        entry = {"t": self.clock.wall() if timestamp is None else timestamp,
+                 "kind": kind, "message": message}
         self.events.append(entry)
         if kind in self.ERROR_KINDS:
             self.errors.append(entry)

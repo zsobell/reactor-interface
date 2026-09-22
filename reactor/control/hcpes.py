@@ -100,6 +100,8 @@ class HcpesController:
                 "qualified_target": resolved.plan.settings.qualified_samples,
                 "settled": None,
                 "observed_drift_a_per_min": None,
+                "drift_window_s": (
+                    resolved.plan.settings.establishment.trend_window_s),
                 "drift_threshold_a_per_min": (
                     resolved.plan.settings.establishment.max_drift_a_per_min),
                 "current_a": None,
@@ -116,6 +118,8 @@ class HcpesController:
                 "stability_max_wait_s": None,
                 "recovery_count": 0,
                 "inaccessible_points": 0,
+                "initial_settled": None,
+                "initial_stability_gates": [],
                 "cleanup_receipts": [],
                 "error": "",
             }
@@ -166,6 +170,7 @@ class HcpesController:
         previous: dict[str, float] = {}
         try:
             previous = await self._restricted_prestart()
+            await self._settle_initial_plasma()
             for point in resolved.iter_points():
                 if self.stop_event.is_set():
                     outcome = "aborted"
@@ -188,10 +193,8 @@ class HcpesController:
                 stability_profile: Literal[
                     "establishment", "parameter_change",
                 ] | None = None
-                if point.index == 1:
-                    stability_profile = "establishment"
-                elif (changed
-                      and resolved.plan.settings.condition_settle_mode == "current"):
+                if (changed
+                        and resolved.plan.settings.condition_settle_mode == "current"):
                     stability_profile = "parameter_change"
                 await self._acquire_point(
                     point, stability_profile=stability_profile)
@@ -240,9 +243,10 @@ class HcpesController:
         await self.host.set_valve(
             AR_VALVE, True, reason="HCPES pre-start", _owner=self)
         self._event_observation("setup", "opened Ar isolation valve")
-        self.state["phase"] = "HCPES pre-start: programming first condition"
-        first = next(self.resolved.iter_points())
-        # Program the first condition before energising outputs.  There is no
+        self.state["phase"] = "HCPES pre-start: programming initial condition"
+        initial = self.resolved.initial_setpoints
+        # Program the dedicated plasma-establishment condition before
+        # energising outputs.  There is no
         # per-axis delay here: plasma does not exist yet, so waiting after each
         # command only makes startup look hung.  The full current stability
         # gate begins immediately after the supplies and beam are enabled.
@@ -250,10 +254,10 @@ class HcpesController:
             self._raise_if_stopped()
             if axis.locked:
                 continue
-            value = first.setpoints[axis.target]
+            value = initial[axis.target]
             await self._set_target(axis.target, value, initial=True)
             self._event_observation(
-                "parameter_change", f"set {axis.target} to {value:g}", first,
+                "initial_parameter", f"set initial {axis.target} to {value:g}",
                 changed_target=axis.target, requested_value=value,
                 actual_value=value)
             self._applied_setpoints[axis.target] = value
@@ -270,12 +274,48 @@ class HcpesController:
         await self.host.set_valve(
             PLASMA_RELAY, False, reason="HCPES pre-start - beam on", _owner=self)
         self._event_observation("setup", "parked plasma relay in beam-on state")
-        self._applied_setpoints = dict(first.setpoints)
+        self._applied_setpoints = dict(initial)
         self.state.update(
             phase="initial plasma stability", changed_target=None,
             requested_value=None,
+            setpoints=dict(initial),
             applied_setpoints=dict(self._applied_setpoints))
-        return first.setpoints
+        return dict(initial)
+
+    async def _settle_initial_plasma(self) -> None:
+        """Establish plasma at the plan's non-acquisition startup condition."""
+        exclusions: Counter[str] = Counter()
+        gates: list[HcpesStabilityGate] = []
+        result = await self._wait_stability(None, "establishment")
+        gates.append(result)
+        settled = result.outcome == "settled"
+        if result.outcome == "plasma_lost":
+            recovered, settled, _slope, _attempts = await self._recover(
+                None, exclusions, gates)
+            if not recovered:
+                self.state.update(
+                    initial_settled=False,
+                    initial_stability_gates=[
+                        gate.model_dump(mode="json") for gate in gates],
+                )
+                raise RuntimeError(
+                    "initial plasma could not be established within the "
+                    "recovery retry window")
+        self.state.update(
+            initial_settled=settled,
+            initial_stability_gates=[
+                gate.model_dump(mode="json") for gate in gates],
+        )
+        self._event_observation(
+            "setup",
+            "initial plasma settled" if settled
+            else "initial plasma stability timed out; continuing flagged",
+            flags={
+                "initial_settled": settled,
+                "stability_gates": [
+                    gate.model_dump(mode="json") for gate in gates],
+            },
+        )
 
     def _raise_if_stopped(self) -> None:
         if self.stop_event.is_set():
@@ -301,6 +341,12 @@ class HcpesController:
             self._applied_setpoints[axis.target] = value
             self.state["applied_setpoints"] = dict(self._applied_setpoints)
             self._reset_live_drift()
+            parameter_profile = self.resolved.plan.settings.parameter_change
+            self.state.update(
+                drift_window_s=parameter_profile.trend_window_s,
+                drift_threshold_a_per_min=(
+                    parameter_profile.max_drift_a_per_min),
+            )
             self._event_observation(
                 "parameter_change", f"set {axis.target} to {value:g}", point,
                 changed_target=axis.target, requested_value=value,
@@ -417,6 +463,12 @@ class HcpesController:
         accessibility = "recovered" if recovered else "accessible"
         if len(values) < settings.qualified_samples:
             accessibility = "partial"
+        # The live trend keeps updating while the qualified readings arrive.
+        # Preserve the trend through the actual collection interval rather than
+        # the stale value captured immediately before collection began.
+        collection_slope = self.state.get("observed_drift_a_per_min")
+        if _number(collection_slope) is not None:
+            latest_slope = float(collection_slope)
         await self._finish_point(
             point, point_started_elapsed_s, values, qualified_measurements,
             exclusions, all_settled, latest_slope, recoveries, accessibility,
@@ -432,7 +484,7 @@ class HcpesController:
 
     async def _wait_stability(
         self,
-        point: SweepPoint,
+        point: SweepPoint | None,
         profile_name: Literal["establishment", "parameter_change"],
     ) -> HcpesStabilityGate:
         assert self.resolved is not None
@@ -445,6 +497,8 @@ class HcpesController:
         started = self.clock.elapsed()
         end = started + profile.maximum_wait_s
         samples: deque[tuple[float, float]] = deque()
+        stable_since: float | None = None
+        stable_elapsed = 0.0
         latest_slope = None
         latest_current = _number(self.host.snapshot.get(AMMETER_KEY))
         label = (
@@ -457,6 +511,7 @@ class HcpesController:
             phase=label, settled=None,
             active_stability_profile=profile_name,
             drift_threshold_a_per_min=profile.max_drift_a_per_min,
+            drift_window_s=profile.trend_window_s,
             stability_window_elapsed_s=0.0,
             stability_window_required_s=profile.stable_window_s,
             stability_wait_elapsed_s=0.0,
@@ -474,11 +529,26 @@ class HcpesController:
             if lit:
                 samples.append((now, current))
                 while (len(samples) > 1
-                       and now - samples[1][0] >= profile.stable_window_s):
+                       and now - samples[1][0] >= profile.trend_window_s):
                     samples.popleft()
             span = now - samples[0][0] if samples else 0.0
+            if lit and len(samples) >= 2 and span >= profile.trend_window_s:
+                latest_slope = _robust_slope_a_per_min(samples)
+                self.state["observed_drift_a_per_min"] = latest_slope
+                if abs(latest_slope) < profile.max_drift_a_per_min:
+                    if stable_since is None:
+                        # The trend window establishes that the rate is now
+                        # acceptable.  Required stable time begins here; its
+                        # history is not back-credited, so the operator sees the
+                        # timer advance from zero for the full requested hold.
+                        stable_since = now
+                    stable_elapsed = max(0.0, now - stable_since)
+                else:
+                    stable_since = None
+                    stable_elapsed = 0.0
             self.state.update(
-                stability_window_elapsed_s=min(span, profile.stable_window_s),
+                stability_window_elapsed_s=min(
+                    stable_elapsed, profile.stable_window_s),
                 stability_wait_elapsed_s=waited,
                 settle_remaining_s=max(0.0, end - now),
             )
@@ -486,7 +556,9 @@ class HcpesController:
                 "plasma_present": lit,
                 "stability_profile": profile_name,
                 "settle_remaining_s": max(0.0, end - now),
-                "stable_window_elapsed_s": min(span, profile.stable_window_s),
+                "trend_window_s": profile.trend_window_s,
+                "stable_window_elapsed_s": min(
+                    stable_elapsed, profile.stable_window_s),
                 "stable_window_required_s": profile.stable_window_s,
                 "max_drift_a_per_min": profile.max_drift_a_per_min,
             }
@@ -499,21 +571,19 @@ class HcpesController:
                 self.state.update(settled=False, settle_remaining_s=None)
                 return HcpesStabilityGate(
                     profile=profile_name, outcome="plasma_lost", elapsed_s=waited,
+                    trend_window_s=profile.trend_window_s,
                     stable_window_s=profile.stable_window_s,
                     maximum_wait_s=profile.maximum_wait_s,
                     max_drift_a_per_min=profile.max_drift_a_per_min,
                     observed_drift_a_per_min=latest_slope,
                 )
-            if len(samples) >= 2 and span >= min(2.0, profile.stable_window_s):
-                latest_slope = _robust_slope_a_per_min(samples)
-                self.state["observed_drift_a_per_min"] = latest_slope
-            if samples and span >= profile.stable_window_s:
-                if (latest_slope is not None
-                        and abs(latest_slope) < profile.max_drift_a_per_min):
+            if stable_elapsed >= profile.stable_window_s:
+                if latest_slope is not None:
                     elapsed = max(0.0, now - started)
                     self.state.update(settled=True, settle_remaining_s=0.0)
                     return HcpesStabilityGate(
                         profile=profile_name, outcome="settled", elapsed_s=elapsed,
+                        trend_window_s=profile.trend_window_s,
                         stable_window_s=profile.stable_window_s,
                         maximum_wait_s=profile.maximum_wait_s,
                         max_drift_a_per_min=profile.max_drift_a_per_min,
@@ -523,8 +593,9 @@ class HcpesController:
         self.state.update(
             settled=False, observed_drift_a_per_min=latest_slope,
             settle_remaining_s=0.0)
+        subject = f"point {point.index}" if point else "initial plasma"
         self.host.report_event(
-            "flag", f"HCPES point {point.index}: {profile_name.replace('_', ' ')} "
+            "flag", f"HCPES {subject}: {profile_name.replace('_', ' ')} "
             "current never settled; continuing")
         lit = (latest_current is not None
                and abs(latest_current) >= settings.plasma_min_current_a)
@@ -532,6 +603,7 @@ class HcpesController:
             profile=profile_name,
             outcome="timeout" if lit else "plasma_lost",
             elapsed_s=elapsed,
+            trend_window_s=profile.trend_window_s,
             stable_window_s=profile.stable_window_s,
             maximum_wait_s=profile.maximum_wait_s,
             max_drift_a_per_min=profile.max_drift_a_per_min,
@@ -540,7 +612,7 @@ class HcpesController:
 
     async def _recover(
         self,
-        point: SweepPoint,
+        point: SweepPoint | None,
         exclusions: Counter[str],
         stability_gates: list[HcpesStabilityGate],
     ) -> tuple[bool, bool, float | None, int]:
@@ -596,13 +668,21 @@ class HcpesController:
             self.state.update(
                 phase="recovering plasma", active_stability_profile=None,
                 recovery_remaining_s=remaining, settle_remaining_s=None)
-        self.state["inaccessible_points"] += 1
+        if point is not None:
+            self.state["inaccessible_points"] += 1
         self.state["recovery_remaining_s"] = 0.0
         self._event_observation(
-            "inaccessible", "condition did not recover within retry window", point,
+            "inaccessible",
+            "condition did not recover within retry window" if point
+            else "initial plasma did not recover within retry window",
+            point,
             exclusion_reason="recovery_exhausted")
-        self.host.report_event(
-            "flag", f"HCPES point {point.index} inaccessible; continuing sweep")
+        if point is not None:
+            self.host.report_event(
+                "flag", f"HCPES point {point.index} inaccessible; continuing sweep")
+        else:
+            self.host.report_event(
+                "error", "HCPES initial plasma inaccessible; ending characterization")
         return False, False, None, attempts
 
     async def _finish_point(
@@ -728,14 +808,14 @@ class HcpesController:
         elapsed = max(0.0, now - self._started_elapsed)
         self._live_drift_samples.append((now, current))
         window = float(
-            self.state.get("stability_window_required_s")
-            or self.resolved.plan.settings.establishment.stable_window_s)
+            self.state.get("drift_window_s")
+            or self.resolved.plan.settings.establishment.trend_window_s)
         while (len(self._live_drift_samples) > 1
                and now - self._live_drift_samples[1][0] >= window):
             self._live_drift_samples.popleft()
         span = now - self._live_drift_samples[0][0]
         slope = self.state.get("observed_drift_a_per_min")
-        if len(self._live_drift_samples) >= 2 and span >= min(2.0, window):
+        if len(self._live_drift_samples) >= 2 and span >= window:
             slope = _robust_slope_a_per_min(self._live_drift_samples)
         self.state.update(
             current_a=current,
@@ -766,10 +846,14 @@ class HcpesController:
         exclusion: str | None = None,
         flags: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        observation_flags = dict(flags or {})
+        slope = _number(self.state.get("observed_drift_a_per_min"))
+        if slope is not None:
+            observation_flags.setdefault("observed_drift_a_per_min", slope)
         return self._write_observation(
             phase=phase, reason=reason, point=point, current=current,
             qualified=qualified, qualified_index=qualified_index,
-            exclusion_reason=exclusion, flags=flags or {})
+            exclusion_reason=exclusion, flags=observation_flags)
 
     def _write_observation(
         self,
@@ -835,6 +919,9 @@ class HcpesController:
             await attempt(
                 f"zero MFC {mfc_id}",
                 self.host.set_mfc_setpoint(mfc_id, 0.0, _owner=self))
+            if receipts[-1]["ok"]:
+                self._applied_setpoints[f"mfc:{mfc_id}"] = 0.0
+                self.state["applied_setpoints"] = dict(self._applied_setpoints)
         await attempt(
             "close Ar isolation",
             self.host.set_valve(
@@ -844,6 +931,12 @@ class HcpesController:
             await attempt(
                 f"switch off {supply_id}",
                 self.host.set_supply_output(supply_id, False, _owner=self))
+            if receipts[-1]["ok"]:
+                # Output-off deliberately preserves the supply's programmed
+                # setpoint. Remove it from this run-owned display rather than
+                # implying either an energized value or an uncommanded zero.
+                self._applied_setpoints.pop(f"supply:{supply_id}", None)
+                self.state["applied_setpoints"] = dict(self._applied_setpoints)
         await attempt(
             "park plasma relay",
             self.host.set_valve(
@@ -887,24 +980,29 @@ def _numeric_channel_stats(
 
 
 def _robust_slope_a_per_min(samples) -> float:
-    """Long-window endpoint-median trend, resistant to DMM noise and spikes.
+    """Return a long-baseline Theil-Sen current trend in A/min.
 
-    A least-squares line lets one transient or a small cluster at either end
-    keep an otherwise stable plasma outside the threshold.  Compare medians of
-    the first and last quarters instead: this measures the slow drift the gate
-    is intended to detect while rejecting isolated current noise.
+    The former endpoint-median calculation changed discontinuously whenever a
+    noisy sample entered or left either endpoint group.  That produced the
+    reported flat-looking rate followed by a spike.  The median of pairwise
+    slopes is resistant to individual DMM excursions and evolves smoothly as
+    readings arrive.  Ignoring pairs shorter than a quarter-window (or 0.5 s)
+    prevents high-frequency measurement noise from being extrapolated to an
+    enormous per-minute rate while retaining a genuine window-scale trend.
     """
-    count = max(1, len(samples) // 4)
-    first = list(samples)[:count]
-    last = list(samples)[-count:]
-    first_t = statistics.median(row[0] for row in first)
-    last_t = statistics.median(row[0] for row in last)
-    elapsed = last_t - first_t
-    if elapsed <= 1e-9:
-        first_t, last_t = samples[0][0], samples[-1][0]
-        elapsed = last_t - first_t
-        if elapsed <= 1e-9:
-            return 0.0
-    first_current = statistics.median(row[1] for row in first)
-    last_current = statistics.median(row[1] for row in last)
-    return (last_current - first_current) / elapsed * 60.0
+    rows = list(samples)
+    if len(rows) < 2:
+        return 0.0
+    span = rows[-1][0] - rows[0][0]
+    if span <= 1e-9:
+        return 0.0
+    minimum_baseline = min(span, max(0.5, span / 4.0))
+    slopes = [
+        (later_current - earlier_current) / elapsed * 60.0
+        for index, (earlier_time, earlier_current) in enumerate(rows)
+        for later_time, later_current in rows[index + 1:]
+        if (elapsed := later_time - earlier_time) >= minimum_baseline
+    ]
+    if not slopes:
+        return (rows[-1][1] - rows[0][1]) / span * 60.0
+    return statistics.median(slopes)

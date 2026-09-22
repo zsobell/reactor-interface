@@ -7,16 +7,20 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({
 })[c]);
 
 const ESTABLISHMENT_FIELDS = [
+  {key:"trend_window_s", label:"RoC rolling window", unit:"s", step:.1,
+    help:"Recent sample-current interval used to calculate the displayed rate of change. The default 5 s window forgets older startup motion while resisting individual noisy readings."},
   {key:"stable_window_s", label:"Required stable time", unit:"s", step:.1,
-    help:"How long stage current must remain continuously stable after initial startup or a successful reignition."},
+    help:"After a complete rolling estimate first turns green, this timer starts at zero. The rolling rate must then remain below the drift limit for this entire time; any red reading resets the timer."},
   {key:"maximum_wait_s", label:"Maximum settle time", unit:"s", step:.1,
     help:"Longest time to wait for stable current after plasma is present. If it expires while plasma remains present, collection continues and the condition is marked Never settled."},
   {key:"max_drift_a_per_min", label:"Maximum current drift", unit:"mA/min", step:.01, scale:1000,
     help:"Largest allowed stage-current change per minute during plasma establishment. Lower values require a steadier plasma."},
 ];
 const PARAMETER_FIELDS = [
+  {key:"trend_window_s", label:"RoC rolling window", unit:"s", step:.1,
+    help:"Recent sample-current interval used to calculate rate of change after sweep parameters change. This is independent of the required stable time."},
   {key:"stable_window_s", label:"Required stable time", unit:"s", step:.1,
-    help:"How long stage current must remain stable after changed sweep parameters when Stage-current stability mode is selected."},
+    help:"After the complete rolling estimate first turns green, this timer starts at zero. It must remain green for this entire time before samples are collected; any red reading resets the timer."},
   {key:"maximum_wait_s", label:"Maximum settle time", unit:"s", step:.1,
     help:"Longest time to wait after a parameter change. If it expires while plasma remains present, collection continues and the condition is marked Never settled."},
   {key:"max_drift_a_per_min", label:"Maximum current drift", unit:"mA/min", step:.01, scale:1000,
@@ -51,11 +55,11 @@ export function parseAxisList(text){
 }
 
 export function axisDisplayScale(capability){
-  return capability?.quantity === "current" ? 1000 : 1;
+  return 1;
 }
 
 export function axisDisplayUnit(capability){
-  return capability?.quantity === "current" ? "mA" : (capability?.unit || "");
+  return capability?.unit || "";
 }
 
 export function formatDuration(seconds){
@@ -72,6 +76,10 @@ export function launchReview(preview, sessionId, campaignId=""){
   const parameter=settings.parameter_change;
   const axes = preview.axes.map((axis, index) =>
     `${index + 1}. ${axis.label}: ${axis.mode} · ${axis.count} value(s)`).join("\n");
+  const startup = preview.axes.filter(axis => axis.mode !== "locked_zero").map(axis => {
+    const value = Number(plan.initial_setpoints[axis.target]);
+    return `${axis.label}: ${value} ${axis.unit}`;
+  }).join(" · ");
   return `Start HCPES characterization “${plan.name}” (revision ${plan.revision})?\n\n`
     + `Session: ${sessionId}\nStage wiring: ${sign} orientation`
     + (campaignId ? `\nLinked campaign: ${campaignId}` : "")
@@ -79,9 +87,11 @@ export function launchReview(preview, sessionId, campaignId=""){
     + `\n\n${preview.estimate.points} conditions · ${preview.estimate.qualified_samples} qualified samples`
     + `\nEach condition accepts its next ${settings.qualified_samples} fresh sample-current readings after settling; no added collection timer.`
     + `\nConfigured settle/delay estimate ${formatDuration(preview.estimate.best_case_s)}; establishment-timeout estimate ${formatDuration(preview.estimate.startup_timeout_case_s)}`
-    + `\n\nPLASMA ESTABLISHMENT\n${establishment.stable_window_s}s below ${(establishment.max_drift_a_per_min*1000).toFixed(3)} mA/min; maximum ${establishment.maximum_wait_s}s`
+    + `\n\nINITIAL PLASMA CONDITION\n${startup}`
+    + `\nPlasma is established and settled here before moving to sweep point 1. No qualified sweep samples are collected here.`
+    + `\n\nPLASMA ESTABLISHMENT\nMeasure a ${establishment.trend_window_s}s rolling RoC, then keep it below ${(establishment.max_drift_a_per_min*1000).toFixed(3)} mA/min for ${establishment.stable_window_s}s; maximum ${establishment.maximum_wait_s}s`
     + `\nRecovery retry budget ${settings.recovery_window_s}s (settling does not consume it)`
-    + `\n\nPARAMETER CHANGES\n${settings.condition_settle_mode === "time" ? `${settings.parameter_settle_s}s timed delay after each changed parameter` : `${parameter.stable_window_s}s below ${(parameter.max_drift_a_per_min*1000).toFixed(3)} mA/min; maximum ${parameter.maximum_wait_s}s`}`
+    + `\n\nPARAMETER CHANGES\n${settings.condition_settle_mode === "time" ? `${settings.parameter_settle_s}s timed delay after each changed parameter` : `Measure a ${parameter.trend_window_s}s rolling RoC, then keep it below ${(parameter.max_drift_a_per_min*1000).toFixed(3)} mA/min for ${parameter.stable_window_s}s; maximum ${parameter.maximum_wait_s}s`}`
     + `\n\nCONFIRM BEFORE START\nThe physical stage leads are in the ${sign} orientation.`
     + `\nAll background MFCs are explicitly swept/fixed or locked at zero.`
     + `\n\nEVERY EXIT\nAll MFCs → 0; Ar isolation closes after Ar zero; HV off;`
@@ -174,6 +184,21 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
       </div><div class="hcpes-axis-fields">${axisFields(axis, index, locked, cap)}</div></div>
     </div>`;
   }
+  function initialSetpointsHtml(locked){
+    const fields = plan.axes.filter(axis => axis.mode !== "locked_zero").map(axis => {
+      const cap = capability(axis.target) || {label:axis.target, unit:""};
+      const scale = axisDisplayScale(cap);
+      const fallback = axis.value ?? axis.start ?? axis.values?.[0] ?? 0;
+      const value = Number(plan.initial_setpoints?.[axis.target] ?? fallback) * scale;
+      const help = `Value used only to establish and stabilize the plasma before sweep point 1. ${cap.label} then changes to the first sweep value using the selected between-condition settling rule.`;
+      return `<label class="hcpes-setting" title="${esc(help)}"><span>${esc(cap.label)}</span>
+        <span class="hcpes-unit-input"><input data-initial-target="${esc(axis.target)}" data-axis-scale="${scale}" type="number" min="0" step="any" value="${esc(value)}" title="${esc(help)}"${locked ? " disabled" : ""}><span>${esc(axisDisplayUnit(cap))}</span></span>
+        <small>${esc(help)}</small></label>`;
+    }).join("");
+    return `<section class="hcpes-setting-section hcpes-initial"><h4>Initial plasma condition</h4>
+      <p>These values are used only to ignite and complete the plasma-establishment stability check. The controller then moves to sweep point 1 and settles that change before collecting qualified data.</p>
+      <div class="hcpes-setting-grid">${fields}</div></section>`;
+  }
   function settingsHtml(locked){
     const field = (definition, profile="") => {
       const source = profile ? plan.settings[profile] : plan.settings;
@@ -226,7 +251,8 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
     <div class="hcpes-meta"><label>Name<input data-meta="name" maxlength="100" value="${esc(plan.name)}"${locked ? " disabled" : ""}></label><label>Description<input data-meta="description" value="${esc(plan.description)}"${locked ? " disabled" : ""}></label></div>
     <div class="hcpes-polarity"><div><span>Stage wiring orientation</span><strong>${sign}</strong><small>Plan values are nonnegative magnitudes; files and plots apply this sign.</small></div>
       <div class="hcpes-segment"><button data-polarity="1" class="${plan.stage_polarity > 0 ? "active" : ""}"${locked ? " disabled" : ""}>+ Positive</button><button data-polarity="-1" class="${plan.stage_polarity < 0 ? "active" : ""}"${locked ? " disabled" : ""}>− Negative</button></div></div>
-    <div class="hcpes-profile"><b>Restricted HCPES pre-start</b><span>all MFCs zero → Ar isolation open → first condition programmed → four supplies on → plasma relay to beam mode. No precursor fill or precursor-valve action.</span></div>
+    <div class="hcpes-profile"><b>Restricted HCPES pre-start</b><span>all MFCs zero → Ar isolation open → initial plasma condition programmed → four supplies on → plasma relay to beam mode → establishment stability → sweep point 1. No precursor fill or precursor-valve action.</span></div>
+    ${initialSetpointsHtml(locked)}
     <div class="hcpes-subhead"><span>Parameter-space blocks</span><small>Drag-free buttons set deterministic outer-to-inner nesting.</small></div>
     <div class="hcpes-axes">${plan.axes.map((axis, index) => axisCard(axis, index, locked)).join("")}</div>
     <details class="hcpes-settings" open><summary>Stability, recovery, and collection</summary>${settingsHtml(locked)}
@@ -255,9 +281,18 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
     set("hcpesLiveAccepted", total ? `${runtime.points_collected || 0} / ${runtime.points_rejected || 0}` : "—");
     set("hcpesLiveSamples", runtime.qualified_target ? `${runtime.qualified_samples || 0} / ${runtime.qualified_target}` : "—");
     set("hcpesLiveEta", runtime.estimated_remaining_s == null ? "—" : formatDuration(runtime.estimated_remaining_s));
-    const rate = Number(runtime.observed_drift_a_per_min), threshold = Number(runtime.drift_threshold_a_per_min);
-    const finiteRate = Number.isFinite(rate), finiteThreshold = Number.isFinite(threshold);
-    set("hcpesLiveRate", finiteRate ? `${(rate*1000).toFixed(3)}${finiteThreshold ? ` / ${(threshold*1000).toFixed(3)}` : ""} mA/min` : "measuring…");
+    const rawRate = runtime.observed_drift_a_per_min;
+    const rawThreshold = runtime.drift_threshold_a_per_min;
+    const rate = Number(rawRate), threshold = Number(rawThreshold);
+    // Number(null) is zero.  Treating an estimator that is still gathering its
+    // window as 0.000 mA/min created a false stable indication followed by an
+    // apparent spike when the first real estimate arrived.
+    const finiteRate = rawRate !== null && rawRate !== undefined && Number.isFinite(rate);
+    const finiteThreshold = rawThreshold !== null && rawThreshold !== undefined && Number.isFinite(threshold);
+    const trendWindow = Number(runtime.drift_window_s);
+    const trendSuffix = Number.isFinite(trendWindow) && trendWindow > 0
+      ? ` · ${trendWindow.toFixed(1)} s window` : "";
+    set("hcpesLiveRate", finiteRate ? `${(rate*1000).toFixed(3)}${finiteThreshold ? ` / ${(threshold*1000).toFixed(3)}` : ""} mA/min${trendSuffix}` : `measuring…${trendSuffix}`);
     const rateCard=$("hcpesLiveRateCard");
     if(rateCard) rateCard.className = "hcpes-live-rate" + (!finiteRate || !finiteThreshold ? "" : Math.abs(rate) < threshold ? " good" : " bad");
     set("hcpesLiveCurrent", runtime.current_a == null ? "—" : `${(Number(runtime.current_a)*1000).toFixed(4)} mA`);
@@ -314,6 +349,11 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
     }
     if(el.id === "hcpesSessionId"){ sessionId=el.value.trim(); return; }
     if(el.dataset.meta){ plan[el.dataset.meta]=el.value; markDirty(); return; }
+    if(el.dataset.initialTarget){
+      plan.initial_setpoints ||= {};
+      plan.initial_setpoints[el.dataset.initialTarget]=Number(el.value) / Number(el.dataset.axisScale || 1);
+      markDirty(); return;
+    }
     if(el.dataset.setting){
       const scale=Number(el.dataset.settingScale || 1);
       const value=el.dataset.setting === "qualified_samples"
@@ -326,7 +366,14 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
     if(el.dataset.settingChoice){ plan.settings[el.dataset.settingChoice]=el.value; markDirty(); return; }
     const row=el.closest?.("[data-axis]"); if(!row) return;
     const axis=plan.axes[Number(row.dataset.axis)];
-    if(el.hasAttribute("data-axis-mode")){ plan.axes[Number(row.dataset.axis)]=resetAxis(axis, el.value); markDirty(); render(); return; }
+    if(el.hasAttribute("data-axis-mode")){
+      const replacement=resetAxis(axis, el.value);
+      plan.axes[Number(row.dataset.axis)]=replacement;
+      plan.initial_setpoints ||= {};
+      if(replacement.mode === "locked_zero") delete plan.initial_setpoints[replacement.target];
+      else if(!(replacement.target in plan.initial_setpoints)) plan.initial_setpoints[replacement.target]=0;
+      markDirty(); render(); return;
+    }
     if(el.dataset.axisValue){
       axis[el.dataset.axisValue]=Number(el.value) / Number(el.dataset.axisScale || 1);
       markDirty(); return;

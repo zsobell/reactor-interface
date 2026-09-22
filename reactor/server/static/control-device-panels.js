@@ -305,17 +305,22 @@ export function createDevicePanels({$, document, cssEscape, esc, num, sci, put, 
         const currentRaw = (currentEl && currentEl.value.trim()) || "";
         if(!voltageRaw && !currentRaw){ toast(`Enter a voltage or a current for ${id} first.`); return; }
         const done = [];
+        let outputOn = false;
         if(voltageRaw){
           const value = readNumber(`#psuv_${cssEscape(id)}`, `${id} voltage`);
           if(value === null) return;
-          await post(`/api/supply/${id}/voltage`, {volts:value}); done.push(`${value} V`);
+          const result = await post(`/api/supply/${id}/voltage`, {volts:value});
+          outputOn = !!result.output_on; done.push(`${result.voltage ?? value} V`);
         }
         if(currentRaw){
           const value = readNumber(`#psui_${cssEscape(id)}`, `${id} current`);
           if(value === null) return;
-          await post(`/api/supply/${id}/current`, {amps:value}); done.push(`${value} A`);
+          const result = await post(`/api/supply/${id}/current`, {amps:value});
+          outputOn = !!result.output_on; done.push(`${result.current ?? value} A`);
         }
-        toast(`${id} set to ${done.join(" · ")}`, true);
+        toast(outputOn
+          ? `${id} energized output set to ${done.join(" · ")}`
+          : `${id} setpoint set to ${done.join(" · ")}; output remains off`, true);
       }else if(button.dataset.act === "psuout"){
         const on = button.dataset.state !== "1";
         if(on && !confirmImpl(`Turn ON the ${id} output?\n\nIt will source at whatever this supply's setpoints currently are.`)) return;

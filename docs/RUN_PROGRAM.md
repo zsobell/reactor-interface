@@ -779,6 +779,14 @@ historical errors and flags remain in the Diagnostics logs and per-run files.
 A latched recording failure is promoted only while the exact recording stream
 that suffered it is still active.
 
+The HCPES builder separates the **initial plasma condition** from the ordered
+sweep blocks. Its Ar, stage, grid, collimating and steering values are used to
+ignite and complete the startup stability gate only; they are not a sweep
+point and collect no qualified samples. The controller then changes to point 1
+and applies the selected ordinary parameter-change settling rule. This block is
+saved with the plan, while background MFCs remain explicitly swept/fixed or
+locked at zero.
+
 **Ellipsometer sync** closes the loop on the FS-1: during a run the reactor
 subscribes to the instrument's live broadcast and writes a per-acquisition
 sidecar of `(fs_time -> reactor_clock)` pairs. Afterwards you refit the run in
@@ -872,8 +880,9 @@ session); it is useful for finding slow drift over the experiment and should
 not be read as though its x axis were one physical parameter.
 
 Every plotted point hover identifies its source session/point, result, settle
-state and observed drift, then lists **every commanded condition**. Current
-setpoints and measurements are shown in mA by default. Line slices create a
+state and observed drift, then lists **every commanded condition**. Measured
+stage current is shown in mA; steering and collimating setpoints and telemetry
+are shown in A. Line slices create a
 separate series for each unfiltered parameter; heat-map cells average matching
 conditions when a third parameter remains at All, and say so in the view hint
 and hover. Filter that parameter to inspect one unambiguous slice.

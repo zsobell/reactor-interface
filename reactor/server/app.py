@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .data import DataFiles, create_data_router, merged_name
 from .hcpes_analysis import HcpesAnalysisFiles, create_hcpes_analysis_router
-from .. import instances
+from .. import __version__, instances
 from ..config import ReactorConfig, load_config
 from ..control.recipe import Recipe, build_ald_recipe, build_cvd_recipe
 from ..control.hcpes_model import CURRENT_PLAN_ID, capability_catalog as hcpes_capabilities
@@ -139,16 +139,12 @@ def _kill_other_reactor_servers() -> list[int]:
     Still blocking (it waits for each process to actually go), so call it off
     the event loop.
     """
-    try:
-        return instances.kill_others()
-    except Exception as exc:
-        log.warning("could not sweep other reactor servers: %s", exc)
-        return []
+    return instances.kill_others()
 
 
 def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = None,
                devices: DeviceFactory | None = None, supervisor: Supervisor | None = None,
-               shutdown_peers=None) -> FastAPI:
+               shutdown_peers=None, restart_parent_pid: int | None = None) -> FastAPI:
     cfg = cfg or (supervisor.cfg if supervisor is not None else load_config())
     sup = supervisor or Supervisor(cfg, paths=paths, devices=devices)
     isolated = paths is not None or supervisor is not None
@@ -169,6 +165,10 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         except Exception:
             pass            # no saved params yet - the defaults stand
         await sup.start()
+        if restart_parent_pid is not None:
+            sup.report_lifecycle_event(
+                "restart", f"restart successful; replacement server is ready "
+                f"(version {__version__}, process {os.getpid()})")
         try:
             yield
         finally:
@@ -176,6 +176,10 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
 
     app = FastAPI(title="Reactor Interface", lifespan=lifespan)
     app.state.supervisor = sup
+    # A version alone cannot prove that a restart succeeded: a replacement often
+    # runs the same version.  The page uses this per-process value to tell the
+    # old server from the new one before it reports success.
+    app.state.server_instance_id = secrets.token_urlsafe(12)
     app.include_router(create_data_router(DataFiles(sup.logger.dir)))
     app.include_router(create_hcpes_analysis_router(HcpesAnalysisFiles(sup.logger.dir)))
 
@@ -434,18 +438,21 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
             json.dumps(layout, indent=2), encoding="utf-8")
         return {"ok": True}
 
-    # -- server shutdown --------------------------------------------------- #
+    # -- server shutdown / restart ---------------------------------------- #
+
+    @app.get("/api/server/version")
+    async def server_version() -> dict[str, str]:
+        """Small liveness identity for the in-place restart watcher."""
+        return {"version": __version__, "instance_id": app.state.server_instance_id}
 
     @app.post("/api/server/shutdown")
     async def shutdown_server() -> dict[str, Any]:
         """Stop this server, and any other reactor server still running.
 
-        Replaces the Restart button (2026-08-25). Restarting re-exec'd the
-        process, and on 2026-08-25 the OLD instance survived it: two servers
-        were then up at once, the newer one holding port 8000 while the older
-        one still held COM8-COM12, so the devices looked unreachable. Zach's
-        call: "just a button that kills all servers in use", then start it again
-        from the shortcut.
+        Restart uses this same teardown and receipt path, but first starts one
+        replacement process that waits for this process to leave.  This avoids
+        the historical overlapping-server failure where one process held the
+        port and another held the DAQ/serial connections.
 
         Order matters, and it changed on 2026-09-10. It is now:
 
@@ -486,16 +493,100 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
             app.state.shutdown_receipt_task = task
         return await asyncio.shield(task)
 
-    async def _shutdown_once(request_shutdown):
-        killed = await asyncio.to_thread(kill_peers)
+    @app.post("/api/server/restart")
+    async def restart_server() -> dict[str, Any]:
+        """Hand off to one waiting replacement after the normal full teardown.
+
+        The replacement is created *before* stopping this server but waits for
+        this PID to exit before it can connect to hardware or bind the port.
+        Thus a failed process launch leaves the running server untouched, while
+        a successful launch cannot reproduce the old overlapping-server fault.
+        """
+        request_shutdown = getattr(app.state, "request_shutdown", None)
+        request_restart = getattr(app.state, "request_restart", None)
+        if request_shutdown is None or request_restart is None:
+            sup.report_lifecycle_event(
+                "error", "server restart rejected: this process cannot manage its lifecycle")
+            raise HTTPException(
+                status_code=501,
+                detail="This server was not started with `python -m reactor`, "
+                       "so it cannot restart itself. Restart it by hand.")
+        task = getattr(app.state, "shutdown_receipt_task", None)
+        if task is not None:
+            sup.report_lifecycle_event(
+                "error", "server restart rejected: shutdown or restart already in progress")
+            raise HTTPException(status_code=409,
+                                detail="server shutdown or restart is already in progress")
+        sup.report_lifecycle_event(
+            "command", "server restart requested from the UI; validating replacement")
+        task = asyncio.create_task(_restart_once(request_restart, request_shutdown))
+        # Shutdown and restart are one exclusive lifecycle transition.  Sharing
+        # this slot keeps a second click from creating another process or a
+        # second teardown while the first request is still answering.
+        app.state.restart_handoff_committed = False
+        app.state.shutdown_receipt_task = task
+        try:
+            return await asyncio.shield(task)
+        except Exception:
+            # Replacement launch happens before we touch the current server.
+            # If it failed, retain neither a stale "in progress" indicator nor
+            # a task that would reject a safe retry.  A successful handoff
+            # keeps the lock until this process exits.
+            if (not getattr(app.state, "restart_handoff_committed", False)
+                    and getattr(app.state, "shutdown_receipt_task", None) is task):
+                app.state.shutdown_receipt_task = None
+            raise
+
+    async def _restart_once(request_restart, request_shutdown):
+        try:
+            # Process launch includes a short child-readiness handshake. Keep
+            # that blocking filesystem/process wait off the server event loop
+            # so telemetry and the Event Log continue updating meanwhile.
+            handoff = await asyncio.to_thread(request_restart)
+        except Exception as exc:
+            log.exception("restart handoff could not launch a replacement")
+            sup.report_lifecycle_event(
+                "error", f"server restart could not prepare replacement: {exc}")
+            raise HTTPException(status_code=500,
+                                detail=f"could not launch replacement server: {exc}") from exc
+        if not isinstance(handoff, dict) or not handoff.get("pid"):
+            sup.report_lifecycle_event(
+                "error", "server restart replacement did not report a process ID")
+            raise HTTPException(status_code=500,
+                                detail="replacement server did not report a process ID")
+        # From this point the child exists and waits for us to exit; preserve
+        # the lifecycle lock even if teardown itself later reports a problem.
+        app.state.restart_handoff_committed = True
+        sup.report_lifecycle_event(
+            "restart", f"replacement process {handoff['pid']} confirmed ready; "
+            "beginning orderly shutdown")
+        handoff = {"pid": handoff["pid"], "replaces_instance_id":
+                   app.state.server_instance_id, "version": __version__}
+        return await _shutdown_once(request_shutdown, restart=handoff)
+
+    async def _shutdown_once(request_shutdown, *, restart: dict[str, Any] | None = None):
+        try:
+            killed = await asyncio.to_thread(kill_peers)
+        except Exception as exc:
+            killed = []
+            message = f"could not check or stop other reactor servers: {exc}"
+            log.exception(message)
+            if restart is not None:
+                sup.report_lifecycle_event("error", f"server restart: {message}")
+            else:
+                sup._event("error", f"server shutdown: {message}")
         busy = sup.recipes.busy
-        sup._event("command",
-                   "server shutdown requested from the UI"
+        action = "restart" if restart is not None else "shutdown"
+        message = (f"server {action} requested from the UI"
                    + (" DURING A RUN - the run will be aborted" if busy else "")
                    + (f"; also killed {len(killed)} other instance(s): {killed}"
                       if killed else ""))
-        log.warning("shutdown requested from the UI (run active: %s, "
-                    "other instances killed: %s)", busy, killed or "none")
+        if restart is not None:
+            sup.report_lifecycle_event("restart", message)
+        else:
+            sup._event("command", message)
+        log.warning("%s requested from the UI (run active: %s, other instances killed: %s)",
+                    action, busy, killed or "none")
 
         # The teardown, now, while the browser is still connected to hear how
         # it went. Bounded from the inside - every step in Supervisor.stop has
@@ -506,6 +597,17 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
                     receipt["elapsed_s"],
                     "" if receipt["ok"] else
                     f" ({len(receipt['failed'])} step(s) failed)")
+        if restart is not None:
+            if receipt["ok"]:
+                sup.report_lifecycle_event(
+                    "restart", "hardware teardown completed successfully; "
+                    "DAQ and device connections released", record=False)
+            else:
+                failed_names = ", ".join(
+                    str(step.get("what") or "unknown") for step in receipt["failed"])
+                sup.report_lifecycle_event(
+                    "error", f"server restart hardware teardown completed with "
+                    f"{len(receipt['failed'])} failure(s): {failed_names}", record=False)
 
         async def _go() -> None:
             # Let this response reach the browser before the socket closes.
@@ -516,8 +618,12 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         # WEAK reference to a task, so a bare create_task() can be collected
         # mid-sleep and the shutdown would then simply never happen.
         app.state.shutdown_task = asyncio.create_task(_go())
+        if restart is not None:
+            sup.report_lifecycle_event(
+                "restart", f"previous server is exiting; replacement process "
+                f"{restart['pid']} will take over", record=False)
         return {"stopping": True, "run_was_active": busy, "also_killed": killed,
-                **receipt}
+                **receipt, **({"restart": restart} if restart is not None else {})}
 
     # -- power supplies -------------------------------------------------- #
     #

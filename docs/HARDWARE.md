@@ -354,8 +354,8 @@ voltage and current. Normal ALD/CVD pre-start switches the three support outputs
 on, brackets the stage-bias output with the beam, and never writes a current
 limit. HCPES is deliberately different: its reviewed plan programs stage/grid
 voltage and steering/collimating current, turns all four outputs on for the
-acquisition, and turns all four off during cleanup. HCPES operator controls use
-mA; the driver and machine files retain A. Full account in
+acquisition, and turns all four off during cleanup. HCPES steering and
+collimating controls use A; measured stage current uses mA. Full account in
 **[KEITHLEY_2260B.md](KEITHLEY_2260B.md)**.
 
 ### End-to-end read verified

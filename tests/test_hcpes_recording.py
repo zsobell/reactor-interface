@@ -65,7 +65,8 @@ async def main() -> int:
             measurements={"inst.ammeter": 0.0002, "pressure": 1.2e-5,
                           "aperture_lifetime_s": 123.25},
             qualified=True, qualified_index=1,
-            flags={"settled": True, "plasma_present": True},
+            flags={"settled": True, "plasma_present": True,
+                   "observed_drift_a_per_min": 0.0012},
         )
         c.check("raw exclusion accepted",
                 vr.sup.recording.submit_hcpes_observation(excluded))
@@ -160,6 +161,7 @@ async def main() -> int:
                 len(timeline) == 2
                 and timeline[0]["phase"] == "reignite"
                 and timeline[0]["stage_current_mA"] == "0.05"
+                and timeline[1]["stage_current_rate_mA_per_min"] == "1.2"
                 and readable_points[0]["point"] == 1
                 and readable_points[0]["core_telemetry_means"]
                     ["aperture_lifetime_s"] == 123.25
@@ -170,7 +172,7 @@ async def main() -> int:
                 and readable_points[0]["collection"]["stage_current_mA"]["mean"]
                     == 0.2
                 and readable_points[0]["setpoints"]["supply:collimating"]["unit"]
-                    == "mA"
+                    == "A"
                 and "Inaccessible or partial conditions: 1" in summary_text
                 and "Never-settled conditions: 1" in summary_text)
         manifest = yaml.safe_load(root.joinpath("manifest.yaml").read_text(

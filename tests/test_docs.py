@@ -114,12 +114,16 @@ async def main() -> int:
             "_run_params.json" not in ALL.replace("_ald_run_params.json", ""))
     c.check("the ellipsometer sync is not placed on the Diagnostics tab",
             not re.search(r"Diagnostics[^.\n]{0,60}[Ee]llipsometer sync", ALL))
-    c.check("HCPES operator current units are documented as mA",
-            "operator-facing current controls" in ALL and "use mA" in ALL)
+    c.check("HCPES current unit boundary is documented",
+            "stage current in mA" in ALL
+            and "steering and collimating" in ALL and "in A" in ALL)
     c.check("HCPES acquisition order is explained as completion sequence",
             "order conditions completed" in ALL)
     c.check("header recording errors are active-owner only",
             "header chip clears when the affected recording" in ALL)
+    c.check("restart docs describe the no-overlap same-tab handoff",
+            "parent's PID" in ALL and "readiness handshake" in ALL
+            and "Restart successful - running version X.Y.Z" in ALL)
 
     c.section("6. every module and test is mentioned where it should be")
     modules = sorted(p for p in Path("reactor").rglob("*.py")

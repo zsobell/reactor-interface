@@ -62,11 +62,12 @@ flowchart TD
   snapshotted recipe cleanup. The protected Current recipe retains the prior
   Ar/fill/relay/HV/DC-supply behavior.
 - `control/hcpes_model.py` owns the versioned characterization plan, typed
-  parameter axes, lazy Cartesian expansion, duration estimates and polarity
-  compatibility signature. `control/hcpes_store.py` owns the revisioned plan
+  parameter axes, a distinct initial-plasma condition, lazy Cartesian
+  expansion, duration estimates and polarity compatibility signature.
+  `control/hcpes_store.py` owns the revisioned plan
   library and linked-polarity campaign state. `control/hcpes.py` owns one
-  resolved acquisition, including its restricted startup, stability gates,
-  bounded recovery and cleanup. It reaches hardware only through public
+  resolved acquisition, including its restricted initial-plasma startup,
+  stability gates, bounded recovery and cleanup. It reaches hardware only through public
   Supervisor methods and holds exclusive admission against recipes, pre-start,
   fill regulation, valve identification and manual writes to owned controls.
 - `telemetry.py` builds independent snapshots and manages bounded subscriber
@@ -85,8 +86,9 @@ flowchart TD
   carry statistics for every numeric qualified channel. Plain-text run summary,
   concise timeline CSV and multi-document point YAML are derived from the same
   ordered records for direct operator inspection. Device-facing setpoints and
-  explicitly named machine columns retain A; operator-facing current controls,
-  readable YAML, plots and hover text use mA.
+  explicitly named machine columns retain A. Measured stage current and its
+  drift use mA/mA/min at the operator boundary; steering and collimating supply
+  settings remain in A throughout.
 - `aperture_lifetime.py` integrates already-observed Glassman/relay state on a
   monotonic clock and atomically owns replacement history. It performs no
   hardware reads or writes.
@@ -97,6 +99,14 @@ flowchart TD
   the Analysis page. It has no Supervisor/device dependency and cross-checks
   campaign claims against both immutable source manifests before presenting a
   linked negative-to-positive series.
+- `server/app.py` owns the shutdown/restart HTTP lifecycle receipt. Restart
+  cannot bypass `Supervisor.stop()`: `__main__.py` first creates one detached
+  replacement, requires its readiness handshake, and then lets it wait for the
+  parent PID using the Win32 process query in `instances.py`. Only then does the
+  app run the same bounded teardown and process exit. A compact lifecycle JSONL
+  journal is imported into the replacement's ordinary Event Log/Error Log, so
+  the handoff remains visible after the parent disappears. The browser recognizes
+  the replacement by a fresh per-process identity before reloading the same tab.
 
 ## Polling and experiment timing
 
@@ -181,7 +191,8 @@ module `control.js`; `live-charts.js` owns plotting and chart interaction throug
 an explicit `createLiveCharts` interface, while `hcpes-editor.js` owns the
 Diagnostics characterization builder/monitor. `analysis.html` loads
 `analysis.css`, `analysis.js`, reusable `analysis-plot.js`, and the isolated
-`hcpes-analysis.js` tab. The latter presents current in mA and defines
+`hcpes-analysis.js` tab. The latter presents stage current in mA, support-supply
+current in A, and defines
 acquisition order as condition-completion sequence; its hover supplies every
 commanded setpoint plus outcome/provenance.
 `control-transport.js` owns HTTP/WebSocket lifecycle,
@@ -195,6 +206,8 @@ Hardware mapping is YAML. Labels, last-commanded valve state, last-started run
 name, shared run parameters, the pre-start recipe library, the HCPES plan and
 campaign library, and the shared generic-analysis layout are JSON. All state
 paths, including the process registry, are supplied through `StatePaths`.
+The restart lifecycle journal is JSON Lines because two successive processes
+append to it and the replacement imports its recent records.
 Machine-local maintenance state uses that boundary too:
 `config/aperture_lifetime.json` is a versioned atomic record of observed HCPES
 beam time and replacement history. Its owner consumes already-polled Glassman

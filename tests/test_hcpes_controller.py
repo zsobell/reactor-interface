@@ -8,6 +8,8 @@ import sys
 import threading
 from pathlib import Path
 
+import yaml
+
 from reactor.control.hcpes import _robust_slope_a_per_min
 from reactor.control.hcpes_model import HcpesPlan, resolve_plan
 from reactor.testing.virtual_reactor import VirtualReactor
@@ -18,7 +20,7 @@ def plan(
     cfg, *, grids=(100.0,), settle=0.01, recovery=0.08,
     stability_window=0.02, stability_wait=0.08, max_drift=10.0,
     parameter_window=0.01, parameter_wait=0.04, parameter_drift=5.0,
-    qualified=3, condition_mode="time",
+    qualified=3, condition_mode="time", initial=None,
 ) -> HcpesPlan:
     axes = [
         {"target": "mfc:ar", "mode": "fixed", "value": 1.0},
@@ -30,7 +32,7 @@ def plan(
     axes.extend(
         {"target": f"mfc:{mfc.id}", "mode": "locked_zero"}
         for mfc in cfg.mfcs if mfc.id != "ar")
-    return HcpesPlan.model_validate({
+    payload = {
         "id": "controller-test", "name": "Controller test", "axes": axes,
         "settings": {
             "establishment": {
@@ -51,7 +53,10 @@ def plan(
             "reignite_settle_s": 0.01,
             "qualified_samples": qualified,
         },
-    })
+    }
+    if initial is not None:
+        payload["initial_setpoints"] = initial
+    return HcpesPlan.model_validate(payload)
 
 
 async def rejects(awaitable, text: str) -> bool:
@@ -104,6 +109,12 @@ async def main() -> int:
         c.check("all four Keithley outputs are off",
                 all(not vr.supplies[supply].output_on for supply in (
                     "stage_bias", "grid_bias", "collimating", "steering")))
+        commanded = state["applied_setpoints"]
+        c.check("cleanup display retains only authoritative zeroed MFCs",
+                commanded
+                and all(target.startswith("mfc:") and value == 0
+                        for target, value in commanded.items()),
+                str(commanded))
         c.check("HV off command has a receipt",
                 vr.supplies["hv"].hv_off_calls == 1
                 and any(r["what"] == "command HV off" and r["ok"]
@@ -164,6 +175,66 @@ async def main() -> int:
                 and any(row.get("exclusion_reason") == "stability_window"
                         for row in raw))
 
+    c.section("independent initial plasma condition precedes sweep point one")
+    async with VirtualReactor() as vr:
+        vr.instruments["ammeter"].value = 0.001
+        initial = {
+            "mfc:ar": 5.0,
+            "supply:stage_bias": 20.0,
+            "supply:collimating": 2.0,
+            "supply:steering": 1.0,
+            "supply:grid_bias": 150.0,
+        }
+        resolved = resolve_plan(plan(
+            vr.sup.cfg, condition_mode="current", initial=initial,
+            stability_window=0.02, stability_wait=0.2,
+            parameter_window=0.01, parameter_wait=0.2), vr.sup.cfg)
+        ticker = await autotick(vr, period=0.005)
+        try:
+            await vr.sup.start_hcpes(
+                resolved, "independent-initial", polarity_confirmed=True)
+            complete = await wait_for(lambda: not vr.sup.hcpes_running, timeout=3)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+        bundle = vr.sup.recording.status()["hcpes"]
+        raw = [json.loads(line) for line in open(
+            bundle["directory"] + "/raw.jsonl", encoding="utf-8")]
+        first_qualified = next(row for row in raw if row.get("qualified"))
+        initial_rows = [row for row in raw
+                        if row.get("phase") == "initial_parameter"]
+        first_point_gate = [
+            row for row in raw
+            if row.get("point_index") == 1
+            and row.get("flags", {}).get("stability_profile")
+            == "parameter_change"
+        ]
+        c.check("startup values are commanded before point-one values",
+                complete
+                and vr.supplies["stage_bias"].voltage_calls[:2] == [20.0, 10.0]
+                and vr.supplies["grid_bias"].voltage_calls[:2] == [150.0, 100.0]
+                and vr.supplies["collimating"].current_calls[:2] == [2.0, 1.5]
+                and vr.supplies["steering"].current_calls[:2] == [1.0, 0.4],
+                str({key: {
+                    "voltage": vr.supplies[key].voltage_calls,
+                    "current": vr.supplies[key].current_calls,
+                } for key in ("stage_bias", "grid_bias", "collimating", "steering")}))
+        c.check("initial condition is recorded but never qualified",
+                len(initial_rows) == 5
+                and all(row.get("point_index") is None
+                        and not row.get("qualified") for row in initial_rows)
+                and first_qualified["point_index"] == 1)
+        c.check("changed first point receives parameter stability gate",
+                bool(first_point_gate)
+                and first_point_gate[-1]["elapsed_s"]
+                < first_qualified["elapsed_s"])
+        manifest = yaml.safe_load(
+            Path(bundle["directory"] + "/manifest.yaml").read_text(
+                encoding="utf-8"))
+        c.check("bundle reports the separate initial outcome",
+                manifest["initial_plasma"]["setpoints"]["mfc:ar"] == 5.0
+                and manifest["initial_plasma"]["settled"] is True)
+
     c.section("inaccessible regime advances and does not cycle supplies")
     async with VirtualReactor() as vr:
         resolved = resolve_plan(plan(vr.sup.cfg, grids=(100, 200)), vr.sup.cfg)
@@ -209,7 +280,8 @@ async def main() -> int:
         vr.instruments["ammeter"].value = 0.001
         resolved = resolve_plan(plan(
             vr.sup.cfg, grids=(100, 200), condition_mode="current",
-            settle=0.2, stability_window=0.02, stability_wait=0.08), vr.sup.cfg)
+            settle=0.2, stability_window=0.02, stability_wait=0.08,
+            parameter_wait=0.2), vr.sup.cfg)
         ticker = await autotick(vr, period=0.005)
         try:
             await vr.sup.start_hcpes(
@@ -221,33 +293,99 @@ async def main() -> int:
         bundle = vr.sup.recording.status()["hcpes"]
         raw = [json.loads(line) for line in open(
             bundle["directory"] + "/raw.jsonl", encoding="utf-8")]
+        parameter_gate = [
+            row for row in raw
+            if row.get("point_index") == 2
+            and row.get("exclusion_reason") == "stability_window"
+            and row.get("flags", {}).get("stability_profile")
+            == "parameter_change"
+        ]
         c.check("current mode gates the changed second condition without timed delay",
                 complete
-                and any(row.get("point_index") == 2
-                        and row.get("exclusion_reason") == "stability_window"
-                        and row.get("flags", {}).get("stability_profile")
-                        == "parameter_change"
-                        and row.get("flags", {}).get("stable_window_required_s")
+                and any(row.get("flags", {}).get("stable_window_required_s")
                         == 0.01
                         and row.get("flags", {}).get("max_drift_a_per_min") == 5.0
-                        for row in raw)
+                        for row in parameter_gate)
                 and not any(row.get("point_index") == 2
                             and row.get("exclusion_reason") == "parameter_settle"
                             for row in raw))
+        stable_ticks_after_trend = [
+            float(row["flags"]["stable_window_elapsed_s"])
+            for row in parameter_gate
+            if row.get("flags", {}).get("observed_drift_a_per_min") is not None
+        ]
+        c.check("stable timer starts at zero after trend qualifies",
+                stable_ticks_after_trend
+                and stable_ticks_after_trend[0] == 0
+                and max(stable_ticks_after_trend) >= 0.01,
+                str(stable_ticks_after_trend))
 
     c.section("robust drift rejects spikes but preserves a real trend")
     stable = [(i, 0.001 + (0.0005 if i == 10 else 0.0)) for i in range(21)]
+    endpoint_spike = [(i, 0.001 + (0.0005 if i == 9 else 0.0))
+                      for i in range(10)]
     ramp = [(i, 0.001 + (0.002 / 60.0) * i) for i in range(21)]
     c.check("isolated current spike does not invent long-term drift",
-            abs(_robust_slope_a_per_min(stable)) < 1e-9)
+            abs(_robust_slope_a_per_min(stable)) < 1e-9
+            and abs(_robust_slope_a_per_min(endpoint_spike)) < 1e-9)
     c.check("slow monotonic drift retains its physical A/min rate",
             abs(_robust_slope_a_per_min(ramp) - 0.002) < 1e-9)
+
+    c.section("recorded point drift follows the qualified collection")
+    async with VirtualReactor() as vr:
+        vr.instruments["ammeter"].value = 0.001
+        resolved = resolve_plan(plan(
+            vr.sup.cfg, grids=(100, 200), settle=0.04,
+            stability_window=0.02, qualified=5), vr.sup.cfg)
+
+        async def collection_ramp_ticks():
+            while True:
+                state = vr.sup.hcpes
+                if (state.get("point_index") == 2
+                        and state.get("phase") == "collecting qualified samples"):
+                    vr.instruments["ammeter"].value += 0.00002
+                else:
+                    vr.instruments["ammeter"].value = 0.001
+                await vr.tick()
+                await asyncio.sleep(0.005)
+
+        ticker = asyncio.create_task(collection_ramp_ticks())
+        try:
+            await vr.sup.start_hcpes(
+                resolved, "collection-drift-positive", polarity_confirmed=True)
+            complete = await wait_for(lambda: not vr.sup.hcpes_running, timeout=3)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+        bundle = vr.sup.recording.status()["hcpes"]
+        points = list(csv.DictReader(open(
+            bundle["directory"] + "/points.csv", encoding="utf-8", newline="")))
+        raw = [json.loads(line) for line in open(
+            bundle["directory"] + "/raw.jsonl", encoding="utf-8")]
+        second_qualified = [row for row in raw
+                            if row.get("point_index") == 2 and row.get("qualified")]
+        final_live_slope = second_qualified[-1]["flags"].get(
+            "observed_drift_a_per_min")
+        recorded_slope = float(points[1]["observed_drift_a_per_min"])
+        c.check("point summary uses the trend through its final accepted reading",
+                complete and final_live_slope is not None
+                and abs(recorded_slope - final_live_slope) < 1e-12
+                and abs(recorded_slope) > 0.001,
+                f"recorded={recorded_slope}, final={final_live_slope}")
+        c.check("timed parameter display uses the parameter drift profile",
+                vr.sup.hcpes["drift_window_s"] == 0.01
+                and vr.sup.hcpes["drift_threshold_a_per_min"] == 5.0,
+                str({
+                    "window": vr.sup.hcpes["drift_window_s"],
+                    "threshold": vr.sup.hcpes[
+                        "drift_threshold_a_per_min"],
+                }))
 
     c.section("successful recovery repeats the full stability gate")
     async with VirtualReactor() as vr:
         resolved = resolve_plan(plan(
             vr.sup.cfg, grids=(100, 200), recovery=0.5,
-            stability_window=0.05, stability_wait=0.2), vr.sup.cfg)
+            stability_window=0.05, stability_wait=0.3), vr.sup.cfg)
         pulsed = False
 
         async def recovering_ticks():
@@ -296,7 +434,7 @@ async def main() -> int:
     async with VirtualReactor() as vr:
         resolved = resolve_plan(plan(
             vr.sup.cfg, recovery=0.07, stability_window=0.05,
-            stability_wait=0.12), vr.sup.cfg)
+            stability_wait=0.25), vr.sup.cfg)
         pulse_count = 0
         prior_relay = False
         first_restored_at = None
@@ -333,14 +471,19 @@ async def main() -> int:
         bundle = vr.sup.recording.status()["hcpes"]
         row = next(csv.DictReader(Path(bundle["directory"], "points.csv").open(
             encoding="utf-8", newline="")))
-        gates = json.loads(row["stability_gates"])
+        manifest = yaml.safe_load(
+            Path(bundle["directory"], "manifest.yaml").read_text(
+                encoding="utf-8"))
+        gates = manifest["initial_plasma"]["stability_gates"]
         c.check("dropout during establishment returns to another reignition pulse",
-                complete and pulse_count >= 2 and row["accessibility"] == "recovered",
+                complete and pulse_count >= 2
+                and row["accessibility"] == "accessible",
                 f"pulses={pulse_count}, row={row}")
         c.check("successful relight receives a full gate outside retry time",
                 gates[-1]["profile"] == "establishment"
                 and gates[-1]["outcome"] == "settled"
                 and gates[-1]["elapsed_s"] >= 0.05
+                and manifest["initial_plasma"]["settled"] is True
                 and row["settled"] == "True",
                 str(gates))
 
@@ -370,9 +513,12 @@ async def main() -> int:
         bundle = vr.sup.recording.status()["hcpes"]
         row = next(csv.DictReader(Path(bundle["directory"], "points.csv").open(
             encoding="utf-8", newline="")))
-        c.check("point carries analysis-visible settled false and slope",
-                row["settled"] == "False"
-                and row["observed_drift_a_per_min"] not in ("", None)
+        manifest = yaml.safe_load(
+            Path(bundle["directory"], "manifest.yaml").read_text(
+                encoding="utf-8"))
+        c.check("initial timeout is visible without mislabelling point one",
+                manifest["initial_plasma"]["settled"] is False
+                and row["settled"] == "True"
                 and row["actual_qualified_samples"] == "3", str(row))
         c.check("operator event names the timeout",
                 any("never settled" in event["message"] for event in vr.sup.events))

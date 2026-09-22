@@ -74,9 +74,10 @@ across conditions and recovery attempts. Every completion, stop, failure and
 server-shutdown path commands all four outputs off. Manual supply changes are
 refused while HCPES owns them.
 
-The driver and machine-readable `points.csv`/JSONL records use A. The HCPES
-plan editor, live commanded-values panel, readable `points.yaml`, plots and
-hover details convert current to **mA** for operators.
+The driver, machine-readable `points.csv`/JSONL records, HCPES plan editor,
+live commanded-values panel, readable `points.yaml`, plots and hover details
+all use **A** for steering and collimating settings. Measured stage current is
+the distinct operator-facing signal shown in mA.
 
 ### By hand, from the Hardware tab (requested 2026-08-25)
 
@@ -87,6 +88,12 @@ raising both never briefly runs the new voltage against the old, lower current
 limit.
 
 Turning an output **on** asks for confirmation; turning it off never does.
+
+Once the supply acknowledges a Set command, its Hardware card updates its
+commanded setpoint immediately rather than waiting for the next poll. With the
+output off, the notice says the **setpoint was saved**; with the output on, it
+says the **energized output was set**. This avoids claiming that a disabled
+supply is delivering the requested output.
 
 This supersedes an earlier rule worth recording, because the reasoning changed
 rather than being forgotten. Until 2026-08-25 the driver deliberately never
@@ -237,7 +244,7 @@ rather than inventing a meaning for it. Check the front panel.
 Normal run files log measured voltage and current; setpoints and the derived
 CV/CC mode stay on the Hardware card. HCPES additionally records the reviewed
 condition setpoints and all numeric telemetry. Keithley current is stored in A
-in machine-oriented files and shown in mA in HCPES operator views.
+in machine-oriented files and shown in A in HCPES operator views.
 
 | Snapshot key | Run-export column | `logging.columns` |
 |---|---|---|

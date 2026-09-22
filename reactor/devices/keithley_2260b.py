@@ -13,7 +13,7 @@ WHAT THIS DRIVER COMMANDS
 `:OUTP ON` / `:OUTP OFF`, `:SOUR:VOLT` and `:SOUR:CURR`. All four are reachable
 from the Hardware tab, and two of them also fire automatically.
 
-**Automatically** (operator-requested 2026-08-21):
+**Automatically** (operator-requested 2026-08-21 and extended for HCPES):
 
 * All four outputs come ON at pre-start and go OFF when a run ends, aborts or
   is stopped. They are NOT touched by plasma events: they stay on across a
@@ -22,6 +22,8 @@ from the Hardware tab, and two of them also fire automatically.
   dump is grounded, so cycling it with the beam would be actively harmful.
 * The sample-bias unit's VOLTAGE is set from the run's sample-bias field, and
   only when that field is non-zero.
+* An HCPES characterization commands the stage/grid voltage and the
+  collimating/steering current described by its reviewed plan.
 
 **Manually**, from the Hardware-tab card (operator-requested 2026-08-25): a
 voltage field, a current field and an output toggle per supply.
@@ -30,8 +32,9 @@ Note this supersedes an earlier rule. Until 2026-08-25 this driver deliberately
 never touched a **current limit** - the four supplies were found with Zach's
 working setpoints dialled in (20 V/0.5 A, 30.07 V/3.7 A, 100 V/0.2 A,
 150 V/2.5 A) and those were his alone to set. He has since asked for current
-fields on the Hardware tab, so `set_current` exists. Nothing sets a current
-*automatically*; it happens only when the operator submits the field.
+fields on the Hardware tab, so `set_current` exists. Normal deposition recipes
+do not change those current limits; HCPES does because the currents are
+explicit axes in its operator-reviewed characterization plan.
 
 TRANSPORT - NOT USBTMC
 ======================
@@ -388,18 +391,23 @@ class Keithley2260B(Device):
         if self.max_voltage is not None:
             v = min(v, self.max_voltage)
         await self._talk(self._write_checked, f":SOUR:VOLT {v:.3f}")
+        # The acknowledged command is authoritative immediately. Waiting for
+        # the next poll left the Hardware tab and mismatch checks comparing an
+        # HCPES request with the previous manual value.
+        self.voltage_setpoint = v
 
     async def set_current(self, amps: float) -> None:
         """Set the current limit.
 
-        Only ever called from the operator's Hardware-tab field - nothing sets a
-        current automatically. Clamped to the supply's own reported maximum,
+        Called from the operator's Hardware-tab field and from an explicitly
+        reviewed HCPES plan. Clamped to the supply's own reported maximum,
         which is the hardware rating rather than a policy limit.
         """
         a = abs(float(amps))
         if self.max_current is not None:
             a = min(a, self.max_current)
         await self._talk(self._write_checked, f":SOUR:CURR {a:.3f}")
+        self.current_setpoint = a
 
     async def read_setpoints(self) -> tuple[float | None, float | None]:
         """(voltage program, current limit). A read; safe at any time."""

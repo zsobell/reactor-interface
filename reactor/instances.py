@@ -52,6 +52,9 @@ from pathlib import Path
 #: read-modify-write, and the whole point is that a second copy is a normal
 #: thing to have to clean up after.
 INSTANCES_DIR = Path(__file__).resolve().parent.parent / "config" / "instances"
+LIFECYCLE_PATH = (Path(__file__).resolve().parent.parent
+                  / "config" / "server_lifecycle.jsonl")
+LIFECYCLE_LIMIT = 500
 
 _STILL_ACTIVE = 259
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -102,6 +105,48 @@ def is_alive(pid: int) -> bool:
         return code.value == _STILL_ACTIVE
     finally:
         k.CloseHandle(h)
+
+
+def append_lifecycle_event(kind: str, message: str, *, path: Path | None = None,
+                           timestamp: float | None = None) -> dict:
+    """Persist one server-lifecycle event across a process handoff.
+
+    The ordinary event/error buffers intentionally live in one server process.
+    Restart is the exception: its parent disappears before the operator can
+    inspect the result.  This small JSONL journal lets the replacement import
+    those records into the normal Event Log and Error Log.  It never raises;
+    lifecycle logging must not become another reason a server cannot stop.
+    """
+    entry = {"t": time.time() if timestamp is None else timestamp,
+             "kind": str(kind), "message": str(message)}
+    try:
+        target = path or LIFECYCLE_PATH
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    return entry
+
+
+def read_lifecycle_events(*, path: Path | None = None,
+                          limit: int = LIFECYCLE_LIMIT) -> list[dict]:
+    """Read the recent valid lifecycle records, ignoring torn final writes."""
+    try:
+        lines = (path or LIFECYCLE_PATH).read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return []
+    events: list[dict] = []
+    for line in lines[-max(0, limit):]:
+        try:
+            entry = json.loads(line)
+            if (isinstance(entry, dict) and isinstance(entry.get("t"), (int, float))
+                    and isinstance(entry.get("kind"), str)
+                    and isinstance(entry.get("message"), str)):
+                events.append(entry)
+        except (TypeError, ValueError):
+            continue
+    return events
 
 
 def terminate(pid: int) -> bool:

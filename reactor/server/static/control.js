@@ -843,7 +843,8 @@ const charts = createLiveCharts({$, trend, num, clock, sci, fmtCurrent,
                                   currentUnit, esc, setHtml});
 const {drawAllCharts, drawChart, smoothing} = charts;
 const transport = createControlTransport({$, document, fetchImpl:fetch,
-  WebSocketCtor:WebSocket, location, render});
+  WebSocketCtor:WebSocket, location, render, sessionStorage,
+  reloadPage:()=>window.location.reload(), onLifecycle:appendLocalLog});
 const {dispose:disposeTransport, post, resume:resumeTransport,
   setLink, suspend:suspendTransport, toast} = transport;
 const devicePanels = createDevicePanels({$, document, cssEscape:value => CSS.escape(value),
@@ -864,6 +865,17 @@ function prestartBaseValues(){
     sample_bias_v:run.sample_bias_v,
     sample_bias_polarity:run.sample_bias_polarity,
   };
+}
+
+function appendLocalLog(kind, message){
+  const entry = {t:Date.now() / 1000, kind, message};
+  pushLog(EVENT_LOG, [entry]);
+  renderLog($("events"), EVENT_LOG.rows);
+  if(kind === "error" || kind === "flag"){
+    pushLog(ERROR_LOG, [entry]);
+    renderLog($("errors"), ERROR_LOG.rows);
+    updateErrCount();
+  }
 }
 const prestartEditor = createPrestartEditor({$, document, windowObj:window,
   fetchImpl:fetch, toast, confirmImpl:(...args)=>confirm(...args),
@@ -966,18 +978,11 @@ $("preStartBtn").onclick = async () => {
     $("preSection").open = true;
   }catch(_){}
 };
-/* Restart the server so it picks up changed code (requested 2026-08-25, after
-   a pre-start silently did nothing against a four-day-old process).
-
-   The dialog is most of the feature: a restart is not a neutral act on this
-   tool. The WebSocket already retries every 1.5 s, so the page reconnects on
-   its own once the new process is listening - all this has to do is say so and
-   stop the button being pressed twice. */
-$("shutdownBtn").onclick = async () => {
+function confirmServerLifecycle(restarting){
   // lastRunState is maintained by recordRun() on every frame.
   const running = ["running", "paused", "aborting"].includes(lastRunState);
   const lines = [
-    "Shut down the reactor server?",
+    restarting ? "Restart the reactor server?" : "Shut down the reactor server?",
     "",
     "This stops THIS server and kills any other reactor server still running, "
       + "so nothing is left holding the DAQ or the serial ports.",
@@ -999,30 +1004,51 @@ $("shutdownBtn").onclick = async () => {
       + "— neither driver commands anything on disconnect. They stay as "
       + "they are.",
     "",
-    "The interface will go offline. Start it again from the Reactor Interface "
-      + "shortcut.",
+    restarting
+      ? "The same browser tab will reconnect after the replacement server is ready."
+      : "The interface will go offline. Start it again from the Reactor Interface shortcut.",
   ].filter(l => l !== null);
-  if(!confirm(lines.join("\n"))) return;
+  return confirm(lines.join("\n"));
+}
 
-  const btn = $("shutdownBtn");
-  btn.disabled = true;
+async function requestServerLifecycle(restarting){
+  if(!confirmServerLifecycle(restarting)) return;
+
+  appendLocalLog("command", `server ${restarting ? "restart" : "shutdown"} requested from this browser`);
+
+  const shutdownBtn = $("shutdownBtn"), restartBtn = $("restartBtn");
+  shutdownBtn.disabled = true;
+  restartBtn.disabled = true;
   $("shutdownHint").style.color = "";
-  $("shutdownHint").textContent = "Releasing the DAQ and the serial ports…";
+  $("shutdownHint").textContent = restarting
+    ? "Releasing hardware, then starting the replacement server…"
+    : "Releasing the DAQ and the serial ports…";
   try{
     // This response now arrives AFTER the teardown has run, and carries a
     // receipt of what was let go - so there is something real to show rather
     // than "the page went offline, probably fine".
-    const r = await post("/api/server/shutdown");
-    setLink("shutting down", "warn");
+    const r = await post(restarting ? "/api/server/restart" : "/api/server/shutdown");
+    setLink(restarting ? "restarting" : "shutting down", "warn");
     if(r && r.also_killed && r.also_killed.length)
       toast(`Also killed ${r.also_killed.length} other server instance(s)`, true);
-    transport.watchShutdown(r);
-  }catch(_){
-    // A 501 means this server cannot stop itself; post() already toasted.
-    btn.disabled = false;
-    $("shutdownHint").textContent = "Shutdown is not available for this server.";
+    if(restarting){
+      appendLocalLog("restart", `restart accepted; hardware teardown completed and replacement `
+        + `process ${(r.restart && r.restart.pid) || "unknown"} is taking over`);
+      $("shutdownHint").textContent = "Hardware released. Waiting for the replacement server…";
+      transport.watchRestart(r);
+    }else transport.watchShutdown(r);
+  }catch(error){
+    // A 501 means this server cannot manage its own lifecycle; post() toasted it.
+    shutdownBtn.disabled = false;
+    restartBtn.disabled = false;
+    $("shutdownHint").textContent = `${restarting ? "Restart" : "Shutdown"} is not available for this server.`;
+    appendLocalLog("error", `server ${restarting ? "restart" : "shutdown"} request failed: `
+      + `${error && error.message ? error.message : "unknown error"}`);
   }
-};
+}
+
+$("shutdownBtn").onclick = () => requestServerLifecycle(false);
+$("restartBtn").onclick = () => requestServerLifecycle(true);
 
 /* Did it actually stop, and is the tool ready to start again?
 
@@ -1096,6 +1122,11 @@ let bootstrapComplete = false;
   await seedEvents();
   if(pageDisposed) return;
   bootstrapComplete = true;
+  const restartedVersion = sessionStorage.getItem("reactor.restart.success");
+  if(restartedVersion){
+    sessionStorage.removeItem("reactor.restart.success");
+    toast(`Restart successful - running version ${restartedVersion}`, true);
+  }
   if(pageVisible) resumeTransport();
 })();
 

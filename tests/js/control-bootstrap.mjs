@@ -22,13 +22,16 @@ for (const match of html.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
 globalThis.document = {
   getElementById: id => elements.get(id) || null,
   querySelectorAll: () => [], addEventListener() {}, removeEventListener() {},
-  createElement: tag => element(tag), documentElement: element('html'),
+  createElement: tag => element(tag), documentElement: element('html'), body: {appendChild() {}},
 };
 const windowEvents = {};
 globalThis.window = {addEventListener(name, fn) {windowEvents[name] = fn;}, devicePixelRatio: 1};
 globalThis.location = {protocol: 'https:', host: 'reactor.test'};
 const stored = new Map();
 globalThis.localStorage = {getItem: k => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v)};
+const restartStored = new Map([['reactor.restart.success', '2.0.2']]);
+globalThis.sessionStorage = {getItem: k => restartStored.get(k) ?? null,
+  setItem: (k, v) => restartStored.set(k, v), removeItem: k => restartStored.delete(k)};
 const requested = [];
 const hcpesPlan = {schema_version:1, id:'current-hcpes-plan', name:'Current HCPES template',
   description:'', revision:1, builtin:true, prestart_recipe_id:'current-hcpes-prestart',
@@ -65,6 +68,8 @@ assert.ok(requested.includes('/api/events'), 'event history loaded');
 assert.match(elements.get('events').innerHTML, /seeded startup event/,
   'seeded event history renders before a new telemetry event arrives');
 assert.match(elements.get('smoothHint').textContent, /off/, 'page reads extracted chart settings during bootstrap');
+assert.equal(restartStored.has('reactor.restart.success'), false,
+  'restart-success notice is consumed once after the replacement page boots');
 const oldWorkerError = {logging:{active:true,run_export:{active:false},ellipsometer:{active:false},
   hcpes:{active:false},errors:{worker:'FileExistsError: old session'}},recipe:{},
   power_supplies:[],mfcs:[],instruments:[],daq:{configured:true}};

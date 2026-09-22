@@ -104,7 +104,11 @@ class FakeDaq:
 
     async def write_do(self, key: str, value: bool) -> None:
         self.do_state[key] = value
-        self.do_writes.append((time.time(), key, value))
+        # Timing assertions must use the same monotonic domain as RecipeRunner.
+        # Wall time can jump (and on Windows has coarser resolution), which can
+        # turn a correct scheduler interval into a spurious negative/positive
+        # error in a fake-device test.
+        self.do_writes.append((time.monotonic(), key, value))
 
     async def id_write(self, line: str, state: bool) -> None:
         self.id_state[line] = state
@@ -169,7 +173,7 @@ class FakeMfc(Device):
     async def set_setpoint_sccm(self, sccm: float) -> float:
         self.commanded_sccm = float(sccm)
         self.flow_sccm = float(sccm)
-        self.setpoint_calls.append((time.time(), self.commanded_sccm))
+        self.setpoint_calls.append((time.monotonic(), self.commanded_sccm))
         return self.commanded_sccm
 
     def status(self) -> dict:
@@ -356,9 +360,8 @@ class FakeKeithley(Device):
         self.output_events: list[tuple[float, bool]] = []
         #: Every set_voltage(...) magnitude, in order.
         self.voltage_calls: list[float] = []
-        #: Every set_current(...) magnitude, in order. Nothing sets a current
-        #: automatically - only the operator's Hardware-tab field does - so a
-        #: non-empty list after a run is a bug.
+        #: Every set_current(...) magnitude, in order. Normal ALD/CVD runs do
+        #: not set these; the Hardware tab and reviewed HCPES plans may.
         self.current_calls: list[float] = []
         self.voltage_setpoint: float | None = 0.0
         self.current_setpoint: float | None = 0.0
@@ -400,7 +403,7 @@ class FakeKeithley(Device):
 
     async def set_output(self, on: bool) -> None:
         self.output_calls.append(bool(on))
-        self.output_events.append((time.time(), bool(on)))
+        self.output_events.append((time.monotonic(), bool(on)))
         self.output_on = bool(on)
 
     async def set_voltage(self, volts: float) -> None:

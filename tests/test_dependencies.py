@@ -10,6 +10,7 @@ from reactor.testing.virtual_reactor import (
 from reactor.config import load_config
 from reactor.dependencies import DeviceFactory, StatePaths
 from reactor.devices.ellipsometer import EllipsometerPoint
+from reactor.devices.instrument import parse_scpi_reading
 from reactor import supervisor
 from tests._support import Checker, wait_for
 
@@ -106,6 +107,20 @@ async def ellipsometer_lifecycle(c, missing_device):
 
 async def main():
     c = Checker('test_dependencies')
+    c.section('DMM readings stay in base amperes across display prefixes')
+    c.check('plain DMM6500 READ value is already amperes',
+            parse_scpi_reading('+1.250000E-03', 'A') == 0.00125)
+    c.check('explicit mA and uA formats normalize to amperes',
+            parse_scpi_reading('1.25mA', 'A') == 0.00125
+            and parse_scpi_reading('1250,uA', 'A') == 0.00125)
+    try:
+        parse_scpi_reading('1.25V', 'A')
+        wrong_unit_rejected = False
+    except ValueError:
+        wrong_unit_rejected = True
+    c.check('a non-current unit cannot silently enter the current channel',
+            wrong_unit_rejected)
+
     defaults = (supervisor.LABELS_PATH, supervisor.VALVE_STATE_PATH, supervisor.RUN_NAME_PATH)
     async with VirtualReactor() as first, VirtualReactor() as second:
         c.check('startup does not drive outputs', not first.daq.do_writes and not second.daq.do_writes)

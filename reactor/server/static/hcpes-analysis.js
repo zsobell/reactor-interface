@@ -41,13 +41,13 @@ export function label(key){
   if(key.startsWith("setpoint:")){
     const target = key.slice(9).replace(/^mfc:/, "MFC ").replace(/^supply:/, "");
     const unit = key.includes("mfc:") ? "sccm"
-      : /(steering|collimating)$/.test(key) ? "mA" : "V";
+      : /(steering|collimating)$/.test(key) ? "A" : "V";
     return `${target.replaceAll("_", " ")} (${unit})`;
   }
   if(key.startsWith("channel:")){
     const channel=key.slice(8), name=channel.replaceAll(".", " · ");
     if(channel === "inst.ammeter") return "Stage current mean (mA)";
-    if(/^psu\..+\.current$/.test(channel)) return `${name} mean (mA)`;
+    if(/^psu\..+\.current$/.test(channel)) return `${name} mean (A)`;
     if(/^hv\..+\.current$/.test(channel)) return `${name} mean (mA)`;
     return `${name} mean`;
   }
@@ -57,9 +57,7 @@ export function label(key){
 export function displayScale(key){
   if(/^stage_current_(mean|stddev|min|max)_a$/.test(key)) return 1000;
   if(key === "observed_drift_a_per_min") return 1000;
-  if(/^setpoint:supply:(steering|collimating)$/.test(key)) return 1000;
   if(key === "channel:inst.ammeter") return 1000;
-  if(/^channel:psu\..+\.current$/.test(key)) return 1000;
   return 1;
 }
 
@@ -457,10 +455,14 @@ function drawHeat(g,width,height,points){
   const grad=g.createLinearGradient(0,bottom,0,top);grad.addColorStop(0,heatColour(0));grad.addColorStop(1,heatColour(1));
   g.fillStyle=grad;g.fillRect(right+18,top,14,bottom-top);
   g.textAlign="left";g.fillText(fmt(hi),right+36,top+5);g.fillText(fmt(lo),right+36,bottom);
-  legend([{name:`cell colour: ${label(metric)}`,colour:"#bc8cff"}]);
+  legend([
+    {name:`${label(metric)} low ${fmt(lo)}`,colour:heatColour(0)},
+    {name:`mid ${fmt((lo+hi)/2)}`,colour:heatColour(.5)},
+    {name:`high ${fmt(hi)}`,colour:heatColour(1)},
+  ]);
 }
 
-function heatColour(t){
+export function heatColour(t){
   const hue=240-220*Math.max(0,Math.min(1,t));
   return `hsl(${hue} 75% 52%)`;
 }

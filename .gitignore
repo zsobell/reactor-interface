@@ -37,7 +37,9 @@ Desktop.ini
 /server.log.*
 /config/run_params.json
 /config/prestart_recipes.json
+/config/hcpes_plans.json
 /config/aperture_lifetime.json
+/config/server_lifecycle.jsonl
 
 # Local browser/visual-QA fixtures
 /.visual-state/
