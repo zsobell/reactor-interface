@@ -129,6 +129,8 @@ class Telemetry:
             # Commanded values their own measurements disagree with, right now.
             "setpoint_flags": self.sup.setpoint_flags(),
             "prestart": self.sup.prestart,
+            "hcpes": self.sup.hcpes,
+            "aperture_lifetime": self.sup.aperture_lifetime.snapshot(),
             "marks": [m for m in self.sup.marks if self.sup.clock.wall() - m["t"] <= 900][-500:],
             "run_valves": {"dose": self.sup.runs.session.dose_valve,
                            "plasma": self.sup.runs.session.plasma_switch},

@@ -48,17 +48,21 @@
   <h1 style="font-size:15px">Reactor Analysis</h1>
   <span class="badge">read-only</span>
   <a href="/" class="badge" style="text-decoration:none">&larr; control interface</a>
+  <nav class="analysis-tabs" aria-label="Analysis workspace">
+    <button class="analysis-tab active" data-analysis-tab="run">Run data</button>
+    <button class="analysis-tab" data-analysis-tab="hcpes">HCPES characterization</button>
+  </nav>
   <div class="spacer"></div>
-  <label class="badge" style="cursor:pointer;display:flex;align-items:center;gap:6px">
+  <label class="badge run-analysis-control" style="cursor:pointer;display:flex;align-items:center;gap:6px">
     <input type="checkbox" id="showSettings" checked> settings
   </label>
-  <label class="badge" style="display:flex;align-items:center;gap:6px">
+  <label class="badge run-analysis-control" style="display:flex;align-items:center;gap:6px">
     columns
     <select id="cols" class="mini" style="padding:1px 4px">
       <option>1</option><option selected>2</option><option>3</option><option>4</option>
     </select>
   </label>
-  <label class="badge" style="display:flex;align-items:center;gap:6px">
+  <label class="badge run-analysis-control" style="display:flex;align-items:center;gap:6px">
     height
     <input type="number" id="plotH" value="260" min="140" max="700" step="20"
            style="width:62px;padding:1px 4px">
@@ -66,6 +70,8 @@
 </header>
 
 <main>
+
+<div id="runAnalysisPane" class="analysis-pane">
 
   <section class="card">
     <h2>Data source
@@ -170,8 +176,98 @@
   <div id="grid"></div>
   <div class="empty" id="emptyMsg">No plots yet — load a file and press <b>+ Add plot</b>.</div>
 
+</div>
+
+<div id="hcpesAnalysisPane" class="analysis-pane hidden">
+  <section class="card">
+    <h2>HCPES source
+      <span class="grow"></span>
+      <span id="hcpesSourceInfo">no characterization loaded</span>
+    </h2>
+    <div class="body">
+      <div class="row">
+        <select id="hcpesSourceSel"><option value="">— scanning HCPES bundles —</option></select>
+        <button id="hcpesLoad" class="primary">Load</button>
+        <button id="hcpesRescan" title="Rescan the data folder">↻</button>
+      </div>
+      <div id="hcpesCompatibility" class="hcpes-analysis-alert hidden"></div>
+      <div id="hcpesSummary" class="hcpes-analysis-summary"></div>
+      <div class="hint">
+        Session bundles may be complete, aborted, or partial. A linked polarity campaign
+        is drawn as one signed negative-to-positive sweep; both zero-bias points remain
+        visible, and every hover identifies its source session and point.
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Characterization view
+      <span class="grow"></span>
+      <button id="hcpesCopy" class="mini">Copy visible data</button>
+      <button id="hcpesPng" class="mini">PNG</button>
+    </h2>
+    <div class="body">
+      <div class="hcpes-analysis-controls">
+        <label>View
+          <select id="hcpesView">
+            <option value="line">Line slices</option>
+            <option value="heat">Heat map</option>
+            <option value="trend">Run sequence / acquisition order</option>
+          </select>
+        </label>
+        <label id="hcpesXWrap">X axis<select id="hcpesX"></select></label>
+        <label id="hcpesHeatYWrap" class="hidden">Y axis<select id="hcpesHeatY"></select></label>
+        <label>Measured value<select id="hcpesMetric"></select></label>
+      </div>
+      <div id="hcpesViewHelp" class="hcpes-view-help"></div>
+      <div class="hcpes-filter-head">Parameter filters <span>“All” values become separate slices.</span></div>
+      <div id="hcpesFilters" class="hcpes-analysis-filters"></div>
+      <div class="hcpes-analysis-canvasbox">
+        <canvas id="hcpesCanvas"></canvas>
+        <div id="hcpesHover" class="hcpes-hover hidden"></div>
+      </div>
+      <div id="hcpesLegend" class="hcpes-analysis-legend"></div>
+      <div class="hint">
+        Lines and heat-map values use qualified samples only. Red rings mark points that
+        never met the requested current-drift threshold; crosses mark inaccessible points.
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Raw interval inspector
+      <span class="grow"></span>
+      <span id="hcpesRawInfo">—</span>
+    </h2>
+    <div class="body">
+      <div class="row">
+        <select id="hcpesRawSession"></select>
+        <select id="hcpesRawPoint"><option value="">all points</option></select>
+        <select id="hcpesRawMode">
+          <option value="omitted">omitted / excluded intervals</option>
+          <option value="all">all raw intervals</option>
+          <option value="qualified">qualified samples only</option>
+        </select>
+        <button id="hcpesRawLoad">Load raw intervals</button>
+      </div>
+      <div class="hcpes-raw-canvasbox"><canvas id="hcpesRawCanvas"></canvas></div>
+      <div class="hint">
+        This view includes stability windows, timed settles, pauses, plasma loss,
+        reignite pulses, recovery, and any other interval excluded from point statistics.
+      </div>
+      <div class="hcpes-raw-table-wrap">
+        <table class="hcpes-raw-table">
+          <thead><tr><th>Elapsed</th><th>Point</th><th>Phase</th><th>Stage current (mA)</th><th>Reason</th><th>Excluded as</th></tr></thead>
+          <tbody id="hcpesRawRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</div>
+
 </main>
 
+<script type="module" src="/static/hcpes-analysis.js"></script>
 <script type="module" src="/static/analysis.js"></script>
 </body>
 </html>

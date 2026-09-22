@@ -12,12 +12,18 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
+import os
+import secrets
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
 from pathlib import Path
+
+from . import instances
 
 #: Named, not `logging.getLogger(__name__)`: this module is `__main__` when run
 #: with -m, and the file handler and level are configured for "reactor".
@@ -28,6 +34,96 @@ from pathlib import Path
 log = logging.getLogger("reactor")
 
 
+RESTART_PARENT_WAIT_S = 15.0
+RESTART_HANDSHAKE_WAIT_S = 3.0
+
+
+def restart_command(args: argparse.Namespace, parent_pid: int,
+                    ready_file: Path | None = None) -> list[str]:
+    """Build the replacement invocation without carrying `--open` across.
+
+    The existing browser page is deliberately retained.  The replacement waits
+    for its parent before it connects to a device or attempts to bind the port.
+    """
+    command = [sys.executable, "-m", "reactor", "--host", str(args.host),
+               "--port", str(args.port), "--restart-after-pid", str(parent_pid)]
+    if ready_file is not None:
+        command.extend(("--restart-ready-file", str(ready_file)))
+    command.extend(("--restart-lifecycle-file", str(instances.LIFECYCLE_PATH)))
+    if args.config is not None:
+        command.extend(("--config", str(args.config)))
+    if args.verbose:
+        command.append("--verbose")
+    return command
+
+
+def wait_for_parent_exit(parent_pid: int, *, timeout_s: float = RESTART_PARENT_WAIT_S) -> bool:
+    """Do not let a replacement overlap its parent on the reactor hardware.
+
+    ``os.kill(pid, 0)`` is a POSIX liveness idiom, not a portable one.  On this
+    Windows host it raises WinError 6 for a healthy parent.  The instance
+    registry already owns the tested Win32 process query, so restart uses that
+    same source of truth.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not instances.is_alive(parent_pid):
+            return True
+        time.sleep(0.05)
+    return not instances.is_alive(parent_pid)
+
+
+def launch_replacement(args: argparse.Namespace, parent_pid: int,
+                       ready_file: Path) -> subprocess.Popen:
+    """Start one detached replacement that waits for this process to exit."""
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    return subprocess.Popen(
+        restart_command(args, parent_pid, ready_file),
+        cwd=str(Path(__file__).resolve().parent.parent),
+        close_fds=True,
+        creationflags=flags,
+    )
+
+
+def start_restart_handoff(args: argparse.Namespace) -> dict[str, int]:
+    """Launch the replacement and describe it to the HTTP restart route.
+
+    This lives at module scope deliberately: ``main`` also has windowless
+    startup fallbacks, and imports made inside a function become local names
+    for its nested callbacks.  The handoff must always be able to read this
+    process's PID before any shutdown is committed.
+    """
+    parent_pid = os.getpid()
+    ready_file = (instances.INSTANCES_DIR
+                  / f"restart-{parent_pid}-{secrets.token_hex(8)}.ready.json")
+    ready_file.parent.mkdir(parents=True, exist_ok=True)
+    ready_file.unlink(missing_ok=True)
+    replacement = launch_replacement(args, parent_pid, ready_file)
+    deadline = time.monotonic() + RESTART_HANDSHAKE_WAIT_S
+    try:
+        while time.monotonic() < deadline:
+            try:
+                ready = json.loads(ready_file.read_text(encoding="utf-8"))
+                child_pid = int(ready.get("pid", 0))
+                if (ready.get("parent_pid") == parent_pid and child_pid > 0
+                        and ready.get("state") == "waiting"):
+                    log.warning("restart handoff confirmed replacement PID %s", child_pid)
+                    return {"pid": child_pid}
+            except (FileNotFoundError, OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+            time.sleep(0.025)
+    finally:
+        ready_file.unlink(missing_ok=True)
+
+    with contextlib.suppress(Exception):
+        if replacement.poll() is None:
+            replacement.terminate()
+    raise RuntimeError(
+        f"replacement did not confirm its waiting state within "
+        f"{RESTART_HANDSHAKE_WAIT_S:g} seconds")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="reactor", description=__doc__)
     ap.add_argument("-c", "--config", type=Path, default=None)
@@ -36,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
                          "interfaces incl. Tailscale/LAN, 127.0.0.1 is localhost-only")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--open", action="store_true", help="open a browser on start")
+    ap.add_argument("--restart-after-pid", type=int, default=None,
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--restart-ready-file", type=Path, default=None,
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--restart-lifecycle-file", type=Path, default=None,
+                    help=argparse.SUPPRESS)
     ap.add_argument("--check", action="store_true",
                     help="validate the config, print a summary, and exit")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -59,7 +161,6 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             # Nowhere to write and nowhere to complain; carry on rather than
             # refusing to start.
-            import os
             sys.stdout = sys.stderr = open(os.devnull, "w")
 
     logging.basicConfig(
@@ -80,6 +181,45 @@ def main(argv: list[str] | None = None) -> int:
     # asyncio failure is still shown. -v restores the full noise.
     if not args.verbose:
         logging.getLogger("asyncio").setLevel(logging.ERROR)
+
+    if args.restart_after_pid is not None:
+        try:
+            if args.restart_ready_file is None:
+                raise RuntimeError("replacement was not given a readiness file")
+            # Prove the Windows liveness query works before telling the parent
+            # it is safe to tear down.  This handshake would have caught the
+            # WinError 6 failure while the old server was still fully online.
+            parent_alive = instances.is_alive(args.restart_after_pid)
+            if not parent_alive:
+                raise RuntimeError(
+                    f"cannot verify parent server process {args.restart_after_pid}")
+            args.restart_ready_file.parent.mkdir(parents=True, exist_ok=True)
+            args.restart_ready_file.write_text(json.dumps({
+                "state": "waiting", "pid": os.getpid(),
+                "parent_pid": args.restart_after_pid,
+                "parent_alive": True,
+            }), encoding="utf-8")
+            instances.append_lifecycle_event(
+                "restart", f"replacement process {os.getpid()} is ready and waiting "
+                f"for server {args.restart_after_pid} to exit",
+                path=args.restart_lifecycle_file)
+        except Exception as exc:
+            instances.append_lifecycle_event(
+                "error", f"restart replacement could not establish its waiting state: {exc}",
+                path=args.restart_lifecycle_file)
+            log.exception("restart replacement readiness handshake failed")
+            return 1
+        if not wait_for_parent_exit(args.restart_after_pid):
+            message = (f"restart replacement gave up waiting for server "
+                       f"{args.restart_after_pid} to exit")
+            instances.append_lifecycle_event("error", message,
+                                             path=args.restart_lifecycle_file)
+            log.error(message)
+            return 1
+        instances.append_lifecycle_event(
+            "restart", f"previous server {args.restart_after_pid} exited; "
+            f"replacement process {os.getpid()} is starting",
+            path=args.restart_lifecycle_file)
 
     # Log to a file as well as the console.
     #
@@ -167,8 +307,6 @@ def main(argv: list[str] | None = None) -> int:
     print("\n  Connecting read-only. Nothing is commanded until you act in the UI.")
     print(f"  interface   : {url}\n")
 
-    import os
-
     import uvicorn
 
     from .server.app import create_app
@@ -220,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     #: up after a page that has gone away.
     SHUTDOWN_DRAIN_S = 1
 
-    app = create_app(cfg)
+    app = create_app(cfg, restart_parent_pid=args.restart_after_pid)
     server = uvicorn.Server(
         uvicorn.Config(app, host=args.host, port=args.port, log_level="warning",
                        timeout_graceful_shutdown=SHUTDOWN_DRAIN_S))
@@ -282,11 +420,16 @@ def main(argv: list[str] | None = None) -> int:
 
     app.state.request_shutdown = request_shutdown
 
+    def request_restart() -> dict[str, int]:
+        """Create the waiting child before committing this server to shutdown."""
+        return start_restart_handoff(args)
+
+    app.state.request_restart = request_restart
+
     # Announce this process so another instance's Shut down button can find it
     # without asking Windows (reactor/instances.py). Only a real
     # `python -m reactor` registers - an app built inside a test must never be
     # reachable by the sweep.
-    from . import instances
     instances.register(args.port)
 
     # try/finally, not a bare call. THIS IS THE ORPHAN BUG (2026-09-10).
@@ -317,9 +460,18 @@ def main(argv: list[str] | None = None) -> int:
         log.error("server exited during startup (status %s) - most likely "
                   "port %s is already in use by another reactor server",
                   status, args.port)
+        if args.restart_after_pid is not None:
+            instances.append_lifecycle_event(
+                "error", f"replacement server failed during startup with status {status}; "
+                f"port {args.port} may still be in use",
+                path=args.restart_lifecycle_file)
     except BaseException:
         status = 1
         log.exception("server stopped on an unhandled exception")
+        if args.restart_after_pid is not None:
+            instances.append_lifecycle_event(
+                "error", "replacement server stopped on an unhandled startup exception",
+                path=args.restart_lifecycle_file)
     finally:
         instances.unregister()
         # Do NOT fall out of main() and wait for the interpreter to finish:

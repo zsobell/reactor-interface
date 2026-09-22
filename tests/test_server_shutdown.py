@@ -38,10 +38,13 @@ import builtins
 import contextlib
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 import tempfile
+
+from reactor import instances
 from unittest.mock import patch
 
 sys.path.insert(0, ".")
@@ -213,6 +216,53 @@ async def isolated_checks() -> int:
             any(line.strip().startswith("SHUTDOWN_DEADLINE_S = ")
                 and 0 < float(line.split("=")[1]) <= 5
                 for line in src.splitlines()))
+    from argparse import Namespace
+    from reactor.__main__ import restart_command
+    command = restart_command(Namespace(host="0.0.0.0", port=8000,
+                                        config=Path("config/reactor.yaml"), verbose=True),
+                              parent_pid=1234, ready_file=Path("ready.json"))
+    c.check("replacement command waits for its parent without opening a browser",
+            "--restart-after-pid" in command and "1234" in command
+            and "--restart-ready-file" in command
+            and "--restart-lifecycle-file" in command
+            and "--open" not in command and "--config" in command,
+            str(command))
+    from reactor.__main__ import wait_for_parent_exit
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(.25)"])
+    try:
+        c.check("Windows parent wait observes a real process exit",
+                wait_for_parent_exit(child.pid, timeout_s=2.0))
+    finally:
+        with contextlib.suppress(Exception):
+            child.kill()
+        child.wait(timeout=2)
+    with tempfile.TemporaryDirectory(prefix="restart_entrypoint_") as directory:
+        root = Path(directory)
+        parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(.5)"])
+        ready = root / "ready.json"
+        lifecycle = root / "lifecycle.jsonl"
+        replacement = subprocess.Popen([
+            sys.executable, "-m", "reactor", "--check",
+            "--restart-after-pid", str(parent.pid),
+            "--restart-ready-file", str(ready),
+            "--restart-lifecycle-file", str(lifecycle),
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(.02)
+        c.check("real replacement announces readiness while parent is alive",
+                ready.exists() and replacement.poll() is None,
+                replacement.stderr.read() if replacement.poll() is not None else "")
+        parent.wait(timeout=2)
+        stdout, stderr = replacement.communicate(timeout=3)
+        c.check("real replacement proceeds after parent exits",
+                replacement.returncode == 0 and "config OK" in stdout,
+                f"status={replacement.returncode} stdout={stdout!r} stderr={stderr!r}")
+        records = instances.read_lifecycle_events(path=lifecycle)
+        c.check("replacement lifecycle survives the process boundary",
+                any("ready and waiting" in row["message"] for row in records)
+                and any("is starting" in row["message"] for row in records),
+                str(records))
 
     c.section("4. the sweep can see another server without asking Windows")
     # The PowerShell Win32_Process query was 1-3 s of cold start inside the
@@ -220,8 +270,6 @@ async def isolated_checks() -> int:
     # match a live process. The first cut compared sys.executable against the
     # running image and NEVER matched under a venv (the shim in .venv\\Scripts
     # is not the image Windows runs), which silently swept nothing at all.
-    from reactor import instances
-
     path = instances.register(8099)
     c.check("registering wrote an entry", path is not None and path.exists())
     try:
@@ -265,41 +313,127 @@ async def isolated_checks() -> int:
     # over raw ASGI with no lifespan, so this never touches the DAQ or the
     # serial ports of the server actually running the reactor.
     from reactor.server import app as app_mod
+    from reactor.config import load_config
+    from reactor.dependencies import StatePaths
+    from reactor.supervisor import Supervisor
     from tests._support import asgi_call
 
-    app = app_mod.create_app()
-    asked = {"n": 0}
-    app.state.request_shutdown = lambda: asked.__setitem__("n", asked["n"] + 1)
+    # stop() checkpoints maintenance state even when devices were never
+    # connected. Keep that write in the test's temporary state directory;
+    # shutdown acceptance must never create config/aperture_lifetime.json.
+    with tempfile.TemporaryDirectory(prefix="shutdown_state_") as state_dir:
+        supervisor = Supervisor(
+            load_config(), paths=StatePaths.in_directory(Path(state_dir)))
+        app = app_mod.create_app(supervisor=supervisor)
+        asked = {"n": 0}
+        app.state.request_shutdown = lambda: asked.__setitem__("n", asked["n"] + 1)
 
-    t0 = time.monotonic()
-    status, body = await asgi_call(app, "POST", "/api/server/shutdown")
-    took = time.monotonic() - t0
+        t0 = time.monotonic()
+        status, body = await asgi_call(app, "POST", "/api/server/shutdown")
+        took = time.monotonic() - t0
 
-    c.check("200 from the button", status == 200, f"{status} {body}")
+        c.check("200 from the button", status == 200, f"{status} {body}")
     # Zach, 2026-09-10: "it needs to be a lot faster". The PowerShell sweep this
     # replaced cost 1-3 s of cold start on its own, every press, before the
     # browser heard anything at all.
-    c.check("it answered promptly", took < 2.0, f"{took:.2f}s")
-    for key in ("released", "failed", "ok", "elapsed_s", "also_killed"):
-        c.check(f"the receipt carries `{key}`", key in body, str(sorted(body)))
-    c.check("the receipt reports the teardown, not just an intention",
-            isinstance(body.get("released"), list))
+        c.check("it answered promptly", took < 2.0, f"{took:.2f}s")
+        for key in ("released", "failed", "ok", "elapsed_s", "also_killed"):
+            c.check(f"the receipt carries `{key}`", key in body, str(sorted(body)))
+        c.check("the receipt reports the teardown, not just an intention",
+                isinstance(body.get("released"), list))
     # Devices were never connected here (no lifespan), so nothing should be
     # reported as FAILING to disconnect - a spurious failure would put a red
     # warning in front of the operator on every clean shutdown.
-    c.check("a never-started server tears down cleanly",
-            body.get("ok") is True, str(body.get("failed")))
+        c.check("a never-started server tears down cleanly",
+                body.get("ok") is True, str(body.get("failed")))
+        c.check("maintenance checkpoint stays in isolated test state",
+                supervisor.paths.aperture_lifetime.exists()
+                and Path(state_dir) in supervisor.paths.aperture_lifetime.parents,
+                str(supervisor.paths.aperture_lifetime))
 
-    # The process exit is scheduled behind the response, not in front of it.
-    c.check("the process was not ended before answering", asked["n"] == 0)
-    await asyncio.sleep(0.4)
-    c.check("...and is requested just after", asked["n"] == 1, str(asked["n"]))
+        # The process exit is scheduled behind the response, not in front of it.
+        c.check("the process was not ended before answering", asked["n"] == 0)
+        await asyncio.sleep(0.4)
+        c.check("...and is requested just after", asked["n"] == 1, str(asked["n"]))
+
+    c.section("6. restart launches a handoff before the same shutdown sequence")
+    with tempfile.TemporaryDirectory(prefix="restart_state_") as state_dir:
+        supervisor = Supervisor(
+            load_config(), paths=StatePaths.in_directory(Path(state_dir)))
+        app = app_mod.create_app(supervisor=supervisor)
+        asked = {"n": 0}
+        app.state.request_shutdown = lambda: asked.__setitem__("n", asked["n"] + 1)
+        app.state.request_restart = lambda: {"pid": 4242}
+        status, body = await asgi_call(app, "POST", "/api/server/restart")
+        c.check("restart answers with the normal teardown receipt", status == 200
+                and body.get("ok") is True and isinstance(body.get("released"), list),
+                f"{status} {body}")
+        handoff = body.get("restart") or {}
+        c.check("restart receipt identifies the waiting replacement and old instance",
+                handoff.get("pid") == 4242 and bool(handoff.get("replaces_instance_id"))
+                and bool(handoff.get("version")), str(handoff))
+        c.check("restart has not ended the old server before replying", asked["n"] == 0)
+        await asyncio.sleep(0.4)
+        c.check("restart requests shutdown after returning the receipt", asked["n"] == 1,
+                str(asked["n"]))
+        status, version = await asgi_call(app, "GET", "/api/server/version")
+        c.check("liveness route identifies this process and its version",
+                status == 200 and bool(version.get("instance_id"))
+                and bool(version.get("version")), str(version))
+
+    c.section("7. a failed restart remains visible and can be retried")
+    with tempfile.TemporaryDirectory(prefix="restart_failure_state_") as state_dir:
+        supervisor = Supervisor(
+            load_config(), paths=StatePaths.in_directory(Path(state_dir)))
+        app = app_mod.create_app(supervisor=supervisor)
+        asked = {"n": 0}
+        app.state.request_shutdown = lambda: asked.__setitem__("n", asked["n"] + 1)
+
+        def failed_handoff():
+            raise OSError("injected replacement launch failure")
+
+        app.state.request_restart = failed_handoff
+        status, body = await asgi_call(app, "POST", "/api/server/restart")
+        c.check("failed handoff reports a server error", status == 500
+                and "could not launch replacement" in body.get("detail", ""), str(body))
+        c.check("failed handoff does not start teardown", asked["n"] == 0, str(asked["n"]))
+        c.check("failed handoff appears in the normal error log",
+                any("could not prepare replacement" in e["message"]
+                    for e in supervisor.errors), str(list(supervisor.errors)))
+        c.check("failed handoff releases the retry lock",
+                getattr(app.state, "shutdown_receipt_task", None) is None,
+                str(getattr(app.state, "shutdown_receipt_task", None)))
+
+        app.state.request_restart = lambda: {"pid": 4243}
+        status, body = await asgi_call(app, "POST", "/api/server/restart")
+        c.check("a subsequent restart is accepted", status == 200 and body.get("ok") is True,
+                f"{status} {body}")
+
+    c.section("8. replacement handoff reads the current process PID")
+    from reactor import __main__ as reactor_entry
+    handoff_args = reactor_entry.argparse.Namespace(host="127.0.0.1", port=8000,
+                                                     config=None, verbose=False)
+    class Replacement:
+        pid = os.getpid() + 1
+        def poll(self): return None
+        def terminate(self): pass
+    def ready_replacement(args, pid, ready_file):
+        ready_file.write_text(json.dumps({"state":"waiting", "pid":pid + 1,
+                                          "parent_pid":pid, "parent_alive":True}),
+                              encoding="utf-8")
+        return Replacement()
+    with tempfile.TemporaryDirectory(prefix="restart_handoff_") as directory, \
+            patch.object(reactor_entry.instances, "INSTANCES_DIR", Path(directory)), \
+            patch.object(reactor_entry, "launch_replacement", ready_replacement):
+        handoff = reactor_entry.start_restart_handoff(handoff_args)
+    c.check("restart handoff can read its PID before shutdown",
+            isinstance(handoff.get("pid"), int) and handoff["pid"] == os.getpid() + 1,
+            str(handoff))
 
     return c.summary()
 
 
 async def main() -> int:
-    from reactor import instances
     from reactor.server import app as app_mod
     def fake_kill():
         return []

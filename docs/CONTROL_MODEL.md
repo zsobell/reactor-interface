@@ -24,7 +24,8 @@ say-so.** If you think one is warranted, propose it and wait for a yes. (See the
 
 ## The guards that exist — because they were requested
 
-Three, all explicitly requested by Zach, all narrow:
+The principal guards below are all explicitly requested by Zach and narrowly
+scoped:
 
 1. **Fill-pressure flag.** During a run (EE-ALD or EE-CVD), if the precursor
    fill pressure drifts more than ±20% off its setpoint (a run parameter,
@@ -57,10 +58,15 @@ Three, all explicitly requested by Zach, all narrow:
    fire the isolation interlock above — they are part of opening, not a close,
    and re-opening an already-open valve must not silently stop the gas.
 
-These exist **only** because the operator asked for them directly, and each is
-narrow — a flag that never stops anything, a single valve/MFC pairing that
-refuses one specific invalid combination, and a pulse shape for one valve.
-None is a precedent for adding more without asking first.
+4. **Exclusive experiment ownership.** A normal run, pre-start, valve-ID
+   sweep, fill task and HCPES acquisition cannot quietly compete for the same
+   controls. In particular, HCPES owns every configured MFC, its four support
+   supplies and the plasma relay from accepted start through cleanup. Every
+   background MFC is either a plan axis or held at zero; manual background-MFC
+   changes are refused until HCPES releases ownership.
+
+These exist **only** because the operator asked for them directly. None is a
+precedent for adding more without asking first.
 
 ## The DC supply outputs (requested 2026-08-21)
 
@@ -120,13 +126,21 @@ Three details:
 - **Voltage is sent before current** when both are given, so raising both never
   briefly runs the new voltage against the old, lower current limit.
 - **Turning an output on asks for confirmation**; turning it off never does.
+- An acknowledged manual or HCPES set command updates the Hardware card's
+  commanded setpoint immediately; it does not wait for the next poll. The
+  confirmation says that a setpoint was saved when the output is off, and says
+  that the energized output was set only when the output is on. A setpoint is
+  therefore never presented as delivered power while its output is disabled.
 
 This changed a previous rule rather than overlooking it. Until 2026-08-25 the
 driver deliberately never touched a **current limit** — the supplies were found
 with Zach's working setpoints dialled in and those were his alone to set. He
-asked for current fields, so `set_current` now exists. **Nothing sets a current
-automatically**; only the operator's field reaches it, and the test suite
-asserts that a full pre-start-plus-run produces zero current writes.
+asked for current fields, so `set_current` now exists. In the normal
+ALD/CVD/pre-start workflow, **nothing sets a current automatically**; only the
+operator's field reaches it, and the test suite asserts that a full
+pre-start-plus-run produces zero current writes. HCPES is the explicit
+exception: its reviewed plan programs steering and collimating current for each
+condition, as described in the HCPES section below.
 
 The **CV/CC indicator** on each card is derived from measurement versus
 setpoint — whichever limit the output has actually reached — and shows nothing
@@ -197,12 +211,14 @@ there is no path from the UI to any write.
 
 ### The one HV command (requested 2026-08-21)
 
-`Supervisor.hv_off()` asserts HV Off on every configured supply, and is called
-from exactly two places, both of them an ending:
+`Supervisor.hv_off()` asserts HV Off on every configured supply as part of the
+requested cleanup paths:
 
 - `finish_run()` — however a run ends: completed, aborted, or crashed. (The
   recipe runner calls it from its own `finally`, so a crash is covered too.)
 - `abort_prestart()` (below) — the same intent for the pre-run state.
+- HCPES cleanup — completion, stop, failure or server shutdown while HCPES owns
+  the reactor.
 
 There is still **no way to set a voltage, and no way to turn HV on**, from the
 supervisor, the API or the browser. The Hardware-tab card has no inputs; not
@@ -264,6 +280,124 @@ ground energises the beam path, so doing that while the supply might still be
 up was the wrong way round), and there is then nothing for an un-grounded relay
 to do.
 
+## HCPES characterization is its own acquisition owner (2026-09-18)
+
+HCPES characterization is not a cyclic ALD/CVD recipe and does not reuse the
+main precursor-fill pre-start. The operator saves and reviews a versioned plan
+whose ordered blocks define the Cartesian parameter space. Every plan resolves:
+
+- Ar MFC flow;
+- stage-bias magnitude plus a separately confirmed physical polarity;
+- grid-bias voltage;
+- steering and collimating current; and
+- every configured background MFC, either explicitly fixed/swept or locked at
+  zero. There is no unowned background MFC during an HCPES run.
+
+The supply protocol and machine-readable records retain amperes. The HCPES
+builder, readable condition YAML and Analysis page present steering and
+collimating supply settings in **A**. Only measured stage current and its drift
+default to **mA** and **mA/min** at the human-facing boundary.
+
+Start is refused until the exact saved revision is previewed and the operator
+confirms the displayed stage-lead orientation. Positive is the default. HCPES
+then owns all configured MFCs, the four support supplies and plasma relay;
+manual writes and competing run/pre-start/fill/sweep starts are refused until
+cleanup finishes. Its restricted startup commands, in order:
+
+1. every MFC to zero;
+2. the Ar pneumatic isolation valve open;
+3. the plan's separate initial-plasma MFC and four-supply programs (without artificial
+   per-parameter delays while there is not yet a plasma to settle);
+4. all four HCPES support-supply outputs on; and
+5. the plasma relay to beam-on, followed immediately by the startup
+   stage-current stability gate.
+
+The initial-plasma block is saved with the plan and is not part of the Cartesian
+sweep. It gives the operator one known-accessible Ar, stage-bias, grid-bias,
+collimating-current and steering-current condition for ignition and startup
+settling. No qualified sweep samples are collected there. After establishment,
+the controller changes to sweep point 1 and applies the ordinary selected
+between-condition settling behavior to that transition. Legacy plans populate
+the block from their former first sweep point, preserving their prior startup.
+
+Startup and every successful plasma re-establishment use the stricter
+**establishment profile**: a spike-resistant DMM6500 stage-current trend over a
+5 s rolling window, below `0.1 mA/min` continuously for 20 s, with an
+independent 60 s maximum settle wait. A timeout while plasma remains present
+does not discard or halt the condition: it records `settled=false` and proceeds.
+
+The trend window and the required stable time are separate user-editable
+values. The trend is the median of long-baseline pairwise slopes from fresh
+current samples. Short pairs are excluded so normal DMM noise is not
+extrapolated into an artificial per-minute spike, while isolated excursions
+cannot dominate the result. Missing history is shown as **measuring**, never as
+a false exact zero. Once a complete trend window is below the limit, the
+stable-time counter starts at zero and must visibly complete the full requested
+hold. The preceding trend history is not credited; any above-limit estimate
+resets the stable-time counter to zero.
+
+Between ordinary parameter changes the operator chooses either the default
+fixed 3 s delay after each changed parameter or one **parameter-change
+profile** after all changes are applied. That separate current profile defaults
+to a 3 s rolling trend below `0.3 mA/min` continuously for 3 s, with a 10 s
+maximum settle wait. It never forces the 20 s establishment window on an ordinary parameter
+change. If plasma disappears during this shorter gate, it is abandoned and the
+full recovery/establishment behavior takes over.
+
+Qualified collection is count-based: after settling, accept the next five fresh
+sample-current readings by default. There is no separate HCPES sample interval
+or collection-duration target; acquisition follows the instrument telemetry
+rate (normally 5 Hz, so five readings take about one second). Plasma-present
+defaults to an absolute stage current of at least `0.1 mA`. A lower sample
+pauses qualification, pulses the relay for the configured 1 s and waits the
+configured 1 s before checking again. Reignition attempts consume a separate,
+user-editable 30 s retry budget; time observing an established plasma does not
+consume that budget. Every relight gets a fresh, complete establishment gate.
+If plasma drops during that gate, retry resumes with its remaining budget.
+Retry exhaustion at an ordinary sweep condition marks only that condition
+inaccessible and continues the grid. If the initial plasma itself cannot be
+recovered within its retry budget, the characterization ends because no sweep
+condition has safely begun.
+The point's recorded observed drift continues updating through the qualified
+readings rather than freezing the value from immediately before collection.
+
+Stop, failure, server shutdown and normal completion all run this ordered
+cleanup and retain receipts:
+
+1. command every MFC to zero;
+2. close Ar isolation after those zero commands;
+3. command HV off without changing its front-panel programs;
+4. switch the stage-bias, grid-bias, collimating and steering outputs off; and
+5. park the plasma relay de-energized in beam-on state.
+
+Each immutable session directory has both operator-facing and machine-facing
+files. `run_summary.txt` is the Notepad-friendly overview; `timeline.csv` is a
+concise chronological activity/timer log with stage current and its available
+rate; and multi-document `points.yaml`
+breaks results into one readable subsection per condition. `manifest.yaml`
+describes the plan/status/files, `points.csv` is spreadsheet-ready, `raw.jsonl`
+retains every full telemetry snapshot, `qualified.jsonl` contains only accepted
+samples, and `point_channels.jsonl` holds statistics for every numeric qualified
+channel. Missing measurements remain missing rather than becoming zero. Aborted
+and failed sessions keep honest partial data.
+
+Full positive-to-negative characterization uses two separately started
+sessions. After the first session has completed its full cleanup, the operator
+may create an exact opposite-polarity clone, switch off/verify supplies,
+physically swap the stage leads, confirm the new orientation and start again.
+The derived `campaign.yaml` and `combined_points.csv` link but never modify the
+sources. Analysis sorts by signed stage bias and retains both zero points,
+negative session first at the tie, so a polarity-swap discontinuity remains
+visible. Incompatible signatures are flagged and never silently stitched. The
+run-sequence/acquisition-order view means the order conditions completed, not a
+physical swept coordinate: it is for spotting drift over the experiment. Each
+point hover reports every commanded condition, source session/point, result,
+settle state and observed stage-current drift.
+
+All of the above is software sequencing tested with fake devices. It does not
+qualify physical lead orientation, actual MFC/supply response, DMM noise,
+plasma accessibility, timing, or cleanup response on the reactor.
+
 ## Ending a RUN lands in the same place (2026-09-09)
 
 Operator: *"Abort does not leave the plasma ground in the right position or
@@ -313,7 +447,7 @@ either without asking.
 ## Setpoint vs measurement warnings (2026-09-01)
 
 The precursor fill pressure has always flagged when it drifts off setpoint.
-Operator, after the N2 line on Mo-017 sat at a flow it never reached with
+Operator, after a background MFC on Mo-017 sat at a flow it never reached with
 nothing to say so: *"All params should be monitored like the precursor
 pressure"* — and, on what the check should be, *"just a warning that the
 setpoint doesn't match the measured flow value during a run."*
@@ -377,23 +511,44 @@ and written into the run's parameters report under **CHANGES DURING THE RUN**,
 which is rewritten on each edit. Without it the report would list the values the
 run ended with and quietly describe a run that never happened.
 
-## The Shut down server button (requested 2026-08-25)
+## Shut down and Restart server buttons (requested 2026-08-25; restart restored 2026-09-20)
 
-Diagnostics has a **Shut down server** button. It stops this server *and kills
-any other reactor server still running*, so nothing is left holding the DAQ or
-the serial ports. You then start it again from the shortcut.
+Diagnostics has **Restart server** beside **Shut down server**. Both stop this
+server *and kill any other reactor server still running*, so nothing is left
+holding the DAQ or serial ports. Shut down leaves the page offline. Restart
+returns the same browser tab to one replacement server; it never opens a new
+browser window.
 
-It replaced a Restart button that re-exec'd the process. That was removed the
-same day it shipped: on 2026-08-25 an old instance survived the restart, so two
-servers were up at once - the newer one holding port 8000 while the older one
-still held COM8-COM12 - and every device looked unreachable. Zach's call was
-"just a button that kills all servers in use", and stopping cleanly is both
-simpler and easier to see than a restart that half-worked.
+The earlier restart was removed after an old instance survived its re-exec:
+one process held port 8000 while the other still held COM8-COM12. The restored
+restart has an explicit handoff instead. It first launches a detached child
+with the same host, port, config and verbosity but **without** `--open`; that
+child must write a readiness handshake proving that it is alive and can inspect
+the parent's PID. The parent stays fully online until that succeeds. The child
+then waits for the parent's PID to disappear using the Windows process API
+before it can create a FastAPI app, connect devices, or bind the port. Only
+after readiness is confirmed does the parent perform the ordinary shutdown
+sequence. If launch or readiness fails, the original server remains running,
+the lifecycle lock is released for retry, and no teardown starts.
 
-Mechanics: other instances are terminated first, then this one shuts down
-through the normal lifespan teardown - so the server you are talking to releases
-its devices properly, and any orphan holding a serial port is gone before you
-restart. It then calls `os._exit(0)` rather than falling out of `main()`,
+Every phase is an Event Log entry. Every failure is also an Error Log entry.
+Those entries are appended to a compact machine-local lifecycle journal so the
+replacement can import the dying parent's handoff records into its own normal
+logs. Browser-only failures (for example, no replacement becomes reachable)
+are appended immediately to the still-open page's Event and Error panels too.
+
+The restart receipt reaches the page only after cleanup. The page then polls a
+small version/instance endpoint until its per-process instance ID changes; a
+matching version alone cannot prove a replacement when code was unchanged. It
+reloads the same tab to obtain the new static assets and shows the green bottom
+notice `Restart successful - running version X.Y.Z`. If no new instance becomes
+reachable within 30 seconds, it shows a visible failure, restores the lifecycle
+buttons, and tells the operator to use the shortcut instead of remaining grey
+and disconnected without an explanation.
+
+Mechanics: other instances are terminated first, then this server releases its
+devices inside the request before it asks Uvicorn to end. It then calls
+`os._exit(0)` rather than falling out of `main()`,
 because something in the stack keeps a non-daemon thread alive; that is exactly
 how the orphan survived. Since 2026-08-28 that exit is **unconditional** — it
 used to run only when the button had been pressed, so a second copy started by
@@ -467,7 +622,8 @@ calling it again on the way out costs nothing. The whole request answers in
 `SHUTDOWN_DEADLINE_S` dropped 20 s → 3 s, since everything after the
 response is socket cleanup.
 
-The merged implementation shares one shutdown task across concurrent callers.
+The merged implementation shares one lifecycle task across concurrent shutdown
+and restart callers; it cannot create two replacement processes or two teardowns.
 Run abort, pre-start abort, device disconnects and recording close have bounded
 waits. The receipt distinguishes released ports from failures, including a
 five-second recording-close timeout and latched recording errors. Released

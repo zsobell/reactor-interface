@@ -1,4 +1,5 @@
 "use strict";
+import {finiteExtent, nearestFinitePoint, resolveAxisRange} from "./analysis-plot.js";
 
 /* ===========================================================================
    State
@@ -371,29 +372,10 @@ function collect(ds, p, ykey){
   return {X, Y};
 }
 
-function extent(vals, log){
-  let lo = Infinity, hi = -Infinity;
-  for(const v of vals){
-    if(!Number.isFinite(v)) continue;
-    if(log && v <= 0) continue;
-    if(v < lo) lo = v;
-    if(v > hi) hi = v;
-  }
-  return lo === Infinity ? null : [lo, hi];
-}
-
-/** Resolve an axis range: explicit min/max win, blanks auto-fit with padding. */
+/** Resolve an axis range: explicit min/max win, blanks fit the exact extent. */
 function axisRange(p, key, vals, log){
   const explicit = [num(p[key + "min"]), num(p[key + "max"])];
-  let [lo, hi] = extent(vals, log) || (log ? [1e-9, 1] : [0, 1]);
-  if(log){ lo = Math.log10(lo); hi = Math.log10(hi); }
-  if(hi - lo < 1e-12){ hi = lo + (Math.abs(lo) || 1) * 0.05; lo -= (Math.abs(lo) || 1) * 0.05; }
-  const pad = (hi - lo) * 0.06;
-  lo -= pad; hi += pad;
-  if(explicit[0] !== null) lo = log ? Math.log10(Math.max(explicit[0], 1e-300)) : explicit[0];
-  if(explicit[1] !== null) hi = log ? Math.log10(Math.max(explicit[1], 1e-300)) : explicit[1];
-  if(!(hi > lo)) hi = lo + 1;
-  return [lo, hi];
+  return resolveAxisRange(explicit, vals, log);
 }
 
 function fmtTick(v, log){
@@ -536,38 +518,33 @@ function hover(g, cv, p, G){
   const hv = cv._hover;
   if(!hv || hv.x < G.padL || hv.x > G.padL + G.W) return;
   const xv = G.x0 + (hv.x - G.padL) / G.W * (G.x1 - G.x0);
-  let best = -1, bd = Infinity;
-  for(let i = 0; i < G.s1.X.length; i++){
-    const d = Math.abs(G.s1.X[i] - xv);
-    if(d < bd){ bd = d; best = i; }
-  }
-  if(best < 0) return;
-  const x = G.PX(G.s1.X[best]);
+  const first = nearestFinitePoint(G.s1, xv, p.y1log);
+  const second = G.s2 ? nearestFinitePoint(G.s2, xv, p.y2log) : null;
+  if(!first && !second) return;
+
+  // The guide stays under the cursor; each dot goes at the sample actually
+  // reported.  A large gap is therefore visible as distance, while tiny
+  // timestamp offsets do not create a distracting crosshair jump.
   g.save();
   g.strokeStyle = "#8b949e"; g.globalAlpha = .55; g.setLineDash([4, 3]);
-  g.beginPath(); g.moveTo(x, G.padT); g.lineTo(x, G.padT + G.H); g.stroke();
+  g.beginPath(); g.moveTo(hv.x, G.padT); g.lineTo(hv.x, G.padT + G.H); g.stroke();
   g.restore();
 
-  const lines = [`${pretty(p.x)} ${fmtTick(G.s1.X[best], false)}`];
-  const dot = (val, PY, colour) => {
-    if(!Number.isFinite(val)) return;
-    const y = PY(val);
+  const lines = [`${pretty(p.x)} cursor ${fmtTick(xv, false)}`];
+  const dot = (point, PY, colour, label) => {
+    if(!point) return;
+    const x = G.PX(point.x), y = PY(point.y);
     if(!Number.isFinite(y)) return;
     g.fillStyle = colour; g.beginPath(); g.arc(x, y, 3.4, 0, Math.PI * 2); g.fill();
+    lines.push(`${pretty(label)} ${fmtTick(point.y, false)} @ ${fmtTick(point.x, false)}`);
   };
-  dot(G.s1.Y[best], G.PY1, "#58a6ff");
-  lines.push(`${pretty(p.y1)} ${fmtTick(G.s1.Y[best], false)}`);
-  if(G.s2){
-    // s2 is filtered by the same x window, so indices line up
-    const v = G.s2.Y[best];
-    dot(v, G.PY2, "#f0883e");
-    lines.push(`${pretty(p.y2)} ${fmtTick(v, false)}`);
-  }
+  dot(first, G.PY1, "#58a6ff", p.y1);
+  dot(second, G.PY2, "#f0883e", p.y2);
 
   g.font = "11px system-ui"; g.textAlign = "left"; g.textBaseline = "top";
   const bw = Math.max(...lines.map(l => g.measureText(l).width)) + 12;
   const bh = lines.length * 14 + 10;
-  let bx = x + 10; if(bx + bw > G.w - 4) bx = x - 10 - bw;
+  let bx = hv.x + 10; if(bx + bw > G.w - 4) bx = hv.x - 10 - bw;
   const by = G.padT + 4;
   g.fillStyle = "rgba(13,17,23,0.93)"; g.strokeStyle = "#2a323d";
   g.fillRect(bx, by, bw, bh); g.strokeRect(bx, by, bw, bh);
@@ -666,7 +643,7 @@ function adopt(name, text){
   const xcol = DATA.columns[seedX()];
   let range = "";
   if(xcol){
-    const e = extent(xcol, false);
+    const e = finiteExtent(xcol, false);
     if(e) range = `  ·  ${pretty(seedX())} ${fmtTick(e[0])} → ${fmtTick(e[1])}`;
   }
   $("fileInfo").innerHTML =

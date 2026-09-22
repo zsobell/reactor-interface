@@ -15,6 +15,8 @@ flowchart TD
     RunCoordinator --> RecipeRunner
     Supervisor <--> RecipeRunner
     Supervisor <--> PrestartController
+    Supervisor <--> HCPES[HCPES Controller]
+    Supervisor --> Aperture[Aperture lifetime observer]
     Supervisor --> Devices[Device adapters]
     Devices <--> Hardware
     Supervisor --> Telemetry
@@ -23,7 +25,9 @@ flowchart TD
     RecordingService -->|dedicated worker| DataLogger
     DataLogger --> Files[Run files]
     Analysis[Analysis page] --> DataRoutes[Data routes]
+    Analysis --> HCPESRoutes[HCPES analysis routes]
     DataRoutes -->|worker thread| Files
+    HCPESRoutes -->|read-only| Files
 ```
 
 - `dependencies.py` supplies device factories and per-instance `StatePaths`.
@@ -36,7 +40,8 @@ flowchart TD
   `control/recipe.py` executes them and maintains exposure/cycle clocks; it
   re-exports the schema/builders for existing imports.
 - `control/clock.py` supplies named elapsed and wall-clock callables. Supervisor
-  injects one `Clock` into the coordinator, recipe runner and pre-start controller.
+  injects one `Clock` into the coordinator, recipe runner, pre-start controller,
+  HCPES controller and aperture-lifetime observer.
   VirtualReactor accepts a clock for deterministic duration and timestamp tests.
 - `control/contracts.py` describes the capabilities controllers consume. They
   query public run admission and report events without accessing private locks.
@@ -56,6 +61,15 @@ flowchart TD
   methods for every hardware action. Stop hands over primed; abort runs the
   snapshotted recipe cleanup. The protected Current recipe retains the prior
   Ar/fill/relay/HV/DC-supply behavior.
+- `control/hcpes_model.py` owns the versioned characterization plan, typed
+  parameter axes, a distinct initial-plasma condition, lazy Cartesian
+  expansion, duration estimates and polarity compatibility signature.
+  `control/hcpes_store.py` owns the revisioned plan
+  library and linked-polarity campaign state. `control/hcpes.py` owns one
+  resolved acquisition, including its restricted initial-plasma startup,
+  stability gates, bounded recovery and cleanup. It reaches hardware only through public
+  Supervisor methods and holds exclusive admission against recipes, pre-start,
+  fill regulation, valve identification and manual writes to owned controls.
 - `telemetry.py` builds independent snapshots and manages bounded subscriber
   queues. A later reading cannot mutate an already published frame. Each slow
   viewer retains at most four frames; older frames are dropped.
@@ -66,9 +80,33 @@ flowchart TD
   `datalog.py` owns file formats/handles, while `run_report.py` formats the plain
   text parameter report. Callers in the live application use RecordingService;
   direct DataLogger calls are intended for isolated synchronous format tests.
+- `hcpes_recording.py` owns immutable characterization bundles and linked
+  campaign derivation. Raw and qualified JSON Lines retain full snapshots;
+  compact point CSV rows carry core trends; nested point-channel JSON Lines
+  carry statistics for every numeric qualified channel. Plain-text run summary,
+  concise timeline CSV and multi-document point YAML are derived from the same
+  ordered records for direct operator inspection. Device-facing setpoints and
+  explicitly named machine columns retain A. Measured stage current and its
+  drift use mA/mA/min at the operator boundary; steering and collimating supply
+  settings remain in A throughout.
+- `aperture_lifetime.py` integrates already-observed Glassman/relay state on a
+  monotonic clock and atomically owns replacement history. It performs no
+  hardware reads or writes.
 - `server/data.py` owns file discovery, containment checks, merge orchestration
   and analysis HTTP routes. It receives a directory, never a Supervisor.
   `analysis/ellipsometer_merge.py` remains pure text/number processing.
+- `server/hcpes_analysis.py` separately validates and reads HCPES bundles for
+  the Analysis page. It has no Supervisor/device dependency and cross-checks
+  campaign claims against both immutable source manifests before presenting a
+  linked negative-to-positive series.
+- `server/app.py` owns the shutdown/restart HTTP lifecycle receipt. Restart
+  cannot bypass `Supervisor.stop()`: `__main__.py` first creates one detached
+  replacement, requires its readiness handshake, and then lets it wait for the
+  parent PID using the Win32 process query in `instances.py`. Only then does the
+  app run the same bounded teardown and process exit. A compact lifecycle JSONL
+  journal is imported into the replacement's ordinary Event Log/Error Log, so
+  the handoff remains visible after the parent disappears. The browser recognizes
+  the replacement by a fresh per-process identity before reloading the same tab.
 
 ## Polling and experiment timing
 
@@ -91,8 +129,10 @@ row. Samples and recipe progress are copied before crossing to the recording
 worker, so a later tick cannot change a queued row.
 
 Recording samples use a bounded backlog (2,048 pending jobs by default). When
-full, further samples are rejected and a persistent recording error is shown;
-control continues. Lifecycle operations are ordered behind accepted writes.
+full, further samples are rejected and a recording error is latched in status
+and history; control continues. The header promotes it only while the owning
+recording stream is active, then clears while the event/error logs retain it.
+Lifecycle operations are ordered behind accepted writes.
 Stopping a run performs hardware cleanup before waiting for its recording to
 close. Server shutdown gives recording close a five-second deadline and reports
 timeout or latched recording errors in its receipt. A released device port does
@@ -100,10 +140,12 @@ not prove that queued files were flushed. Accepted worker jobs retain ownership
 after caller cancellation; the process exit deadline can still interrupt a hung
 filesystem operation.
 
-Analysis file reads, merging and saving run in a worker, separate from the
+Generic analysis file reads, merging and saving run in a worker, separate from the
 recording executor. This removes synchronous analysis work from the control
 event loop, but it is not a hard real-time guarantee: CPU work still shares the
-Python process, and small settings writes remain synchronous. Per-run event and
+Python process, and small settings writes remain synchronous. HCPES analysis is
+read-only and parses bounded session/campaign files in FastAPI's synchronous
+endpoint worker pool. Per-run event and
 error files use the recording worker; recording-error events are not submitted
 back to that failing writer. Hard physical deadlines require measured end-to-end timing and
 suitable hardware, such as supported hardware-clocked DAQ output or a PLC;
@@ -111,7 +153,7 @@ deployment measurements remain separate from fake-device acceptance in Beads.
 
 ## Run admission and recording failures
 
-`control/run_coordinator.py` owns the admission lock, cancellation flag and an
+`control/run_coordinator.py` owns normal-run admission, cancellation and an
 immutable `RunSession` containing selected valve IDs and cleanup policy.
 `idle`/`finished` → `preparing` → `executing` → `finishing` → `finished` is the
 normal lifecycle. A cancelled preparation restores prior metadata and finishes
@@ -127,30 +169,56 @@ Live edits share an edit lock with run completion. They preserve the admitted
 hardware identities and append change history using elapsed time; a supplied
 `_run_started_at` rejects edits from a different run.
 
+HCPES has a separate controller task but uses the same Supervisor admission
+boundary. Ownership begins before recording preparation and remains through
+physical cleanup and recording close. A cancelled or failed recording open
+cannot orphan ownership. Manual commands to its MFCs, four support supplies or
+relay are refused while it runs; unrelated background-MFC control is also
+refused because every configured MFC is either an explicit axis or locked zero.
+
 Recording errors (open, header/row write, flush, close, or backlog overflow)
-appear in `logging.errors`, the event log, and the control page's alert chip.
+appear in `logging.errors` and the event log. The control-page header promotes
+one only while the owner of that exact recording stream remains active.
 Repeated identical errors are deduplicated. Errors remain visible for the server
-session because later successful writes do not repair missing experiment data.
+session in logging state/history because later successful writes do not repair
+missing experiment data.
 Recording failure does not add an automatic hardware action or stop a run.
 
 ## Browser and persistence
 
 There is no frontend build step. `index.html` loads `control.css` and the ES
 module `control.js`; `live-charts.js` owns plotting and chart interaction through
-an explicit `createLiveCharts` interface. `analysis.html` loads `analysis.css`
-and `analysis.js`. `control-transport.js` owns HTTP/WebSocket lifecycle,
+an explicit `createLiveCharts` interface, while `hcpes-editor.js` owns the
+Diagnostics characterization builder/monitor. `analysis.html` loads
+`analysis.css`, `analysis.js`, reusable `analysis-plot.js`, and the isolated
+`hcpes-analysis.js` tab. The latter presents stage current in mA, support-supply
+current in A, and defines
+acquisition order as condition-completion sequence; its hover supplies every
+commanded setpoint plus outcome/provenance.
+`control-transport.js` owns HTTP/WebSocket lifecycle,
 `control-run-forms.js` owns parameter persistence/modes, and
-`control-device-panels.js` owns supply/MFC/valve rendering and commands. Cached
+`control-device-panels.js` owns supply/MFC/valve rendering and commands;
+`aperture-card.js` owns the maintenance-history card. Cached
 page navigation suspends/resumes transport; final unload disposes handlers.
 Static assets revalidate on reload.
 
 Hardware mapping is YAML. Labels, last-commanded valve state, last-started run
-name, shared run parameters, the pre-start recipe library and the shared
-analysis layout are JSON. All state
+name, shared run parameters, the pre-start recipe library, the HCPES plan and
+campaign library, and the shared generic-analysis layout are JSON. All state
 paths, including the process registry, are supplied through `StatePaths`.
+The restart lifecycle journal is JSON Lines because two successive processes
+append to it and the replacement imports its recent records.
+Machine-local maintenance state uses that boundary too:
+`config/aperture_lifetime.json` is a versioned atomic record of observed HCPES
+beam time and replacement history. Its owner consumes already-polled Glassman
+status plus last-commanded relay state; it never polls or commands hardware.
+The supervisor projects its current total into sampled telemetry as
+`aperture_lifetime_s`; normal run exports and HCPES raw/qualified and point
+records consume that same derived value without another hardware read.
 Browser localStorage caches parameters
-and stores display preferences. Experimental records are CSV/text under
-`data/<run>/`. Beads' Dolt database tracks development work, not reactor state.
+and stores display preferences. Generic experiment records are CSV/text under
+`data/<run>/`; HCPES session/campaign directories are immutable bundles directly
+under the configured data directory. Beads' Dolt database tracks development work, not reactor state.
 Valve state is commanded state, not measured position, and restoring it never
 writes a hardware output.
 
@@ -161,12 +229,13 @@ requested automatic actions and lifecycle behavior.
 
 ## Validation
 
-Run `python -m tests.run_all` for the Python regression suite. Tests use temporary
-files and fake hardware, with the real Supervisor and extracted controllers.
-`node tests/js/live-charts.mjs` checks chart rendering and interaction with a
-small canvas/DOM harness. `node tests/js/control-bootstrap.mjs` checks module
-bootstrap and chart integration. Node is optional development tooling, not a runtime
-dependency. These checks do not validate physical hardware or browser visuals.
+Run `python -m reactor.testing.validate full --require-node` for the complete
+Python and browser-module regression suite, or `python -m tests.run_all` for
+Python only. The Node harnesses under `tests/js/` cover live charts, bootstrap,
+transport/forms/device modules, pre-start and HCPES editors, HCPES analysis,
+generic analysis plots and the aperture card. Node is optional at runtime.
+These checks use fake hardware and do not validate physical hardware or browser
+appearance.
 
 Typed input models in `control/parameters.py` preserve the original raw payload
 for settings/reports. Run inputs normalize once before building a recipe.

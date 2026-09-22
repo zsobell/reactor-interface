@@ -51,6 +51,52 @@ function fakeElement(value = '') {
   assert.equal(transport.connect(), null, 'disposed transport cannot reconnect');
 }
 
+// A terminal replacement failure is visible in the local logs and gives the
+// operator working controls instead of leaving both lifecycle buttons grey.
+{
+  const elements = new Map([['linkBadge', fakeElement()], ['shutdownBtn', fakeElement()],
+    ['restartBtn', fakeElement()], ['shutdownHint', fakeElement()]]);
+  elements.get('shutdownBtn').disabled = elements.get('restartBtn').disabled = true;
+  const lifecycle = [];
+  const transport = createControlTransport({$: id => elements.get(id),
+    document: {querySelectorAll: () => [], createElement: () => fakeElement(),
+      body: {appendChild() {}}},
+    fetchImpl: async () => { throw new Error('offline'); },
+    WebSocketCtor: class {}, location:{protocol:'http:', host:'reactor.test'}, render() {},
+    onLifecycle:(kind,message) => lifecycle.push([kind,message]), restartTimeoutMs:10});
+  await transport.watchRestart({restart:{replaces_instance_id:'old-instance', version:'2.0.2'}});
+  assert.equal(elements.get('shutdownBtn').disabled, false);
+  assert.equal(elements.get('restartBtn').disabled, false);
+  assert.match(elements.get('shutdownHint').textContent, /Restart failed/);
+  assert.ok(lifecycle.some(([kind,message]) => kind === 'error' && /not reachable/.test(message)));
+}
+
+// Restart confirmation waits for a different server instance, not merely a
+// matching version, then reloads this same page with a one-shot green notice.
+{
+  const elements = new Map([['linkBadge', fakeElement()], ['shutdownBtn', fakeElement()],
+    ['restartBtn', fakeElement()], ['shutdownHint', fakeElement()]]);
+  let attempts = 0, reloads = 0;
+  const saved = new Map();
+  const transport = createControlTransport({$: id => elements.get(id),
+    document: {querySelectorAll: () => [], createElement: () => fakeElement(),
+      body: {appendChild() {}}},
+    fetchImpl: async url => {
+      if(url === '/api/server/version'){
+        attempts++;
+        return {ok:true, json:async () => ({version:'2.0.2',
+          instance_id: attempts < 2 ? 'old-instance' : 'new-instance'})};
+      }
+      return {ok:true, json:async () => ({})};
+    }, WebSocketCtor: class {}, location:{protocol:'http:', host:'reactor.test'}, render() {},
+    sessionStorage: {setItem:(key,value) => saved.set(key,value)}, reloadPage:() => {reloads++;}});
+  transport.watchRestart({restart:{replaces_instance_id:'old-instance', version:'2.0.2'}});
+  await new Promise(resolve => setTimeout(resolve, 650));
+  assert.equal(reloads, 1, 'new server identity reloads the existing page once');
+  assert.equal(saved.get('reactor.restart.success'), '2.0.2',
+    'replacement version survives the same-tab reload for the green notice');
+}
+
 // Forms apply server state over the local cache, persist mode and remove handlers.
 {
   const ids = ['modeSel','runTitle','gasWindowWord','smoothHint','reigniteHint','gasSchedHint',
@@ -108,9 +154,15 @@ function fakeElement(value = '') {
   const selectors = new Map([['#mfc_ar', fakeElement('4.5')],
     ['#psuv_bias', fakeElement('120')], ['#psui_bias', fakeElement('0.2')]]);
   const calls = [], toasts = [];
+  let supplyOutputOn = false;
   const panels = createDevicePanels({$:() => fakeElement(), document,
     cssEscape:String, esc:String, num:String, sci:String, put() {}, cls() {}, reconcile() {},
-    post:async (url, body) => { calls.push([url, body]); return {setpoint_sccm:body.sccm}; },
+    post:async (url, body) => {
+      calls.push([url, body]);
+      if(url.endsWith('/voltage')) return {voltage:body.volts, output_on:supplyOutputOn};
+      if(url.endsWith('/current')) return {current:body.amps, output_on:supplyOutputOn};
+      return {setpoint_sccm:body.sccm};
+    },
     toast:(...args) => toasts.push(args), confirmImpl:() => true, promptImpl:() => null});
   panels.mount(); panels.mount();
   assert.equal(handlers.click.size, 2, 'mount installs one command and one rename handler');
@@ -125,6 +177,12 @@ function fakeElement(value = '') {
     ['/api/supply/bias/voltage', {volts:120}],
     ['/api/supply/bias/current', {amps:0.2}],
   ]);
+  assert.match(toasts.at(-1)[0], /setpoint set to 120 V · 0.2 A; output remains off/,
+    'inactive supply confirmation describes a stored setpoint');
+  supplyOutputOn = true;
+  await click({target:target({dataset:{act:'psuset',id:'bias'}})});
+  assert.match(toasts.at(-1)[0], /energized output set to 120 V · 0.2 A/,
+    'energized supply confirmation describes the live output');
   panels.dispose();
   assert.equal(handlers.click.size, 0, 'dispose removes delegated click handlers');
   assert.equal(handlers.keydown.size, 0, 'dispose removes keyboard handler');

@@ -6,7 +6,9 @@ export const SHUTDOWN_HINT = "Stops this server and any other reactor server sti
 export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
                                         location, render, setTimeoutImpl=setTimeout,
                                         clearTimeoutImpl=clearTimeout,
-                                        reconnectDelayMs=1500}) {
+                                        reconnectDelayMs=1500, sessionStorage=null,
+                                        reloadPage=()=>{}, onLifecycle=()=>{},
+                                        restartTimeoutMs=30000}) {
   let socket = null;
   let reconnectTimer = null;
   let toastTimer = null;
@@ -33,10 +35,17 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
   }
 
   async function post(url, body){
-    const response = await fetchImpl(url, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: body === undefined ? "{}" : JSON.stringify(body)
-    });
+    let response;
+    try{
+      response = await fetchImpl(url, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: body === undefined ? "{}" : JSON.stringify(body)
+      });
+    }catch(error){
+      const msg = `Server request failed: ${error && error.message ? error.message : "disconnected"}`;
+      toast(msg);
+      throw new Error(msg);
+    }
     if(!response.ok){
       let msg = response.statusText;
       try { msg = (await response.json()).detail || msg; } catch(_){}
@@ -59,9 +68,10 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     ws.onopen = () => {
       if(disposed || suspended || socket !== ws) return;
       setLink("live", "live");
-      const button = $("shutdownBtn"), hint = $("shutdownHint");
+      const button = $("shutdownBtn"), restart = $("restartBtn"), hint = $("shutdownHint");
       if(button && button.disabled){
         button.disabled = false;
+        if(restart) restart.disabled = false;
         if(hint) hint.textContent = SHUTDOWN_HINT;
       }
     };
@@ -110,6 +120,21 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     shutdownWake = null;
   }
 
+  let restartGeneration = 0, restartTimer = null, restartWake = null;
+  function restartDelay(){
+    return new Promise(resolve => {
+      restartWake = resolve;
+      restartTimer = setTimeoutImpl(() => {restartTimer=null; restartWake=null; resolve();}, 250);
+    });
+  }
+  function cancelRestartWatch(){
+    restartGeneration++;
+    if(restartTimer !== null) clearTimeoutImpl(restartTimer);
+    restartTimer = null;
+    if(restartWake) restartWake();
+    restartWake = null;
+  }
+
   async function watchShutdown(receipt){
     const generation = ++shutdownGeneration;
     const hint = $("shutdownHint");
@@ -156,6 +181,8 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     // above still stands - the devices ARE released - but the process is lingering,
     // and a lingering process still owns port 8000.
     $("shutdownBtn").disabled = false;
+    const restart = $("restartBtn");
+    if(restart) restart.disabled = false;
     hint.textContent = (failed.length ? "Some teardown steps failed, and the PROCESS is still running " : "Devices were released, but the PROCESS is still running ")
       + "— it still holds port 8000, so starting from the shortcut will fail to "
       + "bind. End it from Task Manager (pythonw.exe), then start again.";
@@ -163,10 +190,64 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     toast("Shutdown released the hardware but the process did not exit");
   }
 
+  async function watchRestart(receipt){
+    const generation = ++restartGeneration;
+    const hint = $("shutdownHint");
+    const restart = receipt && receipt.restart;
+    const replaced = restart && restart.replaces_instance_id;
+    if(!replaced){
+      hint.textContent = "Restart did not receive a replacement-server identity.";
+      hint.style.color = "var(--bad)";
+      onLifecycle("error", "restart failed: no replacement-server identity was returned");
+      $("shutdownBtn").disabled = false;
+      $("restartBtn").disabled = false;
+      toast("Restart could not be confirmed");
+      return;
+    }
+    const deadline = Date.now() + restartTimeoutMs;
+    let oldServerGone = false, lastRemaining = null;
+    while(Date.now() < deadline){
+      await restartDelay();
+      if(disposed || suspended || generation !== restartGeneration) return;
+      try{
+        const response = await fetchImpl("/api/server/version", {cache:"no-store"});
+        const identity = response.ok ? await response.json() : null;
+        if(identity && identity.instance_id && identity.instance_id !== replaced){
+          const version = identity.version || restart.version || "unknown";
+          if(sessionStorage && typeof sessionStorage.setItem === "function")
+            sessionStorage.setItem("reactor.restart.success", version);
+          reloadPage();       // same tab: refreshes the replacement's assets and state
+          return;
+        }
+      }catch(_){
+        if(!oldServerGone){
+          oldServerGone = true;
+          onLifecycle("restart", "previous server disconnected; waiting for replacement startup");
+        }
+      }                       // expected while the old server exits and replacement starts
+      const remaining = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+      if(remaining !== lastRemaining){
+        lastRemaining = remaining;
+        hint.textContent = `Hardware released. Waiting for the replacement server `
+          + `(${remaining} s before this is declared failed)…`;
+      }
+    }
+    if(disposed || suspended || generation !== restartGeneration) return;
+    hint.textContent = "Restart failed: the replacement server did not become reachable. "
+      + "Start it from the Reactor Interface shortcut; the failure remains in Error Log.";
+    hint.style.color = "var(--bad)";
+    $("shutdownBtn").disabled = false;
+    $("restartBtn").disabled = false;
+    onLifecycle("error", `restart failed: replacement server was not reachable within `
+      + `${Math.ceil(restartTimeoutMs / 1000)} seconds`);
+    toast("Restart could not be confirmed");
+  }
+
   function suspend(){
     if(disposed) return;
     suspended = true;
     cancelShutdownWatch();
+    cancelRestartWatch();
     stopSocket();
   }
 
@@ -181,10 +262,11 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     disposed = true;
     suspended = true;
     cancelShutdownWatch();
+    cancelRestartWatch();
     stopSocket();
     if(toastTimer !== null) clearTimeoutImpl(toastTimer);
     toastTimer = null;
   }
 
-  return {connect, dispose, post, resume, setLink, suspend, toast, watchShutdown};
+  return {connect, dispose, post, resume, setLink, suspend, toast, watchShutdown, watchRestart};
 }

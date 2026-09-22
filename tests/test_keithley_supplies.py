@@ -36,7 +36,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-from reactor.devices.keithley_2260b import parse_idn
+from reactor.devices.keithley_2260b import Keithley2260B, parse_idn
 from reactor.testing.virtual_reactor import VirtualReactor
 from tests._support import Checker, autotick
 
@@ -245,6 +245,25 @@ async def main() -> int:
                 str(vr.supplies["grid_bias"].current_calls))
         c.check("and reports back", res.get("current") == 0.35, str(res))
 
+        real_cfg = next(
+            item for item in vr.sup.cfg.power_supplies
+            if item.id == "grid_bias")
+        real_driver = Keithley2260B(real_cfg)
+        real_driver.max_voltage, real_driver.max_current = 800.0, 1.44
+        acknowledged = []
+
+        async def accept(_fn, command):
+            acknowledged.append(command)
+
+        real_driver._talk = accept
+        await real_driver.set_voltage(125.0)
+        await real_driver.set_current(0.25)
+        c.check("acknowledged writes update the shared setpoint immediately",
+                real_driver.voltage_setpoint == 125.0
+                and real_driver.current_setpoint == 0.25
+                and acknowledged == [":SOUR:VOLT 125.000", ":SOUR:CURR 0.250"],
+                str(real_driver.status()))
+
         await vr.sup.set_supply_output("grid_bias", True)
         c.check("operator can switch an output on",
                 vr.supplies["grid_bias"].output_on is True)
@@ -271,9 +290,9 @@ async def main() -> int:
                         RuntimeError))
 
         # -------------------------------------------------------------- #
-        c.section("10. nothing sets a CURRENT automatically")
-        # Only the operator's field does. A run that silently re-limited a
-        # supply would be a real hazard, so this is asserted rather than assumed.
+        c.section("10. normal deposition does not change CURRENT limits")
+        # HCPES plans deliberately own these currents, but an ALD/CVD run that
+        # silently re-limited a supply would be a real hazard.
         for k in ("stage_bias", *COILS):
             if k == "grid_bias":
                 continue        # section 9 set this one deliberately

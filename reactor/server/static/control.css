@@ -123,6 +123,23 @@
   /* Five supplies in one narrow column is a very tall stack, and the tiles
      overflowed the card. Give it the whole row, above the four. */
   #supplyCard{grid-column:1/-1}
+  #apertureCard{grid-column:1/-1}
+  .aperture-layout{display:grid;grid-template-columns:minmax(250px,.75fr) minmax(360px,1.25fr);
+                   gap:18px;align-items:start}
+  .aperture-current{display:grid;gap:7px}
+  .aperture-runtime{display:flex;align-items:baseline;gap:8px;font-family:var(--mono)}
+  .aperture-runtime>span{font-size:30px;color:var(--accent)}
+  .aperture-runtime>small{color:var(--dim);text-transform:uppercase;letter-spacing:.07em}
+  .aperture-status{font:10px var(--mono);color:var(--dim);letter-spacing:0;text-transform:none}
+  #apertureCard.active{border-color:var(--hot);box-shadow:inset 3px 0 var(--hot)}
+  #apertureCard.active .aperture-status{color:var(--hot)}
+  #apertureCard.unknown{border-color:var(--warn)}
+  #apertureCard.unknown .aperture-status,#apertureCard.unknown #apertureNote{color:var(--warn)}
+  #newApertureBtn{justify-self:start;margin-top:4px}
+  .aperture-history{min-width:0}
+  .aperture-history .subhead{margin-top:0}
+  .aperture-history td:last-child,.aperture-history th:last-child{text-align:right}
+  @media(max-width:800px){.aperture-layout{grid-template-columns:1fr}}
   @media(max-width:1240px){ .hwbottom{grid-template-columns:repeat(2,minmax(0,1fr))} }
   @media(max-width:1000px){ .hwtop{grid-template-columns:1fr} }
   @media(max-width:700px){ .hwbottom{grid-template-columns:1fr} }
@@ -147,6 +164,115 @@
         text-align:right;margin-top:4px}
   .diagcol{display:grid;gap:14px;align-content:start;min-width:0}
   @media(max-width:1000px){ .diagtop{grid-template-columns:1fr} }
+
+  /* ---- HCPES visual parameter-space builder --------------------------- */
+  .hcpes-card>.body{padding:14px}
+  .hcpes-toolbar{display:flex;align-items:end;gap:7px;flex-wrap:wrap}
+  .hcpes-toolbar>label,.hcpes-meta label,.hcpes-launch label{display:flex;
+        flex-direction:column;gap:3px;color:var(--dim);font-size:11px}
+  .hcpes-toolbar select{min-width:230px;max-width:360px}
+  .hcpes-spacer{flex:1}
+  .hcpes-edit-status{font:11px var(--mono);color:var(--dim)}
+  .hcpes-edit-status.dirty{color:var(--warn)}
+  .hcpes-meta{display:grid;grid-template-columns:minmax(190px,.7fr) minmax(280px,1.3fr);
+        gap:8px;margin-top:9px}
+  .hcpes-meta input{width:100%}
+  .hcpes-polarity{display:flex;align-items:center;gap:14px;margin-top:10px;padding:10px 12px;
+        border:1px solid #5c4712;background:#241d06;border-radius:8px}
+  .hcpes-polarity>div:first-child{display:grid;grid-template-columns:auto auto;gap:1px 9px;
+        align-items:baseline;flex:1}
+  .hcpes-polarity span{font-size:11px;color:var(--warn);text-transform:uppercase;letter-spacing:.06em}
+  .hcpes-polarity strong{font:700 22px var(--mono);color:#f0c674}
+  .hcpes-polarity small{grid-column:1/-1;color:var(--dim)}
+  .hcpes-segment{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .hcpes-segment button{border:0;border-right:1px solid var(--line);border-radius:0}
+  .hcpes-segment button:last-child{border-right:0}
+  .hcpes-segment button.active{background:#4a3505;color:#f0c674}
+  .hcpes-profile{display:flex;gap:10px;margin-top:9px;padding:8px 10px;border:1px solid var(--line);
+        border-radius:7px;background:#10161d;font-size:11px}
+  .hcpes-profile b{white-space:nowrap;color:var(--accent)}
+  .hcpes-profile span{color:var(--dim)}
+  .hcpes-subhead{display:flex;align-items:baseline;gap:10px;margin:14px 0 7px;
+        padding-bottom:4px;border-bottom:1px solid var(--line);color:var(--dim);
+        text-transform:uppercase;letter-spacing:.08em;font-size:10.5px}
+  .hcpes-subhead small{margin-left:auto;text-transform:none;letter-spacing:0}
+  .hcpes-subhead button{margin-left:auto;text-transform:none;letter-spacing:0}
+  .hcpes-axes{display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:7px}
+  .hcpes-axis{display:grid;grid-template-columns:54px minmax(0,1fr);border:1px solid var(--line);
+        border-radius:7px;background:#111820;min-width:0}
+  .hcpes-axis-order{display:flex;flex-direction:column;align-items:center;justify-content:center;
+        border-right:1px solid var(--line);color:var(--dim);padding:7px 3px}
+  .hcpes-axis-order span{font:700 18px var(--mono);color:var(--accent)}
+  .hcpes-axis-order small{font-size:9px;text-align:center}
+  .hcpes-axis-main{padding:8px;min-width:0}
+  .hcpes-axis-head{display:grid;grid-template-columns:minmax(130px,1fr) minmax(120px,.7fr) auto;
+        gap:7px;align-items:end}
+  .hcpes-axis-head>div:first-child{display:flex;flex-direction:column;min-width:0}
+  .hcpes-axis-head strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hcpes-axis-head code{font-size:9px;color:var(--dim);overflow:hidden;text-overflow:ellipsis}
+  .hcpes-axis-head label,.hcpes-axis-fields label{display:flex;flex-direction:column;gap:2px;
+        color:var(--dim);font-size:10px;min-width:0}
+  .hcpes-axis-head select,.hcpes-axis-fields input{width:100%;min-width:0}
+  .hcpes-axis-unit{font:11px var(--mono);color:var(--dim);padding-bottom:7px}
+  .hcpes-axis-tools{display:flex;gap:5px;grid-column:1/-1;justify-content:flex-end;
+        padding-top:2px;border-top:1px solid #202a35}
+  .hcpes-axis-tools button{min-width:76px;height:29px;padding:3px 9px;font-size:11px}
+  .hcpes-axis-fields{display:grid;grid-template-columns:repeat(3,minmax(70px,1fr));gap:6px;
+        margin-top:7px}
+  .hcpes-axis-fields .wide{grid-column:1/-1}
+  .hcpes-axis-zero{grid-column:1/-1;color:var(--dim);font-size:11px;padding:6px 0 1px}
+  .hcpes-settings{margin-top:10px;border:1px solid var(--line);border-radius:7px;background:#10161d}
+  .hcpes-settings>summary{padding:8px 10px;cursor:pointer;color:var(--dim);
+        text-transform:uppercase;letter-spacing:.07em;font-size:10.5px}
+  .hcpes-setting-section{margin:0 10px 10px;padding:9px;border:1px solid var(--line);
+        border-radius:6px;background:#0d1117}
+  .hcpes-setting-section h4{margin:0 0 3px;color:var(--fg);font-size:12px}
+  .hcpes-setting-section>p{margin:0 0 8px;color:var(--dim);font-size:10.5px;line-height:1.4}
+  .hcpes-setting-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));
+        gap:8px}
+  .hcpes-setting-grid>label{display:flex;flex-direction:column;gap:3px;color:var(--dim);font-size:10.5px}
+  .hcpes-setting small{font-size:9.5px;line-height:1.35;color:#87909b;text-transform:none;
+        letter-spacing:0}
+  .hcpes-unit-input{display:flex;align-items:center;gap:5px}
+  .hcpes-unit-input input{width:100%;min-width:0}
+  .hcpes-unit-input span{font:10px var(--mono);white-space:nowrap}
+  .hcpes-settings>.hint{padding:0 10px 10px}
+  .hcpes-preview{margin-top:4px}
+  .hcpes-metrics{display:grid;grid-template-columns:repeat(5,minmax(110px,1fr));gap:7px}
+  .hcpes-metrics>div,.hcpes-live>div{display:flex;flex-direction:column;padding:8px 10px;
+        border:1px solid var(--line);border-radius:6px;background:#0d1117;min-width:0}
+  .hcpes-metrics strong{font:600 17px var(--mono);white-space:nowrap}
+  .hcpes-metrics span,.hcpes-live span{font-size:9.5px;text-transform:uppercase;
+        letter-spacing:.05em;color:var(--dim)}
+  .hcpes-preview-empty{padding:12px;border:1px dashed var(--line);border-radius:6px;color:var(--dim)}
+  .hcpes-nesting{font-size:11px;color:var(--dim);margin-top:7px;overflow-wrap:anywhere}
+  .hcpes-cleanup{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:9px;font-size:10.5px}
+  .hcpes-cleanup span{border:1px solid var(--ok);color:var(--ok);border-radius:999px;padding:2px 7px}
+  .hcpes-launch{display:flex;align-items:end;gap:7px;flex-wrap:wrap;margin-top:13px;
+        padding-top:11px;border-top:1px solid var(--line)}
+  .hcpes-launch label{min-width:220px;flex:1}
+  .hcpes-live{display:grid;grid-template-columns:repeat(5,minmax(105px,1fr));gap:7px;margin-top:10px}
+  .hcpes-live strong{font:600 13px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hcpes-live-rate.good{border-color:var(--ok);background:#0b2f1a}
+  .hcpes-live-rate.good strong{color:#7ee787}
+  .hcpes-live-rate.bad{border-color:var(--bad);background:#3d1113}
+  .hcpes-live-rate.bad strong{color:#ffb3b0}
+  .hcpes-current-params{display:grid;grid-template-columns:auto 1fr;gap:8px;margin-top:8px;
+        align-items:start;font-size:10.5px;color:var(--dim)}
+  .hcpes-current-params>div{display:flex;flex-wrap:wrap;gap:5px}
+  .hcpes-current-params span{display:flex;gap:5px;border:1px solid var(--line);border-radius:5px;
+        padding:2px 6px;background:#0d1117}
+  .hcpes-current-params i{font-style:normal;color:var(--dim)}
+  .hcpes-current-params strong{font-family:var(--mono);color:var(--fg)}
+  .hcpes-live-note{min-height:17px;margin-top:6px;font:11px var(--mono);color:var(--warn)}
+  @media(max-width:900px){
+    .hcpes-meta{grid-template-columns:1fr}.hcpes-metrics,.hcpes-live{grid-template-columns:repeat(2,1fr)}
+    .hcpes-polarity,.hcpes-profile{align-items:stretch;flex-direction:column}
+  }
+  @media(max-width:560px){
+    .hcpes-axes{grid-template-columns:1fr}.hcpes-axis-head{grid-template-columns:1fr 1fr}
+    .hcpes-axis-tools{grid-column:1/-1}.hcpes-metrics,.hcpes-live{grid-template-columns:1fr}
+  }
 
   /* ---- tiles (instruments / gauges / aux / MFCs / power supplies) ------- */
   .tilegrid{display:grid;gap:10px}
@@ -239,7 +365,7 @@
   /* one class per event kind the supervisor emits (see Supervisor._event) */
   .k-error{color:var(--bad)} .k-flag{color:var(--warn);font-weight:600}
   .k-valve,.k-valve-id{color:var(--hot)}
-  .k-recipe,.k-fill,.k-mfc,.k-ellipsometer{color:var(--accent)}
+  .k-recipe,.k-fill,.k-mfc,.k-ellipsometer,.k-maintenance{color:var(--accent)}
 
   /* ---- ALD run panel --------------------------------------------------- */
   button.primary{background:#193a2a;border-color:#2ea043;color:#7ee787;font-weight:600}

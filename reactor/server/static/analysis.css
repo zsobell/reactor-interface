@@ -28,6 +28,12 @@
          padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
   .spacer{flex:1}
   main{padding:14px 16px 40px;display:grid;gap:14px;align-content:start}
+  .analysis-pane{display:grid;gap:14px;min-width:0}
+  .analysis-tabs{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .analysis-tab{border:0;border-right:1px solid var(--line);border-radius:0;padding:4px 10px;
+                font-size:12px;background:#0d1117}
+  .analysis-tab:last-child{border-right:0}
+  .analysis-tab.active{background:#17304b;color:#9dcbff}
 
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
         display:flex;flex-direction:column;min-width:0}
@@ -81,3 +87,53 @@
          box-shadow:0 8px 28px #0009;background:#3d1113;border:1px solid var(--bad);
          color:#ffb3b0}
   .toast.ok{background:#0b2f1a;border-color:#1f7a45;color:#7ee787}
+
+  /* ---- HCPES characterization ----------------------------------------- */
+  #hcpesSourceSel{min-width:min(560px,70vw);font-family:var(--mono);font-size:12px}
+  #hcpesSourceInfo,#hcpesRawInfo{font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .hcpes-analysis-alert{margin-top:9px;padding:8px 10px;border:1px solid var(--bad);
+                        border-radius:7px;background:#3d1113;color:#ffb3b0}
+  .hcpes-analysis-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+                          gap:7px;margin-top:10px}
+  .hcpes-analysis-summary>div{padding:7px 9px;border:1px solid var(--line);border-radius:7px;
+                              background:#0d1117;display:flex;flex-direction:column}
+  .hcpes-analysis-summary strong{font:600 15px var(--mono)}
+  .hcpes-analysis-summary span{font-size:9px;text-transform:uppercase;letter-spacing:.07em;
+                               color:var(--dim)}
+  .hcpes-analysis-controls{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px}
+  .hcpes-analysis-controls label,.hcpes-analysis-filters label{display:flex;flex-direction:column;
+                                      gap:3px;font-size:10px;color:var(--dim);
+                                      text-transform:uppercase;letter-spacing:.06em}
+  .hcpes-view-help{margin-top:8px;padding:7px 9px;border-left:3px solid var(--accent);
+                   background:#101722;color:var(--dim);font-size:11px;line-height:1.45}
+  .hcpes-filter-head{margin:11px 0 6px;font-size:10px;text-transform:uppercase;
+                     letter-spacing:.07em;color:var(--dim)}
+  .hcpes-filter-head span{margin-left:8px;text-transform:none;letter-spacing:0}
+  .hcpes-analysis-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:7px}
+  .hcpes-analysis-canvasbox{height:430px;margin-top:12px;position:relative;border:1px solid var(--line);
+                            border-radius:8px;overflow:hidden;background:#0d1117}
+  .hcpes-analysis-canvasbox canvas,.hcpes-raw-canvasbox canvas{width:100%;height:100%;display:block}
+  .hcpes-hover{position:absolute;pointer-events:none;max-width:430px;padding:7px 9px;
+               border:1px solid var(--line);border-radius:6px;background:rgba(13,17,23,.96);
+               box-shadow:0 4px 14px #0008;font:11px/1.45 var(--mono);white-space:pre-line}
+  .hcpes-analysis-legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;color:var(--dim);
+                         font-size:11px}
+  .hcpes-analysis-legend span{display:flex;align-items:center;gap:4px}
+  .hcpes-analysis-legend i{width:10px;height:10px;border-radius:50%;display:inline-block}
+  .hcpes-raw-canvasbox{height:220px;margin-top:10px;border:1px solid var(--line);
+                       border-radius:8px;overflow:hidden;background:#0d1117}
+  .hcpes-raw-table-wrap{max-height:360px;overflow:auto;margin-top:10px;border:1px solid var(--line);
+                        border-radius:7px}
+  .hcpes-raw-table{width:100%;border-collapse:collapse;font:11px var(--mono)}
+  .hcpes-raw-table th{position:sticky;top:0;background:var(--panel2);color:var(--dim);
+                      text-align:left;text-transform:uppercase;font-size:9px;letter-spacing:.05em}
+  .hcpes-raw-table th,.hcpes-raw-table td{padding:5px 7px;border-bottom:1px solid var(--line)}
+  .hcpes-raw-table tr:last-child td{border-bottom:0}
+  .hcpes-raw-table td:nth-child(5){font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+  @media(max-width:820px){
+    .hcpes-analysis-controls{grid-template-columns:1fr 1fr}
+    .hcpes-analysis-canvasbox{height:330px}
+  }
+  @media(max-width:520px){
+    .hcpes-analysis-controls{grid-template-columns:1fr}
+  }

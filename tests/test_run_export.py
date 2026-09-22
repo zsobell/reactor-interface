@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
+import math
 import sys
 import time
 
@@ -143,6 +145,8 @@ async def main() -> int:
             tick_task = await autotick(vr, period=0.05)
             try:
                 await start(dict(params, cycles=1))
+                run_path = vr.sup.logger.run_path
+                bycycle_path = vr.sup.logger.bycycle_path
                 while vr.sup.recipes.busy:
                     await asyncio.sleep(0.02)
             finally:
@@ -171,6 +175,21 @@ async def main() -> int:
                     steps[0] if steps else "")
             c.check(f"{mode}: lists every cycle step",
                     "RECIPE STEPS" in report and "Cycle (repeated" in report)
+            run_rows = list(csv.DictReader(run_path.open(
+                encoding="utf-8", newline="")))
+            bycycle_rows = list(csv.DictReader(bycycle_path.open(
+                encoding="utf-8", newline="")))
+            aperture_values = [float(row["aperture_lifetime_s"])
+                               for row in run_rows]
+            c.check(f"{mode}: every run row tracks aperture lifetime seconds",
+                    bool(aperture_values)
+                    and all(math.isfinite(value) and value >= 0
+                            for value in aperture_values)
+                    and aperture_values[-1] >= aperture_values[0])
+            c.check(f"{mode}: by-cycle rows retain aperture lifetime seconds",
+                    bool(bycycle_rows)
+                    and all(row.get("aperture_lifetime_s") not in (None, "")
+                            for row in bycycle_rows))
         # An exception in write_run_params is swallowed by _start_built_run
         # and only surfaces as an event, so check the event log stayed clean.
         c.check("no 'could not record run parameters' event was raised",
@@ -192,7 +211,8 @@ async def main() -> int:
         c.check("by-cycle file matches", "mfc_NH3" in cyc_head
                 and "mfc_mfc1" not in cyc_head, str(cyc_head))
         c.check("nothing else was renamed",
-                all(h in run_head for h in ("pressure", "stage_temp", "beam_on")))
+                all(h in run_head for h in (
+                    "pressure", "stage_temp", "beam_on", "aperture_lifetime_s")))
         # The manual log's headings are written by hand as "<name> <unit>", so
         # the UNIT is the last word and only the name in front of it moves.
         lg = vr.sup.logger

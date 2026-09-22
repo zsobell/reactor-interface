@@ -112,10 +112,10 @@ stage_temp:
 # ---------------------------------------------------------------------------
 #  Other analog inputs
 # ---------------------------------------------------------------------------
-#  Three of the eight thermocouple inputs are physically connected: the stage TC
-#  (cDAQ1Mod4/ai1, configured above) and the two below, which were already wired
-#  and read steady room temperature. The other five read 2385 C, the NI 9211
-#  open-circuit full-scale. That also settles the old log's A/B/C/D columns:
+#  Five of the eight thermocouple inputs are physically connected: the stage TC
+#  (cDAQ1Mod4/ai1, configured above) and four aux channels below. The three
+#  unused inputs read 2385 C, the NI 9211 open-circuit full-scale. That also
+#  settles the old log's A/B/C/D columns:
 #  four channels of a four-channel TC module, not four heater zones.
 #
 #  Nobody has said what tc_a / tc_b measure, so they are logged under neutral

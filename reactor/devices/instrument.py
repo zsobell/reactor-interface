@@ -19,6 +19,7 @@ instrument.
 from __future__ import annotations
 
 import asyncio
+import re
 
 from ..config import InstrumentCfg
 from .base import Device, Reading
@@ -62,6 +63,40 @@ DMM6500_DC_CURRENT = [
     ":SENS:CURR:AZER ON",
 ]
 
+_SCPI_NUMBER = re.compile(
+    r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?)\s*([A-Za-zµμ]*)$")
+_AMP_FACTORS = {
+    "A": 1.0, "ADC": 1.0, "AAC": 1.0,
+    "MA": 1e-3, "MADC": 1e-3, "MAAC": 1e-3,
+    "UA": 1e-6, "UADC": 1e-6, "UAAC": 1e-6,
+    "NA": 1e-9, "NADC": 1e-9, "NAAC": 1e-9,
+}
+
+
+def parse_scpi_reading(raw: str, configured_unit: str) -> float:
+    """Parse one SCPI reading and normalize explicit current prefixes to A.
+
+    DMM6500 ``:READ?`` returns the reading in the measurement function's base
+    unit; its front-panel µA/mA choice is display formatting and must not scale
+    reactor data.  Some SCPI formats nevertheless append a unit (or return it
+    as the next comma-separated element), so accept and normalize that form too
+    instead of ever treating a prefixed value as amperes.
+    """
+    fields = [field.strip().strip('"') for field in str(raw).split(",")]
+    match = _SCPI_NUMBER.fullmatch(fields[0] if fields else "")
+    if not match:
+        raise ValueError(f"unparseable reading {raw!r}")
+    value = float(match.group(1))
+    explicit = match.group(2)
+    if not explicit and len(fields) > 1 and re.fullmatch(r"[A-Za-zµμ]+", fields[1]):
+        explicit = fields[1]
+    if configured_unit.strip().upper() != "A" or not explicit:
+        return value
+    unit = explicit.replace("µ", "u").replace("μ", "u").upper()
+    if unit not in _AMP_FACTORS:
+        raise ValueError(f"reading unit {explicit!r} is not an ampere unit")
+    return value * _AMP_FACTORS[unit]
+
 
 class ScpiInstrument(Device):
     def __init__(self, cfg: InstrumentCfg) -> None:
@@ -71,6 +106,7 @@ class ScpiInstrument(Device):
         self._inst = None
         self._is_serial = False
         self.identity = ""
+        self.measurement_function = ""
         self.setup_sent: list[str] = []
         self._lock = asyncio.Lock()
 
@@ -134,6 +170,12 @@ class ScpiInstrument(Device):
             self.setup_sent.append(cmd)
         if self.cfg.setup:
             self._check_errors()
+        if self.cfg.driver == "keithley_dmm6500":
+            self.measurement_function = self._query(":SENS:FUNC?").strip().strip('"')
+            if "CURR" not in self.measurement_function.upper():
+                raise RuntimeError(
+                    f"{self.id}: DMM6500 reports measurement function "
+                    f"{self.measurement_function!r}, expected DC current")
 
     async def disconnect(self) -> None:
         """Hand the front panel back, then close the session.
@@ -215,12 +257,10 @@ class ScpiInstrument(Device):
                 self._drop()
                 return [self._bad(key, self.cfg.unit, exc)]
 
-        # DMM6500 can return several comma-separated values depending on the
-        # configured read format; the reading is the first.
         try:
-            value = float(raw.split(",")[0])
-        except ValueError:
-            return [self._bad(key, self.cfg.unit, f"unparseable reading {raw!r}")]
+            value = parse_scpi_reading(raw, self.cfg.unit)
+        except ValueError as exc:
+            return [self._bad(key, self.cfg.unit, exc)]
 
         if abs(value) >= self.cfg.overload_above:
             return [self._bad(key, self.cfg.unit,
@@ -235,5 +275,6 @@ class ScpiInstrument(Device):
             "identity": self.identity,
             "query": self.cfg.query,
             "setup_sent": self.setup_sent,
+            "measurement_function": self.measurement_function,
             "unit": self.cfg.unit,
         }

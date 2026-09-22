@@ -1,8 +1,10 @@
 # Identifying what is wired where
 
-> **Status (2026-08-06): identification is complete.** All inputs (pressure, 3
-> Baratrons, stage TC, bubbler TC) and all 11 valves are mapped and confirmed,
-> including the last two loose ends — which precursor Baratron is which, and
+> **Status:** the process-critical inputs (pressure, 3 Baratrons, stage,
+> bubbler and bakeout thermocouples) and all 11 valves are mapped and confirmed;
+> two additional connected thermocouples remain deliberately labelled
+> unidentified (`tc_a`, `tc_b`). The confirmed map includes the last two
+> original loose ends — which precursor Baratron is which, and
 > `rpm_top` as the precursor-1 fill valve, both confirmed by Zach 2026-08-06.
 > See [HARDWARE.md](HARDWARE.md) and `config/reactor.yaml`. What follows is the
 > *method*, kept for any hardware added later.
@@ -74,10 +76,11 @@ digital output line cannot be sensed, only driven. (All 11 valves have since bee
 identified this way; the method below is kept for anything added later.)
 
 Note: earlier versions of this program refused to actuate an "unidentified"
-valve. That refusal — and all other software gating — was **removed** at the
-operator's direction (see [CONTROL_MODEL.md](CONTROL_MODEL.md)). `identified` is
-now just a descriptive label. The real protection during identification is the
-operator's REMOTE/OFF valve positions and the sweep's live STOP.
+valve. That **unidentified-valve actuation gate** was removed at the operator's
+direction (see [CONTROL_MODEL.md](CONTROL_MODEL.md)); `identified` is now just a
+descriptive label. This does not remove the separately requested Ar isolation,
+experiment-ownership or cleanup rules. The real protection during identification
+is the operator's REMOTE/OFF valve positions and the sweep's live STOP.
 
 ### What is available
 
@@ -176,6 +179,7 @@ mark `identified: true` once you've seen it move:
 ```
 
 `identified` is now just a label recording that a human confirmed the line's
-destination; it does not gate actuation (all software gating was removed — see
-[CONTROL_MODEL.md](CONTROL_MODEL.md)). The value of setting it honestly is
-documentation: a future reader trusts a valve marked identified.
+destination; it does not itself gate actuation. The value of setting it honestly
+is documentation: a future reader trusts a valve marked identified. Current
+operational ownership/interlock behavior is listed in
+[CONTROL_MODEL.md](CONTROL_MODEL.md).
