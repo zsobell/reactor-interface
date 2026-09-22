@@ -8,12 +8,17 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
                                         clearTimeoutImpl=clearTimeout,
                                         reconnectDelayMs=1500, sessionStorage=null,
                                         reloadPage=()=>{}, onLifecycle=()=>{},
-                                        restartTimeoutMs=30000}) {
+                                        restartTimeoutMs=30000,
+                                        shutdownTimeoutMs=8000,
+                                        requestTimeoutMs=2000,
+                                        nowImpl=()=>globalThis.performance?.now?.() ?? Date.now(),
+                                        AbortControllerCtor=globalThis.AbortController}) {
   let socket = null;
   let reconnectTimer = null;
   let toastTimer = null;
   let suspended = false;
   let disposed = false;
+  let lifecycleActive = false;
 
   function setLink(text, kind){
     const badge = $("linkBadge");
@@ -69,7 +74,7 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
       if(disposed || suspended || socket !== ws) return;
       setLink("live", "live");
       const button = $("shutdownBtn"), restart = $("restartBtn"), hint = $("shutdownHint");
-      if(button && button.disabled){
+      if(!lifecycleActive && button && button.disabled){
         button.disabled = false;
         if(restart) restart.disabled = false;
         if(hint) hint.textContent = SHUTDOWN_HINT;
@@ -106,6 +111,7 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
 
 
   let shutdownGeneration = 0, shutdownTimer = null, shutdownWake = null;
+  let shutdownController = null;
   function shutdownDelay(){
     return new Promise(resolve => {
       shutdownWake = resolve;
@@ -118,9 +124,13 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     shutdownTimer = null;
     if(shutdownWake) shutdownWake();
     shutdownWake = null;
+    if(shutdownController) shutdownController.abort();
+    shutdownController = null;
+    lifecycleActive = false;
   }
 
   let restartGeneration = 0, restartTimer = null, restartWake = null;
+  let restartController = null;
   function restartDelay(){
     return new Promise(resolve => {
       restartWake = resolve;
@@ -133,10 +143,45 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     restartTimer = null;
     if(restartWake) restartWake();
     restartWake = null;
+    if(restartController) restartController.abort();
+    restartController = null;
+    lifecycleActive = false;
+  }
+
+  async function lifecycleFetch(url, deadline, kind, parseJson=false){
+    const remaining = deadline - nowImpl();
+    if(remaining <= 0) throw Object.assign(new Error("lifecycle deadline expired"), {timedOut:true});
+    const controller = AbortControllerCtor ? new AbortControllerCtor() : null;
+    if(kind === "shutdown") shutdownController = controller;
+    else restartController = controller;
+    let timer = null;
+    const timeoutMs = Math.min(requestTimeoutMs, remaining);
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeoutImpl(() => {
+        if(controller) controller.abort();
+        reject(Object.assign(new Error("request timed out"), {timedOut:true}));
+      }, timeoutMs);
+    });
+    const request = (async () => {
+      const response = await fetchImpl(url, {cache:"no-store",
+        ...(controller ? {signal:controller.signal} : {})});
+      const body = parseJson && response.ok ? await response.json() : null;
+      return {response, body};
+    })();
+    request.catch(() => {}); // a transport that ignores AbortSignal may settle late
+    try{
+      return await Promise.race([request, timeout]);
+    }finally{
+      if(timer !== null) clearTimeoutImpl(timer);
+      if(kind === "shutdown" && shutdownController === controller) shutdownController = null;
+      if(kind === "restart" && restartController === controller) restartController = null;
+    }
   }
 
   async function watchShutdown(receipt){
+    cancelShutdownWatch();
     const generation = ++shutdownGeneration;
+    lifecycleActive = true;
     const hint = $("shutdownHint");
     const released = (receipt && receipt.released) || [];
     const failed   = (receipt && receipt.failed)   || [];
@@ -148,16 +193,19 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
     if(killed.length)   parts.push(`killed ${killed.length} other instance(s)`);
     const summary = parts.join(" · ");
 
-    const deadline = Date.now() + 8000;    // the server's own fallback is 3 s
-    while(Date.now() < deadline){
+    const deadline = nowImpl() + shutdownTimeoutMs;
+    while(nowImpl() < deadline){
       await shutdownDelay();
       if(disposed || suspended || generation !== shutdownGeneration) return;
       let alive = false;
       try{
         // no-store: a cached 200 would read as "still up" forever.
-        const r = await fetchImpl("/api/state", {cache: "no-store"});
-        alive = r.ok;
-      }catch(_){ alive = false; }
+        const {response} = await lifecycleFetch("/api/state", deadline, "shutdown");
+        alive = response.ok;
+      }catch(error){
+        if(error && error.timedOut) continue;
+        alive = false;
+      }
       if(disposed || suspended || generation !== shutdownGeneration) return;
       if(!alive){
         if(failed.length){
@@ -173,25 +221,26 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
             + `the Reactor Interface shortcut.${summary ? "  " + summary + "." : ""}`;
           hint.style.color = "var(--ok)";
         }
+        lifecycleActive = false;
         return;
       }
     }
     if(disposed || suspended || generation !== shutdownGeneration) return;
-    // Still answering past the server's own hard deadline. The teardown receipt
-    // above still stands - the devices ARE released - but the process is lingering,
-    // and a lingering process still owns port 8000.
+    lifecycleActive = false;
     $("shutdownBtn").disabled = false;
     const restart = $("restartBtn");
     if(restart) restart.disabled = false;
-    hint.textContent = (failed.length ? "Some teardown steps failed, and the PROCESS is still running " : "Devices were released, but the PROCESS is still running ")
-      + "— it still holds port 8000, so starting from the shortcut will fail to "
-      + "bind. End it from Task Manager (pythonw.exe), then start again.";
+    hint.textContent = "Shutdown could not be confirmed before the browser deadline. "
+      + (failed.length ? `${failed.length} teardown step(s) also reported failure. ` : "")
+      + "The saved receipt remains authoritative; check server.log before starting again.";
     hint.style.color = "var(--bad)";
-    toast("Shutdown released the hardware but the process did not exit");
+    toast("Shutdown could not be confirmed");
   }
 
   async function watchRestart(receipt){
+    cancelRestartWatch();
     const generation = ++restartGeneration;
+    lifecycleActive = true;
     const hint = $("shutdownHint");
     const restart = receipt && receipt.restart;
     const replaced = restart && restart.replaces_instance_id;
@@ -202,21 +251,23 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
       $("shutdownBtn").disabled = false;
       $("restartBtn").disabled = false;
       toast("Restart could not be confirmed");
+      lifecycleActive = false;
       return;
     }
-    const deadline = Date.now() + restartTimeoutMs;
+    const deadline = nowImpl() + restartTimeoutMs;
     let oldServerGone = false, lastRemaining = null;
-    while(Date.now() < deadline){
+    while(nowImpl() < deadline){
       await restartDelay();
       if(disposed || suspended || generation !== restartGeneration) return;
       try{
-        const response = await fetchImpl("/api/server/version", {cache:"no-store"});
-        const identity = response.ok ? await response.json() : null;
+        const {response, body:identity} = await lifecycleFetch(
+          "/api/server/version", deadline, "restart", true);
         if(identity && identity.instance_id && identity.instance_id !== replaced){
           const version = identity.version || restart.version || "unknown";
           if(sessionStorage && typeof sessionStorage.setItem === "function")
             sessionStorage.setItem("reactor.restart.success", version);
           reloadPage();       // same tab: refreshes the replacement's assets and state
+          lifecycleActive = false;
           return;
         }
       }catch(_){
@@ -225,7 +276,7 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
           onLifecycle("restart", "previous server disconnected; waiting for replacement startup");
         }
       }                       // expected while the old server exits and replacement starts
-      const remaining = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+      const remaining = Math.max(1, Math.ceil((deadline - nowImpl()) / 1000));
       if(remaining !== lastRemaining){
         lastRemaining = remaining;
         hint.textContent = `Hardware released. Waiting for the replacement server `
@@ -233,6 +284,7 @@ export function createControlTransport({$, document, fetchImpl, WebSocketCtor,
       }
     }
     if(disposed || suspended || generation !== restartGeneration) return;
+    lifecycleActive = false;
     hint.textContent = "Restart failed: the replacement server did not become reachable. "
       + "Start it from the Reactor Interface shortcut; the failure remains in Error Log.";
     hint.style.color = "var(--bad)";

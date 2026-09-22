@@ -115,14 +115,26 @@ class DataFiles:
                         out_dir = self.in_data_dir(src).parent
                         break
                 out_dir.mkdir(parents=True, exist_ok=True)
-                out_path = (out_dir / Path(out_name).name)
+                requested = Path(out_name)
+                stem = requested.stem
+                suffix = requested.suffix
+                number = 1
+                while True:
+                    candidate = stem if number == 1 else f"{stem}_{number:02d}"
+                    out_path = out_dir / f"{candidate}{suffix}"
+                    try:
+                        fh = out_path.open("x", encoding="utf-8", newline="")
+                        break
+                    except FileExistsError:
+                        number += 1
                 # newline="" matters: the csv module already terminates
                 # its rows with CR LF, and writing that back in text mode
                 # translates the LF again, giving CR CR LF - which Excel
                 # reads as a blank row between every row of data. That is
                 # the "every other row empty" the operator hit on Mo-015.
-                with out_path.open("w", encoding="utf-8", newline="") as fh:
+                with fh:
                     fh.write(csv_text)
+                out_name = out_path.name
                 # Relative to the data dir, so it matches the names in
                 # /api/data/files and the page can load it straight back.
                 saved = out_path.relative_to(self.directory).as_posix()

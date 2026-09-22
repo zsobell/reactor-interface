@@ -97,6 +97,28 @@ function fakeElement(value = '') {
     'replacement version survives the same-tab reload for the green notice');
 }
 
+// A fetch implementation that ignores AbortSignal still cannot hold the
+// lifecycle watcher past its overall monotonic deadline.
+{
+  const elements = new Map([['linkBadge', fakeElement()], ['shutdownBtn', fakeElement()],
+    ['restartBtn', fakeElement()], ['shutdownHint', fakeElement()]]);
+  elements.get('shutdownBtn').disabled = elements.get('restartBtn').disabled = true;
+  let now = 0, timerId = 0, requests = 0;
+  const transport = createControlTransport({$: id => elements.get(id),
+    document: {querySelectorAll: () => [], createElement: () => fakeElement(),
+      body: {appendChild() {}}},
+    fetchImpl: async () => { requests++; return new Promise(() => {}); },
+    WebSocketCtor: class {}, location:{protocol:'http:', host:'reactor.test'}, render() {},
+    nowImpl:() => (now += 25), restartTimeoutMs:150, requestTimeoutMs:30,
+    setTimeoutImpl:fn => { const id=++timerId; queueMicrotask(fn); return id; },
+    clearTimeoutImpl() {}});
+  await transport.watchRestart({restart:{replaces_instance_id:'old-instance', version:'2.1.1'}});
+  assert.ok(requests > 0, 'watcher attempted the hanging request');
+  assert.match(elements.get('shutdownHint').textContent, /Restart failed/);
+  assert.equal(elements.get('restartBtn').disabled, false,
+    'deadline restores lifecycle controls even when fetch never settles');
+}
+
 // Forms apply server state over the local cache, persist mode and remove handlers.
 {
   const ids = ['modeSel','runTitle','gasWindowWord','smoothHint','reigniteHint','gasSchedHint',
@@ -141,6 +163,51 @@ function fakeElement(value = '') {
   assert.equal(posts[0][1].cycles, '12', 'saved payload contains the effective parameter values');
   forms.dispose();
   assert.equal(elements.get('aldParams').events.input.size, 0, 'dispose removes parameter handlers');
+}
+
+// Versioned live edits send only dirty canonical fields and expose acceptance.
+{
+  const ids = ['modeSel','runTitle','gasWindowWord','smoothHint','reigniteHint','gasSchedHint',
+    'aldParams','gasSchedSection','advSection','preSection','smoothSection','liveEditStatus',
+    'liveEditRefresh','liveEditReapply','p_smooth_on','p_smooth_n','p_cycles',
+    'p_dose_pressure_torr','p_dose_s','p_pump_a_s','p_beam_s','p_pump_b_s',
+    'p_min_current_ua','p_sample_bias_v','p_sample_bias_polarity','p_sample_bias_lead_s',
+    'p_sample_bias_trail_s','p_ar_soft_open_pulses','p_ar_soft_open_on_s',
+    'p_ar_soft_open_gap_s','p_fill_pulse_on_s','p_fill_pulse_off_s','p_tolerance_pct',
+    'p_reignite_pulse_s','p_reignite_settle_s','p_ar_close_delay_s','p_pre_ar_sccm',
+    'p_pre_valve_delay_s','p_pre_hold_s','p_gas_overlap_s','p_mfc1_gas_enable',
+    'p_mfc1_gas_order','p_mfc1_gas_pct','p_mfc1_gas_flow_sccm','p_mfc2_gas_enable',
+    'p_mfc2_gas_order','p_mfc2_gas_pct','p_mfc2_gas_flow_sccm','p_run_name'];
+  const elements = new Map(ids.map(id => [id, fakeElement('0')]));
+  for(const [id, el] of elements) el.id = id;
+  elements.get('modeSel').value='ald';
+  for(const gas of ['mfc1','mfc2']) elements.get(`p_${gas}_gas_enable`).type='checkbox';
+  const timers=[]; const posts=[]; const statuses=[];
+  const snapshot = revision => ({editable:true, run_started_at:123, revision, mode:'ald',
+    params:{cycles:revision ? 13 : 12, dose_s:0.25}});
+  const forms=createRunForms({$:id=>elements.get(id), storage:{getItem:()=>null,setItem(){}},
+    document:{querySelectorAll:()=>[]}, cls() {}, smoothing:()=>({on:false,n:5}), drawChart(){},
+    setTimeoutImpl:(fn,ms)=>{timers.push([fn,ms]); return timers.length;}, clearTimeoutImpl(){},
+    onLiveEditStatus:(state,message)=>statuses.push([state,message]),
+    fetchImpl:async (url,options)=>{
+      if(url==='/api/run/params' && (!options || !options.method))
+        return {ok:true,json:async()=>snapshot(0)};
+      if(url==='/api/run/params'){
+        posts.push(JSON.parse(options.body));
+        return {ok:true,json:async()=>snapshot(1)};
+      }
+      return {ok:true,json:async()=>({params:{}})};
+    }});
+  forms.mount();
+  forms.setRunActive(true,123,0);
+  await new Promise(resolve=>setImmediate(resolve));
+  elements.get('p_cycles').value='13';
+  [...elements.get('aldParams').events.input][0]({target:elements.get('p_cycles')});
+  for(const [fn,ms] of [...timers]) if(ms===800) await fn();
+  assert.equal(posts.length,1,'one versioned live request is in flight');
+  assert.deepEqual(posts[0],{cycles:13,_run_started_at:123,_run_revision:0});
+  assert.ok(statuses.some(([state,message])=>state==='applied' && /cycles/.test(message)));
+  forms.dispose();
 }
 
 // Delegated panel commands preserve representatives request paths, payloads and supply ordering.

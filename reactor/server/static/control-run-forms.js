@@ -12,11 +12,18 @@ const PARAM_KEYS = ["cycles","dose_pressure_torr","dose_s","pump_a_s","beam_s",
 
 export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
                                 drawChart, setTimeoutImpl=setTimeout,
-                                clearTimeoutImpl=clearTimeout}) {
+                                clearTimeoutImpl=clearTimeout,
+                                onLiveEditStatus=null}) {
   let saveTimer = null;
   let suggestedRunName = "";
   let mounted = false;
   const listeners = [];
+  const showLiveStatus = onLiveEditStatus || ((state, message) => {
+    const el = $("liveEditStatus");
+    if(!el) return;
+    el.dataset.state = state;
+    el.textContent = message || "";
+  });
 
   function listen(el, name, fn){
     el.addEventListener(name, fn);
@@ -70,10 +77,20 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     updateSmoothHint();
     refreshEstimate();
   }
-  function saveParams(){
+  function fieldKey(target){
+    const id = target && target.id || "";
+    if(!id.startsWith("p_")) return null;
+    const key = id.slice(2);
+    if(key === "min_current_ua") return "min_current_a";
+    if(key === "tolerance_pct") return "tolerance_frac";
+    if(key === "run_name" || key.startsWith("pre_") || key.startsWith("smooth_")) return null;
+    return key;
+  }
+  function saveParams(event){
     const p={}; for(const k of PARAM_KEYS) p[k]=paramGet(k);
     storage.setItem("aldParams", JSON.stringify(p));
-    pushLiveParams();
+    const key = fieldKey(event && event.target);
+    if(key) markLiveDirty(key);
     /* Debounced: saveParams() fires on every keystroke in the params grid, and
        one POST per character would be silly. Fire-and-forget - a failed save
        leaves the local cache correct and is not worth interrupting the operator
@@ -222,6 +239,9 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
   let MFC_GAS = {}, MFC_LABELS = {};
   let RUN_ACTIVE = false;
   let liveParamsTimer = null, estimateTimer = null;
+  let runIdentity = null, runRevision = null, runGeneration = 0;
+  let liveInFlight = false, liveRefreshInFlight = false, livePaused = false;
+  let acknowledged = {}, dirtyKeys = new Set();
   let plannedRunS = null, etaLive = false;
   function gasName(id){
     if(MFC_GAS[id]) return MFC_GAS[id];
@@ -304,31 +324,121 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     $("rFinish").textContent = eta == null ? "—" : clockAt(eta);
   }
 
-  function pushLiveParams(){
+  function canonicalParams(){
+    const params = runParams();
+    delete params.run_name;
+    return params;
+  }
+  function setCanonicalField(key, value){
+    if(key === "min_current_a") return paramSet("min_current_ua", Number(value) * 1e6);
+    if(key === "tolerance_frac") return paramSet("tolerance_pct", Number(value) * 100);
+    paramSet(key, value);
+  }
+  function applyActiveSnapshot(snapshot, discard=false){
+    if(!snapshot || !snapshot.editable || snapshot.run_started_at !== runIdentity) return false;
+    acknowledged = {...snapshot.params};
+    runRevision = snapshot.revision;
+    if(snapshot.mode) $("modeSel").value = snapshot.mode;
+    for(const [key,value] of Object.entries(acknowledged))
+      if(discard || !dirtyKeys.has(key)) setCanonicalField(key, value);
+    if(discard) dirtyKeys.clear();
+    applyMode(); updateReigniteHint(); updateGasSchedHint();
+    return true;
+  }
+  async function refreshActiveSnapshot(discard=false){
+    if(liveRefreshInFlight) return false;
+    const generation = runGeneration;
+    liveRefreshInFlight = true;
+    try{
+      const response = await fetchImpl("/api/run/params", {cache:"no-store"});
+      const snapshot = response.ok ? await response.json() : null;
+      if(generation !== runGeneration || !RUN_ACTIVE) return false;
+      if(!applyActiveSnapshot(snapshot, discard)) throw new Error("active run changed");
+      const current = canonicalParams();
+      for(const key of [...dirtyKeys])
+        if(acknowledged[key] === current[key]) dirtyKeys.delete(key);
+      livePaused = false;
+      showLiveStatus(dirtyKeys.size ? "pending" : "idle",
+        dirtyKeys.size ? "Draft changes are waiting to be applied." : "Active values are current.");
+      return true;
+    }catch(error){
+      if(generation === runGeneration)
+        showLiveStatus("unconfirmed", `Could not refresh active values: ${error.message}`);
+      return false;
+    }finally{
+      if(generation === runGeneration) liveRefreshInFlight = false;
+    }
+  }
+  function markLiveDirty(key){
     if(!RUN_ACTIVE) return;
+    if(/^mfc[12]_gas_/.test(key)){
+      const prefix = key.split("_gas_")[0] + "_gas_";
+      for(const suffix of ["enable","order","pct","flow_sccm"])
+        dirtyKeys.add(prefix + suffix);
+    }else dirtyKeys.add(key);
+    livePaused = false;
+    showLiveStatus("pending", "Changes pending…");
+    pushLiveParams();
+  }
+  function pushLiveParams(){
+    if(!RUN_ACTIVE || livePaused || liveInFlight || !dirtyKeys.size || runRevision == null) return;
     clearTimeoutImpl(liveParamsTimer);
     const identity = runIdentity;
-    liveParamsTimer = setTimeoutImpl(() => {
+    const generation = runGeneration;
+    liveParamsTimer = setTimeoutImpl(async () => {
       liveParamsTimer = null;
-      if(!RUN_ACTIVE || !mounted || identity !== runIdentity) return;
-      const params = runParams();
-      delete params.run_name; // The name suggestion is for the next run.
-      fetchImpl("/api/run/params", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({...params, _run_started_at:identity}),
-      }).catch(() => {});
+      if(!RUN_ACTIVE || !mounted || identity !== runIdentity || generation !== runGeneration) return;
+      const current = canonicalParams();
+      const sentKeys = [...dirtyKeys];
+      const draft = Object.fromEntries(sentKeys.map(key => [key, current[key]]));
+      liveInFlight = true;
+      showLiveStatus("pending", `Applying ${sentKeys.join(", ")}…`);
+      try{
+        const response = await fetchImpl("/api/run/params", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({...draft, _run_started_at:identity,
+            _run_revision:runRevision}),
+        });
+        let data = {};
+        try{ data = await response.json(); }catch(_){}
+        if(generation !== runGeneration || identity !== runIdentity) return;
+        if(!response.ok) throw Object.assign(new Error(data.detail || response.statusText || "edit rejected"),
+          {confirmed:true});
+        applyActiveSnapshot(data, false);
+        const after = canonicalParams();
+        for(const key of sentKeys) if(after[key] === draft[key]) dirtyKeys.delete(key);
+        showLiveStatus(dirtyKeys.size ? "pending" : "applied",
+          dirtyKeys.size ? "Newer draft changes are pending." : `Run accepted ${sentKeys.join(", ")}.`);
+      }catch(error){
+        if(generation !== runGeneration) return;
+        livePaused = true;
+        showLiveStatus(error.confirmed ? "rejected" : "unconfirmed",
+          error.confirmed ? `Run rejected the edit: ${error.message}`
+            : `Edit outcome is unconfirmed: ${error.message || "connection lost"}`);
+      }finally{
+        if(generation === runGeneration){
+          liveInFlight = false;
+          if(!livePaused && dirtyKeys.size) pushLiveParams();
+        }
+      }
     }, 800);
   }
-  function setRunActive(active, identity){
+  function setRunActive(active, identity, revision=null){
     if(!active || identity !== runIdentity){
       if(liveParamsTimer !== null) clearTimeoutImpl(liveParamsTimer);
       liveParamsTimer = null;
+      runGeneration++;
+      dirtyKeys.clear(); acknowledged = {}; runRevision = null;
+      liveInFlight = false; liveRefreshInFlight = false; livePaused = false;
     }
     runIdentity = identity;
     RUN_ACTIVE = active;
     $("modeSel").disabled = active;
+    if(!active){ showLiveStatus("idle", ""); return; }
+    if(runRevision == null) refreshActiveSnapshot(false);
+    else if(revision != null && revision > runRevision && !liveInFlight)
+      refreshActiveSnapshot(false);
   }
-  let runIdentity = null;
   function updateGasNames(mfcs){
     const labels = Object.fromEntries(mfcs.map(m => [m.id, m.label || m.id]));
     const names = Object.fromEntries(mfcs.map(m => [m.id, m.gas_name || ""]));
@@ -341,17 +451,22 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     if(mounted) return;
     mounted = true;
     $("modeSel").value = storage.getItem("runMode") || "ald";
-    listen($("aldParams"), "input", () => {
-      saveParams(); updateReigniteHint(); updateGasSchedHint(); refreshEstimate();
+    listen($("aldParams"), "input", event => {
+      saveParams(event); updateReigniteHint(); updateGasSchedHint(); refreshEstimate();
     });
-    listen($("gasSchedSection"), "input", () => {saveParams(); updateGasSchedHint();});
-    listen($("gasSchedSection"), "change", () => {saveParams(); updateGasSchedHint();});
-    listen($("advSection"), "input", () => {saveParams(); updateReigniteHint(); refreshEstimate();});
+    listen($("gasSchedSection"), "input", event => {saveParams(event); updateGasSchedHint();});
+    listen($("gasSchedSection"), "change", event => {saveParams(event); updateGasSchedHint();});
+    listen($("advSection"), "input", event => {saveParams(event); updateReigniteHint(); refreshEstimate();});
     listen($("preSection"), "input", saveParams);
     listen($("modeSel"), "change", applyMode);
     listen($("p_smooth_on"), "click", event => event.stopPropagation());
     listen($("smoothSection"), "input", () => {
       saveParams(); updateSmoothHint(); drawChart();
+    });
+    const refresh = $("liveEditRefresh"), reapply = $("liveEditReapply");
+    if(refresh) listen(refresh, "click", () => refreshActiveSnapshot(true));
+    if(reapply) listen(reapply, "click", async () => {
+      if(await refreshActiveSnapshot(false)){ livePaused = false; pushLiveParams(); }
     });
   }
   function dispose(){
@@ -361,9 +476,10 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
       if(timer !== null) clearTimeoutImpl(timer);
     saveTimer = liveParamsTimer = estimateTimer = null;
     RUN_ACTIVE = false;
+    runGeneration++;
     mounted = false;
   }
   return {applyMode, dispose, loadParams, mount, refreshRunName, runMode,
           gasScheduleError, setRunActive, updateGasNames, updateEta,
-          runParams, saveParams, updateGasSchedHint};
+          refreshActiveSnapshot, runParams, saveParams, updateGasSchedHint};
 }

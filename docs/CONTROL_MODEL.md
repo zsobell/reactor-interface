@@ -58,10 +58,14 @@ scoped:
    fire the isolation interlock above — they are part of opening, not a close,
    and re-opening an already-open valve must not silently stop the gas.
 
-4. **Exclusive experiment ownership.** A normal run, pre-start, valve-ID
-   sweep, fill task and HCPES acquisition cannot quietly compete for the same
-   controls. In particular, HCPES owns every configured MFC, its four support
-   supplies and the plasma relay from accepted start through cleanup. Every
+4. **Explicit controller ownership.** A normal run and pre-start exclude each
+   other, including the full pre-start abort unwind. HCPES is the globally
+   exclusive experiment controller: it excludes runs, pre-start, standalone
+   fill, valve identification and manual writes to the controls it owns.
+   Standalone fill is a subordinate background controller and is not a blanket
+   mutex for unrelated manual controls. In particular, HCPES owns every
+   configured MFC, its four support supplies and the plasma relay from accepted
+   start through cleanup. Every
    background MFC is either a plan axis or held at zero; manual background-MFC
    changes are refused until HCPES releases ownership.
 
@@ -72,7 +76,11 @@ precedent for adding more without asking first.
 
 The four Keithley 2260B supplies — stage bias, steering coils, grid bias,
 collimating coils — are the one place this program switches a power supply
-output on and off by itself. Zach asked for it directly:
+output on and off by itself. The protected Current pre-start recipe programs
+and enables its configured supplies; HCPES programs and enables all four
+explicitly. A normal cyclic run does not independently enable them, although
+run cleanup switches configured DC outputs off. Zach asked for this behavior
+directly:
 
 > "set the outputs of the steering, collimating, and grid bias to all turn on
 > on prestart and turn off on abort/stop/end of run"

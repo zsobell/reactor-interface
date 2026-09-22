@@ -496,6 +496,8 @@ class Supervisor:
                         f"({'in progress' if self.prestart.get('running') else 'primed'})")
             await self._teardown("abort pre-start", self.abort_prestart(),
                                  timeout=8.0)
+            if self._prestart.aborting:
+                await self._prestart.cancel_owned_abort()
 
         await self._teardown("stop fill regulation", self.stop_fill_regulation())
         if self.daq is not None:
@@ -1225,7 +1227,8 @@ class Supervisor:
             return "server is stopping or not started"
         if self.run_in_progress:
             return "a recipe is already running"
-        if self.prestart.get("running") or self.prestart.get("cleanup_available"):
+        if (self.prestart.get("running") or self.prestart.get("cleanup_available")
+                or self._prestart.aborting):
             return "the main pre-start is active or still owns primed hardware"
         if self.regulator.get("running"):
             return "background fill regulation is running"
@@ -1742,7 +1745,7 @@ class Supervisor:
 
     @property
     def prestart_running(self) -> bool:
-        return bool(self.prestart.get("running"))
+        return bool(self.prestart.get("running") or self._prestart.aborting)
 
     @property
     def prestart_cleanup_required(self) -> bool:

@@ -40,36 +40,30 @@ mixture of simultaneous and sequential selections is rejected.
 
 ## Pre-start compatibility
 
-`PrestartParameters` captures the raw payload at admission. Its `opening()`,
-`supplies()` and `fill()` methods return explicit typed stage objects. The
-controller calls each only once, when the original code performed its numeric
-conversions. This is intentional: eagerly converting all three stages would
-change which hardware commands precede a malformed-input failure.
+The versioned pre-start recipe is resolved in full before its first hardware
+command. Resolution validates target capabilities, converts typed arguments and
+parameter references, and snapshots both start and abort steps. A malformed or
+stale recipe therefore fails without actuation. Later edits affect the next
+launch only. The controller retains the resolved abort snapshot until the run
+accepts a primed handoff or abort cleanup completes.
 
-Opening conversion occurs in the background task before its hardware cleanup
-`try/finally`. A malformed opening field is reported as a pre-start error and
-clears its running/done flags without issuing hardware commands. This corrects
-`reactor-1kl`, where conversion previously left the running flag set and blocked
-later starts. Supply conversion fails inside the cleanup scope, before
-turning supplies on. Fill conversion occurs after supply-on and Ar commands;
-failure grounds the beam through the existing cleanup. Tests pin these distinct
-behaviors. The opening-error fix was implemented separately from normalization
-so its ownership change and absence of new cleanup commands are explicit.
-Abort retains the captured raw identifiers so it undoes the same valve/MFC selection.
+Abort has one task per pre-start session. Concurrent callers join that task and
+caller cancellation does not cancel physical cleanup. Admission remains closed
+while cleanup is unwinding. Process shutdown has a separate bounded path which
+explicitly cancels and records an unfinished owned abort before device release.
 
 ## Validation
 
 ```sh
 python -m tests.test_parameters
 python -m tests.test_prestart_invalid
-python -m tests.test_prestart
+python -m tests.test_prestart_sequence
 python -m tests.test_run_admission
 python -m tests.test_run_export
 ```
 
 `test_parameters` compares complete recipes and parameter report text against
 [`fixtures/parameters.json`](../tests/fixtures/parameters.json), captured before
-normalization was introduced. Its fake pre-start host also verifies successful
-command ordering and the three malformed-input conversion stages. Tests cover
-raw snapshot isolation, legacy truthiness/coercions, ignored values and existing
-schema rejection. Integration tests continue to use fake devices only.
+normalization was introduced. Pre-start tests cover whole-recipe validation,
+snapshot isolation, concurrent abort ownership and existing schema rejection.
+Integration tests continue to use fake devices only.

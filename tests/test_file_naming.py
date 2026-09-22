@@ -164,6 +164,35 @@ async def main() -> int:
         log.stop_run_export()
         c.check("run_dir clears when the export stops", log.run_dir is None)
 
+    c.section("1c. same-second recordings allocate a complete new bundle")
+    async with VirtualReactor() as vr:
+        log = vr.sup.logger
+        fixed = 1_800_000_000.0
+        log.set_run_name("collision")
+        first = log.start_run_export("ALD", fixed)
+        log._run_fh.write("original\n")
+        log._run_fh.flush()
+        first_stem = log.run_stem
+        log.stop_run_export()
+        second = log.start_run_export("ALD", fixed)
+        c.check("second run receives the _02 stem",
+                log.run_stem == first_stem + "_02", log.run_stem)
+        c.check("the original trace was not truncated",
+                first.read_text(encoding="utf-8") == "original\n")
+        c.check("every companion shares the allocated stem",
+                all(path.name.startswith(log.run_stem)
+                    for path in (second, log.bycycle_path, log.events_path,
+                                 log.errors_path)))
+        log.stop_run_export()
+
+        ell1 = log.start_ellipsometer_capture(fixed)
+        log.stop_ellipsometer_capture()
+        ell2 = log.start_ellipsometer_capture(fixed)
+        c.check("same-second sidecars do not overwrite",
+                ell2 != ell1 and "_02_ellipsometer.csv" in ell2.name,
+                f"{ell1.name} -> {ell2.name}")
+        log.stop_ellipsometer_capture()
+
     c.section("2. the merged file is named after the run")
     c.check("from the reactor run export",
             merged_name("Mo-015_260821_131320_run.csv",

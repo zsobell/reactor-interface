@@ -83,6 +83,55 @@ async def main() -> int:
             c.check("repeated abort does not actuate again",
                     len(steering.output_calls) == calls)
 
+            c.section("concurrent abort callers share cleanup ownership")
+            concurrent = store.create("Concurrent cleanup")
+            concurrent_data = concurrent.model_dump(mode="json")
+            concurrent_data["start_steps"] = [
+                {"id":"flow", "target":"mfc:mfc1", "action":"mfc.start_flow",
+                 "args":{"sccm":2.0}},
+            ]
+            concurrent_data["abort_steps"] = [
+                {"id":"stop", "target":"mfc:mfc1", "action":"mfc.stop_flow",
+                 "on_error":"continue"},
+            ]
+            concurrent = store.save(concurrent.id, concurrent_data,
+                                    expected_revision=concurrent.revision)
+            await vr.sup.start_prestart({"recipe_id":concurrent.id,
+                                         "recipe_revision":concurrent.revision})
+            c.check("concurrency setup becomes primed", await finish(vr)
+                    and vr.sup.prestart.get("primed") is True)
+            original_setpoint = vr.sup.set_mfc_setpoint
+            cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event()
+            cleanup_calls = 0
+            async def gated_setpoint(mfc_id, sccm):
+                nonlocal cleanup_calls
+                if mfc_id == "mfc1" and sccm == 0:
+                    cleanup_calls += 1
+                    cleanup_started.set()
+                    await release_cleanup.wait()
+                return await original_setpoint(mfc_id, sccm)
+            vr.sup.set_mfc_setpoint = gated_setpoint
+            first_abort = asyncio.create_task(vr.sup.abort_prestart())
+            await cleanup_started.wait()
+            second_abort = asyncio.create_task(vr.sup.abort_prestart())
+            first_abort.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await first_abort
+            try:
+                await vr.sup.start_prestart({"recipe_id":concurrent.id,
+                                             "recipe_revision":concurrent.revision})
+                admission_refused = False
+            except RuntimeError as exc:
+                admission_refused = "cleanup" in str(exc)
+            c.check("caller cancellation cannot cancel owned cleanup",
+                    not second_abort.done() and admission_refused)
+            release_cleanup.set()
+            await second_abort
+            vr.sup.set_mfc_setpoint = original_setpoint
+            c.check("both requests produce one physical cleanup",
+                    cleanup_calls == 1 and vr.mfcs["mfc1"].commanded_sccm == 0,
+                    str(cleanup_calls))
+
             c.section("partial failure requires cleanup")
             failure = store.get(saved.id).model_dump(mode="json")
             failure["start_steps"] = [

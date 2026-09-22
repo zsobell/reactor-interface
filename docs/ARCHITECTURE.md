@@ -58,8 +58,10 @@ flowchart TD
   `control/prestart_store.py` owns the server-side library, atomic replacement
   and optimistic revision checks. `control/prestart.py` snapshots one resolved
   start/abort sequence, owns its task and progress, and calls Supervisor public
-  methods for every hardware action. Stop hands over primed; abort runs the
-  snapshotted recipe cleanup. The protected Current recipe retains the prior
+  methods for every hardware action. One session-owned abort task is shared by
+  concurrent callers and shielded from caller cancellation; admission remains
+  closed until it finishes. Stop hands over primed; abort runs the snapshotted
+  recipe cleanup. The protected Current recipe retains the prior
   Ar/fill/relay/HV/DC-supply behavior.
 - `control/hcpes_model.py` owns the versioned characterization plan, typed
   parameter axes, a distinct initial-plasma condition, lazy Cartesian
@@ -166,8 +168,10 @@ changing run metadata or opening another export. Recording is prepared before
 starting recipe execution. Abort/shutdown can cancel a start waiting on file
 preparation, without starting the recipe or advancing the remembered run name.
 Live edits share an edit lock with run completion. They preserve the admitted
-hardware identities and append change history using elapsed time; a supplied
-`_run_started_at` rejects edits from a different run.
+hardware identities and append change history using elapsed time. Each built
+run owns a canonical parameter snapshot and monotonic revision. Browser edits
+send run identity, revision and only dirty fields; stale revisions are refused
+before mutation. Legacy unversioned callers retain last-write behavior.
 
 HCPES has a separate controller task but uses the same Supervisor admission
 boundary. Ownership begins before recording preparation and remains through
@@ -183,6 +187,10 @@ Repeated identical errors are deduplicated. Errors remain visible for the server
 session in logging state/history because later successful writes do not repair
 missing experiment data.
 Recording failure does not add an automatic hardware action or stop a run.
+Run and manual recording files are created exclusively. If a timestamp stem is
+already present, the logger allocates `_02`, `_03`, and so on for the complete
+companion bundle before publishing any handles. Parameters and ellipsometer
+sidecars share that stem; adoption and merged output also avoid replacement.
 
 ## Browser and persistence
 
@@ -195,8 +203,10 @@ Diagnostics characterization builder/monitor. `analysis.html` loads
 current in A, and defines
 acquisition order as condition-completion sequence; its hover supplies every
 commanded setpoint plus outcome/provenance.
-`control-transport.js` owns HTTP/WebSocket lifecycle,
-`control-run-forms.js` owns parameter persistence/modes, and
+`control-transport.js` owns HTTP/WebSocket lifecycle and gives every restart or
+shutdown probe a per-request timeout within one monotonic overall deadline.
+`control-run-forms.js` owns parameter persistence/modes plus acknowledged active
+values, drafts, revision conflict recovery and operator-visible edit status, and
 `control-device-panels.js` owns supply/MFC/valve rendering and commands;
 `aperture-card.js` owns the maintenance-history card. Cached
 page navigation suspends/resumes transport; final unload disposes handlers.
@@ -215,7 +225,7 @@ status plus last-commanded relay state; it never polls or commands hardware.
 The supervisor projects its current total into sampled telemetry as
 `aperture_lifetime_s`; normal run exports and HCPES raw/qualified and point
 records consume that same derived value without another hardware read.
-Browser localStorage caches parameters
+Browser localStorage caches next-run parameters
 and stores display preferences. Generic experiment records are CSV/text under
 `data/<run>/`; HCPES session/campaign directories are immutable bundles directly
 under the configured data directory. Beads' Dolt database tracks development work, not reactor state.
@@ -239,5 +249,5 @@ appearance.
 
 Typed input models in `control/parameters.py` preserve the original raw payload
 for settings/reports. Run inputs normalize once before building a recipe.
-Pre-start normalizes each stage when it is reached: moving a failing conversion
-earlier can change which existing commands precede cleanup.
+Pre-start resolves and validates the complete versioned recipe before its first
+hardware command, then executes the immutable start and abort snapshots.

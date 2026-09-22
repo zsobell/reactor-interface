@@ -36,6 +36,11 @@ class PrestartController:
         }
         self.params: dict[str, Any] = {}
         self.task: asyncio.Task | None = None
+        # Abort is a session-owned operation.  HTTP callers may disappear or
+        # overlap, but one task keeps cleanup alive and all callers observe the
+        # same terminal result.
+        self.abort_task: asyncio.Task | None = None
+        self._session_generation = 0
         self.stop_event = asyncio.Event()
         self.session: ResolvedPrestart | None = None
         self._grounded_plasma_switches: set[str] = set()
@@ -63,6 +68,8 @@ class PrestartController:
 
     async def start(self, params: dict, *, recipe_id: str | None = None,
                     expected_revision: int | None = None) -> None:
+        if self.abort_task is not None and not self.abort_task.done():
+            raise RuntimeError("pre-start cleanup is still in progress")
         if self.state.get("running"):
             raise RuntimeError("pre-start is already running")
         if self.state.get("cleanup_available"):
@@ -79,6 +86,7 @@ class PrestartController:
         # legacy controller did, without an unhandled task exception.
         recipe = self.store.get(recipe_id) if recipe_id else self.store.selected()
         self.stop_event.clear()
+        self._session_generation += 1
         self.params = dict(params or {})
         self.session = None
         self._grounded_plasma_switches.clear()
@@ -114,15 +122,31 @@ class PrestartController:
 
     async def abort(self) -> None:
         """Stop the active step, then execute the snapshotted cleanup recipe."""
+        if self.abort_task is None or self.abort_task.done():
+            # Publish ownership before the first await so concurrent requests
+            # cannot both enter the physical cleanup sequence.
+            generation = self._session_generation
+            session = self.session
+            self.abort_task = asyncio.create_task(
+                self._abort_owned(generation, session), name="prestart-abort")
+        await asyncio.shield(self.abort_task)
+
+    async def _abort_owned(self, generation: int,
+                           session: ResolvedPrestart | None) -> None:
+        """Execute cleanup once for the captured session generation."""
         await self.stop()
-        session = self.session
         self.state.update(state="aborting", running=False, primed=False,
+                          cleanup_available=True,
                           phase="running abort sequence")
         errors: list[str] = []
         if session is not None:
             self.stop_event.clear()
             errors = await self._run_steps(session.abort_steps, cleanup=True)
-        self.session = None
+        # A new session cannot normally start while this task is live, but the
+        # generation guard also prevents a late unwind from clearing it if a
+        # future admission path changes that ordering.
+        if generation == self._session_generation:
+            self.session = None
         self.state.update(
             state="error" if errors else "aborted", running=False, done=False,
             primed=False, cleanup_available=False,
@@ -133,6 +157,25 @@ class PrestartController:
             self.sup.report_event("error", "pre-start abort: " + "; ".join(errors))
         else:
             self.sup.report_event("recipe", "pre-start abort sequence complete")
+
+    @property
+    def aborting(self) -> bool:
+        return self.abort_task is not None and not self.abort_task.done()
+
+    async def cancel_owned_abort(self) -> None:
+        """Bound process shutdown by explicitly collecting owned cleanup."""
+        task = self.abort_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        self.state.update(
+            state="error", running=False, primed=False,
+            cleanup_available=True,
+            phase="abort cancelled during server shutdown",
+            error="pre-start cleanup did not finish before shutdown",
+        )
 
     def consume_primed(self) -> None:
         """A run has accepted ownership of the primed hardware state."""

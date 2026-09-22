@@ -62,6 +62,10 @@ async def main() -> int:
             got = await sup.update_run_params(dict(P, mfc2_gas_flow_sccm=8.0))
             c.check("the change was accepted",
                     got.get("changed") == ["mfc2_gas_flow_sccm"], str(got))
+            c.check("accepted edits return the authoritative revision and snapshot",
+                    got.get("revision") == 1 and got.get("editable") is True
+                    and got.get("params", {}).get("mfc2_gas_flow_sccm") == 8.0,
+                    str(got))
             c.check("the RUNNING recipe now carries it",
                     r.recipe.gas_schedules[0].flow_sccm == 8.0,
                     str(r.recipe.gas_schedules[0].flow_sccm))
@@ -72,6 +76,23 @@ async def main() -> int:
                 timeout=3.0)
             c.check("and the MFC was re-commanded straight away", ok,
                     f"{vr.mfcs['mfc2'].commanded_sccm} sccm")
+
+            stale_refused = False
+            try:
+                await sup.update_run_params({
+                    "mfc2_gas_flow_sccm": 1.0,
+                    "_run_started_at": r.progress.started_at,
+                    "_run_revision": 0,
+                })
+            except RuntimeError as exc:
+                stale_refused = "stale" in str(exc)
+            c.check("a stale browser revision is rejected before mutation",
+                    stale_refused and r.recipe.gas_schedules[0].flow_sccm == 8.0)
+            snapshot = sup.runs.params_snapshot()
+            c.check("GET snapshot data names the same run and revision",
+                    snapshot["run_started_at"] == r.progress.started_at
+                    and snapshot["revision"] == 1 and snapshot["mode"] == "ald",
+                    str(snapshot))
 
             c.section("1b. switching a gas OFF mid-run actually stops it")
             # Zach, 2026-09-09: he unticked a gas and it kept being commanded to

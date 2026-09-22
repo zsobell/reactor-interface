@@ -724,6 +724,11 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         except REFUSALS as exc:
             raise HTTPException(409, str(exc))
 
+    @app.get("/api/run/params")
+    async def get_run_params() -> dict[str, Any]:
+        """Canonical editable parameters for the active built run."""
+        return sup.runs.params_snapshot()
+
     @app.post("/api/run/estimate")
     async def estimate_run(params: dict = Body(default={})) -> dict[str, Any]:
         """How long a run with these parameters would take. Starts nothing.

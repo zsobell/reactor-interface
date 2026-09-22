@@ -407,8 +407,10 @@ function valveId(s){
 function recipe(s){
   const r = s.recipe;
   const running = ["running","paused","aborting"].includes(r.state);
-  runForms.setRunActive(running, r.started_at);
-  cls($("liveEditBadge"), "hidden", !running);
+  const editable = ["running","paused"].includes(r.state);
+  runForms.setRunActive(editable, r.started_at, r.params_revision);
+  cls($("liveEditBadge"), "hidden", !editable);
+  cls($("liveEditPanel"), "hidden", !editable);
   const pre = s.prestart || {};
   prestartEditor.updateStatus(pre);
   // Pre-start and a run both drive the plasma-ground relay, so only one of them

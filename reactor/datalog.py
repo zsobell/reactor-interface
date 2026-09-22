@@ -170,6 +170,40 @@ class DataLogger:
                     action()
                 except Exception as exc:
                     self.report_error(channel, exc)
+
+    @staticmethod
+    def _collision_stem(directory: Path, base: str,
+                        companions: tuple[str, ...]) -> str:
+        """Choose one stem that is unused by every file in a bundle."""
+        number = 1
+        while True:
+            stem = base if number == 1 else f"{base}_{number:02d}"
+            if not any((directory / f"{stem}{suffix}").exists()
+                       for suffix in companions):
+                return stem
+            number += 1
+
+    @staticmethod
+    def _open_exclusive_bundle(directory: Path, stem: str,
+                               suffixes: tuple[str, ...]):
+        """Create a bundle without truncation; remove only files made here."""
+        handles, paths = [], []
+        try:
+            for suffix in suffixes:
+                path = directory / f"{stem}{suffix}"
+                handles.append(path.open("x", encoding="utf-8", newline=""))
+                paths.append(path)
+            return handles, paths
+        except Exception:
+            for handle in handles:
+                handle.close()
+            for path in paths:
+                try:
+                    if path.exists() and path.stat().st_size == 0:
+                        path.unlink()
+                except OSError:
+                    pass
+            raise
     def set_gas_names(self, names: dict[str, str]) -> None:
         """Tell the logger what gas each MFC is actually flowing.
 
@@ -238,16 +272,18 @@ class DataLogger:
         self.dir.mkdir(parents=True, exist_ok=True)
         suffix = label or self.cfg.logging.filename_suffix
         stamp = datetime.now().strftime("%y%m%d_%H%M%S")
-        self.path = self.dir / f"{stamp}_{suffix}"
-        self._fh = self.path.open("w", encoding="utf-8", newline="")
+        companions = (f"_{suffix}", f"_{suffix}_extended.csv")
+        base = self._collision_stem(self.dir, stamp, companions)
+        handles, paths = self._open_exclusive_bundle(
+            self.dir, base, companions if self.cfg.logging.extended_log else companions[:1])
+        self._fh, self.path = handles[0], paths[0]
         self._fh.write("\t".join(
             self._manual_heading(h, k)
             for h, k in self.cfg.logging.columns.items()) + "\n")
         self._fh.flush()
 
         if self.cfg.logging.extended_log:
-            self.ext_path = self.dir / f"{stamp}_{suffix}_extended.csv"
-            self._ext_fh = self.ext_path.open("w", encoding="utf-8", newline="")
+            self._ext_fh, self.ext_path = handles[1], paths[1]
             self._ext_keys = []          # header written with the first sample
 
         self.started_at = time.time()
@@ -337,12 +373,14 @@ class DataLogger:
         # The timestamp is the run-name-independent part of the name; matching
         # it explicitly means adopting twice replaces the prefix instead of
         # stacking, whatever the run is called (including an all-digit name).
-        m = re.search(r"(\d{6}_\d{6})_ellipsometer\.csv$", self.ell_path.name)
+        m = re.search(r"(\d{6}_\d{6}(?:_\d{2})?)_ellipsometer\.csv$", self.ell_path.name)
         if not m:
             return
         stamp = m.group(1)
         name = f"{self.run_name}_{stamp}" if self.run_name else stamp
-        target = (self.run_dir or self.dir) / f"{name}_ellipsometer.csv"
+        target_dir = self.run_dir or self.dir
+        target_stem = self._collision_stem(target_dir, name, ("_ellipsometer.csv",))
+        target = target_dir / f"{target_stem}_ellipsometer.csv"
         if target == self.ell_path:
             return
 
@@ -350,7 +388,7 @@ class DataLogger:
         self._ell_fh = None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            self.ell_path.replace(target)       # replace: works across a move
+            self.ell_path.rename(target)
             self.ell_path = target
         except OSError as exc:
             self.report_error("ellipsometer move", exc)
@@ -403,18 +441,21 @@ class DataLogger:
         self.stop_run_export()          # a stale handle must never linger
         stamp = datetime.fromtimestamp(started_at).strftime("%y%m%d_%H%M%S")
         slug = "".join(c if c.isalnum() else "_" for c in recipe_name).strip("_") or "run"
-        stem = self._stem(stamp, slug)
-        self.run_stem = stem
+        base_stem = self._stem(stamp, slug)
         self.run_dir = self._run_folder(stamp)
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.run_path = self.run_dir / f"{stem}_run.csv"
-        self._run_fh = self.run_path.open("w", encoding="utf-8", newline="")
-        self.bycycle_path = self.run_dir / f"{stem}_bycycle.csv"
-        self._bycycle_fh = self.bycycle_path.open("w", encoding="utf-8", newline="")
-        self.events_path = self.run_dir / f"{stem}_events.log"
-        self.errors_path = self.run_dir / f"{stem}_errors.log"
-        self._events_fh = self.events_path.open("w", encoding="utf-8", newline="")
-        self._errors_fh = self.errors_path.open("w", encoding="utf-8", newline="")
+        suffixes = ("_run.csv", "_bycycle.csv", "_events.log", "_errors.log")
+        all_companions = (*suffixes, "_run_params.txt", "_ellipsometer.csv")
+        while True:
+            stem = self._collision_stem(self.run_dir, base_stem, all_companions)
+            try:
+                handles, paths = self._open_exclusive_bundle(self.run_dir, stem, suffixes)
+                break
+            except FileExistsError:
+                continue
+        self.run_stem = stem
+        self._run_fh, self._bycycle_fh, self._events_fh, self._errors_fh = handles
+        self.run_path, self.bycycle_path, self.events_path, self.errors_path = paths
         self.event_rows = 0
         self.error_rows = 0
         self.run_started_at = started_at
@@ -565,8 +606,11 @@ class DataLogger:
         target_dir = self.run_dir or self.dir
         target_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.fromtimestamp(started_at).strftime("%y%m%d_%H%M%S")
-        self.ell_path = target_dir / f"{self._stem(stamp)}_ellipsometer.csv"
-        self._ell_fh = self.ell_path.open("w", encoding="utf-8", newline="")
+        base = self._stem(stamp)
+        stem = self._collision_stem(target_dir, base, ("_ellipsometer.csv",))
+        handles, paths = self._open_exclusive_bundle(
+            target_dir, stem, ("_ellipsometer.csv",))
+        self._ell_fh, self.ell_path = handles[0], paths[0]
         self._ell_fh.write("point_index,fs_time_s,reactor_epoch,reactor_iso,"
                            "thickness_live,thickness_unit,fit_diff,intensity,"
                            "temp,align_x,align_y\n")

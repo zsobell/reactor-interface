@@ -54,6 +54,7 @@ class RunCoordinator:
         self._edit_lock = asyncio.Lock()
         self._cancelled = False
         self.params = {}
+        self.params_revision = 0
         self.changes = []
         self.started_elapsed = 0.0
 
@@ -81,6 +82,7 @@ class RunCoordinator:
             self._admit()  # rejection must leave metadata and events untouched
             previous = self.session
             previous_params, previous_changes = self.params, self.changes
+            previous_revision = self.params_revision
             old_name = self.recording.run_name
             self.phase = RunPhase.PREPARING
             # File recipes keep display valve IDs but never inherit built-run cleanup.
@@ -89,6 +91,7 @@ class RunCoordinator:
                 name = ''
                 if params is not None:
                     self.params, self.changes = dict(params), []
+                    self.params_revision = 0
                     self.session = RunSession(recipe.name, params.get('dose_valve', 'prec1'),
                                               params.get('plasma_switch', 'plasma_ground'),
                                               params.get('fill_valve', 'rpm_top'), True)
@@ -101,6 +104,7 @@ class RunCoordinator:
             except BaseException:
                 self.session = previous
                 self.params, self.changes = previous_params, previous_changes
+                self.params_revision = previous_revision
                 try:
                     await self.recording.stop_run_export()
                     if params is not None:
@@ -165,6 +169,18 @@ class RunCoordinator:
                 self.host.report_event("error", f"could not update run parameters file: {exc}")
         return result
 
+    def params_snapshot(self) -> dict:
+        recipe = self.runner.recipe
+        editable = (self.phase == RunPhase.EXECUTING and self.session.end_cleanup
+                    and self.runner.busy and recipe is not None)
+        return {
+            "editable": editable,
+            "run_started_at": self.runner.progress.started_at if editable else None,
+            "revision": self.params_revision if editable else None,
+            "mode": recipe.mode if editable else None,
+            "params": dict(self.params) if editable else {},
+        }
+
     async def _update_params(self, params: dict) -> dict:
         from .recipe import build_ald_recipe, build_cvd_recipe
 
@@ -176,8 +192,20 @@ class RunCoordinator:
         from .parameters import migrate_params
         params = dict(params)
         expected_start = params.pop("_run_started_at", None)
+        supplied_revision = params.pop("_run_revision", None)
+        if supplied_revision is not None:
+            if expected_start is None:
+                raise RuntimeError("versioned live edit is missing its run identity")
+            try:
+                supplied_revision = int(supplied_revision)
+            except (TypeError, ValueError):
+                raise RuntimeError("live edit revision is malformed") from None
         if expected_start is not None and expected_start != runner.progress.started_at:
             raise RuntimeError("live edit belongs to a different run")
+        if supplied_revision is not None and supplied_revision != self.params_revision:
+            raise RuntimeError(
+                f"live edit is stale (browser revision {supplied_revision}, "
+                f"active revision {self.params_revision})")
         params = {**self.params, **migrate_params(params)}
         for key in ("mode", "name", "run_name", "dose_valve", "fill_valve", "plasma_switch",
                     "gauge", "ammeter", "ar_mfc", "ar_valve"):
@@ -202,13 +230,14 @@ class RunCoordinator:
                 "t": self.clock.wall(),
             })
         if not changes:
-            return {"changed": []}, None
+            return {"changed": [], **self.params_snapshot()}, None
 
         build = build_cvd_recipe if recipe_now.mode == "cvd" else build_ald_recipe
         fresh = build(params)
         runner.apply_params(recipe_now, fresh)
         self.params = dict(params)
         self.changes.extend(changes)
+        self.params_revision += 1
 
         # A gas already flowing follows its new number immediately.
         for gs in fresh.gas_schedules:
@@ -241,4 +270,4 @@ class RunCoordinator:
         except Exception as exc:
             self.host.report_event("error", f"could not update run parameters file: {exc}")
             report = None
-        return {"changed": [c["key"] for c in changes]}, report
+        return {"changed": [c["key"] for c in changes], **self.params_snapshot()}, report

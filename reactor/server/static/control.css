@@ -440,6 +440,13 @@
     .pre-param{grid-template-columns:1fr 1fr}
     .pre-param button{grid-column:2;justify-self:end}
   }
+  .live-edit-status{display:flex;align-items:center;gap:8px;min-height:24px;
+    margin:0 14px;color:var(--dim);font:11px var(--mono)}
+  .live-edit-status span{flex:1}
+  .live-edit-status span[data-state="pending"]{color:var(--warn)}
+  .live-edit-status span[data-state="applied"]{color:var(--ok)}
+  .live-edit-status span[data-state="rejected"],
+  .live-edit-status span[data-state="unconfirmed"]{color:var(--bad)}
 
   /* collapsible sub-sections (advanced timing, gas scheduling) */
   details.sub{border:1px solid var(--line);border-radius:8px;background:#0d1117;

@@ -80,6 +80,11 @@
           <option value="cvd">EE-CVD</option>
         </select>
       </h2>
+      <div class="live-edit-status" id="liveEditPanel">
+        <span id="liveEditStatus" role="status" aria-live="polite"></span>
+        <button type="button" class="mini" id="liveEditRefresh">Refresh active values</button>
+        <button type="button" class="mini" id="liveEditReapply">Reapply draft</button>
+      </div>
       <div class="body">
         <div id="aldParams">
           <div class="params">
@@ -625,7 +630,7 @@
     <div class="body" id="hcpesEditor"></div>
   </details>
 
-  <div class="pageversion">Reactor Interface 2.1.0</div>
+  <div class="pageversion">Reactor Interface 2.1.1</div>
 </section>
 
 </main>

@@ -45,6 +45,9 @@ class Telemetry:
         d["run_remaining_s"] = self.sup.recipes.run_remaining_s()
         d["phase_owner"] = self.sup.runs.phase.value
         d["run_total_s"] = self.sup.recipes.run_total_s()
+        active = self.sup.runs.params_snapshot()
+        d["params_revision"] = active["revision"]
+        d["mode"] = active["mode"] or d.get("mode")
         return d
 
     def state(self) -> dict[str, Any]:
