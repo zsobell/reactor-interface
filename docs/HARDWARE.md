@@ -31,12 +31,15 @@ NI-DAQmx driver 22.5.0. None of these are simulated devices.
 
 ### Serial ports
 
-Four Prolific USB-to-serial adapters: `COM3`, `COM4`, `COM5`, `COM6`. Purpose
-still unknown, and nothing in this program uses them. (Not the MFCs — those are
-Ethernet, confirmed below. Candidates are the gauge controller or a pump
-controller.) One data point since: **`COM4` asserts DSR and CD**, so something
-powered is attached to it, but it is silent and unidentified. The other three
-show no sign of anything connected.
+Four Prolific USB-to-serial adapters: `COM3`, `COM4`, `COM5`, `COM6`. **COM3 is
+the MKS 937B Auger chamber gauge controller**, identified 2026-10-09 by its
+read-only `MT` response (`HC,HC,NC,NA`). At 9600 baud, address 253, it reported
+units `TORR`; channel 3 read `3.00E-10` Torr while channel 1 was `OFF` and the
+other channels were unpopulated. The controller's `PR3` query is the only
+periodic command sent by this program; no gauge power or degas command is sent.
+The Prolific adapter has no USB serial number, so `COM3` must be rechecked if
+Windows reassigns ports. `COM4`–`COM6` remain unidentified. (The MFCs use
+Ethernet, confirmed below.)
 
 Plus one that *is* in use: **`COM8`, a TI TUSB3410 bridge — the Glassman HV
 supply's USB port.** See [Glassman FL supply](#glassman-fl-high-voltage-supply)
@@ -80,7 +83,7 @@ programs able to drive a valve line.
 ### 2. The NI 9211 is slow
 
 Roughly 14 samples/second **total per NI 9211**, shared across that module's
-four channels. The current map reads three thermocouples on Mod4 and two on
+four channels. The current map reads four thermocouples on Mod4 and two on
 Mod2 at 2 Hz, below each module's aggregate limit. Pressure and the DMM are on
 different devices and polling paths.
 
@@ -93,16 +96,17 @@ approximately what the LabVIEW version ran at anyway.
 
 `python -m tools.discover_hardware --survey-inputs`, 2026-07-30.
 
-### Thermocouples — five connected out of eight
+### Thermocouples — six configured as connected out of eight
 
 | Channel | Reading | Role |
 |---|---|---|
 | **`cDAQ1Mod4/ai1`** | **21.1 °C** | **sample stage** — confirmed, see below |
 | `cDAQ1Mod4/ai0` | process-dependent | precursor bubbler — confirmed live 2026-08-03 |
 | `cDAQ1Mod4/ai2` | process-dependent | bakeout temperature 1 — connected 2026-09-11 |
+| `cDAQ1Mod4/ai3` | not yet verified live | bakeout temperature 2 — identified by Zach 2026-10-09 |
 | `cDAQ1Mod2/ai0` | 26.33 °C | connected, unidentified (`aux.tc_a`) |
 | `cDAQ1Mod2/ai1` | 24.54 °C | connected, unidentified (`aux.tc_b`) |
-| the other three | 2385 °C | open circuit — nothing attached |
+| the other two | 2385 °C | open circuit — nothing attached |
 
 ### No millivolts from a thermocouple channel
 
@@ -289,9 +293,9 @@ the post-run merge onto the reactor clock, and the merged file end to end.
 
 The plasma supply. **XP Glassman FL1.5F1.0**, rated **1500 V / 1.0 A**, on USB
 into its rear-panel **J3**. Firmware revision 02. The reactor polls its
-voltage/current/arc-count monitors at 2 Hz and logs them. Zach sets levels and
-turns HV on by hand; the software's only command type is **HV OFF**, used by the
-requested run, pre-start and HCPES cleanup paths.
+voltage/current/arc-count monitors at 2 Hz and logs them. Zach turns HV on at
+the front panel. Software can set the current limit only while HV is already
+on; every Set packet carries an 800 V voltage limit. Cleanup commands HV off.
 
 Confirmed on the wire 2026-08-21:
 
@@ -311,7 +315,7 @@ Rear panel: **J1** DB-25 analog (interlock jumpered 13 → 25), **J2** RJ45
 RS-232/RS-485 (unused, and *not* an Ethernet port despite the socket), **J3**
 USB (in use), **J4** empty Ethernet-option mount.
 
-Protocol, scaling, the read-only decision, and the full bring-up account are in
+Protocol, scaling, control restrictions, and the full bring-up account are in
 **[GLASSMAN_FL.md](GLASSMAN_FL.md)**. One warning worth repeating here: the
 sister-series EJ/ET/EY/FJ/FR manual (102002-177) describes a *different*
 product — different connector numbering, different interlock pins, 10-bit

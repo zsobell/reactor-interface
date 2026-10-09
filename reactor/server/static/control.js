@@ -178,6 +178,18 @@ function pressure(s){
   }
   $("pressureChan").textContent = cf.channel || "—";
   $("pressureCurve").textContent = sc.preset || `${sc.type||"?"} g=${sc.gain} o=${sc.offset}`;
+  const auger = (s.instruments || []).find(i => i.id === "auger_pressure");
+  const augerReading = s.readings["inst.auger_pressure"];
+  const augerEl = $("hwAugerPressure");
+  if(augerEl){
+    augerEl.textContent = sci(s.snapshot["inst.auger_pressure"], 3);
+    cls(augerEl, "stale", !!(augerReading && !augerReading.ok));
+    $("augerController").textContent = auger
+      ? `${auger.identity || "MKS 937B"} · ${auger.resource || "?"}` : "not configured";
+    $("augerChannel").textContent = auger?.query || "—";
+    $("augerPressureError").textContent = (augerReading && !augerReading.ok)
+      ? augerReading.detail : (auger?.error || "");
+  }
   /* There used to be a warning here that a log gauge's 0.1 V offset is ~30%
      of pressure and the curve should be confirmed against the controller.
      It has been - the curve reads correctly - so the warning is gone
@@ -251,7 +263,8 @@ function hero(s){
 
 function instruments(s){
   const box = $("instruments");
-  reconcile(box, s.instruments, i => i.id, i => `
+  const instruments = s.instruments.filter(i => i.id !== "auger_pressure");
+  reconcile(box, instruments, i => i.id, i => `
     <div class="tile" data-id="${esc(i.id)}">
       <div class="top">
         <span class="name">${esc(i.label || i.id)}</span>
@@ -266,7 +279,7 @@ function instruments(s){
       <div class="note" data-f="err"></div>
     </div>`);
 
-  for(const i of s.instruments){
+  for(const i of instruments){
     const el = box.querySelector(`[data-id="${CSS.escape(i.id)}"]`);
     if(!el) continue;
     const rd = s.readings["inst."+i.id];
@@ -296,7 +309,9 @@ function gauges(s){
         <button class="rename" data-rename="gauge" data-id="${esc(g.id)}"
                 title="Rename gauge">✎</button>
         <div style="flex:1"></div>
-        <span class="read"><span data-f="val">—</span
+        <span class="read"><span data-f="val" data-plot-key="gauge.${esc(g.id)}"
+          data-plot-label="${esc(g.label)}" role="button" tabindex="0"
+          title="Open pressure plot">—</span
           ><span class="unit">${esc(g.unit||"")}</span></span>
       </div>
       <div class="kv"><span>Gauge output</span><span data-f="volts">—</span></div>
@@ -306,6 +321,7 @@ function gauges(s){
     const el = box.querySelector(`[data-id="${CSS.escape(g.id)}"]`);
     if(!el) continue;
     put(el, "name", g.label);
+    el.querySelector('[data-f="val"]').dataset.plotLabel = g.label;
     // Baratrons are linear 10 Torr heads — show fixed 2 decimals, never sci.
     put(el, "val", num(g.value, 2));
     put(el, "volts", g.volts === null || g.volts === undefined
@@ -343,7 +359,14 @@ function aux(s){
     // stage TC, rather than the sci() the generic aux channel used to get.
     const tc = a.kind === "thermocouple";
     anyTc = anyTc || tc;
-    put(el, "val", tc ? num(a.value, 1) : sci(a.value, 4));
+    const valEl = put(el, "val", tc ? num(a.value, 1) : sci(a.value, 4));
+    if(tc && valEl){
+      valEl.dataset.plotKey = "aux." + a.id;
+      valEl.dataset.plotLabel = a.label;
+      valEl.setAttribute("role", "button");
+      valEl.setAttribute("tabindex", "0");
+      valEl.title = "Open temperature plot";
+    }
     put(el, "chan", a.channel || "—");
     put(el, "kind", tc ? `thermocouple, type ${a.tc_type || "?"}` : (a.kind || "—"));
     put(el, "volts", a.volts === undefined || a.volts === null
@@ -594,7 +617,8 @@ function conns(s){
     rows.push(tr(m.label || m.id, "MKS · Modbus TCP", m.host,
       m.connected ? "OK" : "FAIL", m.error || m.device_info || ""));
   for(const i of s.instruments)
-    rows.push(tr(i.label || i.id, "SCPI · VISA", i.resource,
+    rows.push(tr(i.label || i.id,
+      i.id === "auger_pressure" ? "MKS 937B · read-only RS232" : "SCPI · VISA", i.resource,
       ...connState(i, i.identity || "")));
   for(const p of (s.power_supplies || [])){
     if(p.driver === "keithley_2260b"){
@@ -606,7 +630,7 @@ function conns(s){
                         ? `questionable status 0x${(p.questionable).toString(16)}`
                         : (p.output_on ? "output ON" : "output off"))));
     } else {
-      rows.push(tr(p.label || p.id, "Glassman ASCII · serial · monitor + HV off",
+      rows.push(tr(p.label || p.id, "Glassman ASCII · serial · guarded current + HV off",
         `${p.port || "?"} ${p.baud || "?"} addr ${p.address}`,
         ...connState(p, (p.faults && p.faults.length)
                         ? "FAULT: " + p.faults.join(", ")
@@ -866,6 +890,10 @@ function prestartBaseValues(){
     reignite_settle_s:run.reignite_settle_s,
     sample_bias_v:run.sample_bias_v,
     sample_bias_polarity:run.sample_bias_polarity,
+    plasma_current_ma:run.plasma_current_ma,
+    grid_voltage_v:run.grid_voltage_v,
+    steering_current_a:run.steering_current_a,
+    collimating_current_a:run.collimating_current_a,
   };
 }
 
@@ -906,6 +934,29 @@ apertureCard.mount();
   $("alertChips").onclick = () => show("diag");
   show(localStorage.getItem("activeTab") || "run");
 })();
+
+// Only pressure and thermocouple values in Hardware have plot links. Delegation
+// also covers gauge tiles that are created after the first telemetry frame.
+function openHardwareSensorPlot(target){
+  const key = target?.dataset?.plotKey;
+  if(!key || !target.closest('[data-pane="hardware"]')) return;
+  const params = new URLSearchParams({key, label:target.dataset.plotLabel || key});
+  const name = "sensor_plot_" + key.replace(/[^a-z0-9]/gi, "_");
+  const popup = window.open(`/static/sensor-plot.html?${params}`, name,
+                            "popup=yes,width=980,height=680,resizable=yes,scrollbars=yes");
+  if(popup) popup.focus();
+  else toast("Allow popups to open the sensor plot.");
+}
+document.addEventListener("click", ev => {
+  openHardwareSensorPlot(ev.target.closest?.("[data-plot-key]"));
+});
+document.addEventListener("keydown", ev => {
+  if(ev.key !== "Enter" && ev.key !== " ") return;
+  const target = ev.target.closest?.("[data-plot-key]");
+  if(!target) return;
+  ev.preventDefault();
+  openHardwareSensorPlot(target);
+});
 
 // ---------------------------------------------------------------- actions
 // Valve identification. STOP is the safety-critical control - keep it trivial.
@@ -971,7 +1022,7 @@ $("preStartBtn").onclick = async () => {
       ? "Set Ar Pneumatic, Plasma Ground, and Precursor Fill to Remote.\n"
         + "Turn on HV at the Glassman front panel if you want plasma.\n\n"
       : "Verify every listed device is ready for remote control.\n"
-        + "The Glassman remains front-panel controlled; recipes can only command HV off.\n\n";
+        + "Turn Glassman HV on at its front panel before setting its current limit.\n\n";
     if(!confirm(readiness + prestartEditor.reviewText(launch.preview))) return;
     await post("/api/prestart/start", {
       ...launch.values, recipe_id:launch.recipe_id,

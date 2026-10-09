@@ -63,7 +63,7 @@ happen to be sitting at.
 ## Sample bias
 
 **Sample bias (V)** sits in the main parameter grid for both modes, where *Min
-current (µA)* used to be — min current moved into **Advanced timing**, since it
+current (µA)* used to be — min current moved into **Advanced Controls**, since it
 is a reignite-detection threshold rather than something set per run.
 
 It drives the `stage_bias` Keithley 2260B (2260B-250-4, 250 V / 4.5 A):
@@ -73,7 +73,7 @@ It drives the `stage_bias` Keithley 2260B (2260B-250-4, 250 V / 4.5 A):
   supply.
 - Non-zero **arms** the supply at that voltage during pre-start — output still
   off — and each beam then switches it: **on `Bias lead` seconds before the beam
-  and off `Bias trail` seconds after** (both in Advanced timing, 0.2 s by
+  and off `Bias trail` seconds after** (both in Advanced Controls, 0.2 s by
   default). Changed 2026-08-26, because a bias held on all run made the stage
   thermocouple unreadable; now the TC reads clean whenever the beam is off.
   In EE-CVD the beam is one long step, so the bias leads the strike at the
@@ -109,7 +109,8 @@ Repeat N cycles, all durations set in the UI:
 
 1. **Dose precursor 1** — open the micro-pulse valve (`prec1`, cDAQ1Mod3
    line0) for a set time, dosing into the chamber from the charged full
-   volume.
+   volume. Advanced Controls can repeat the dose before Pump A, with the valve
+   closed during each wait between pulses.
 2. **Pump A** — wait, monotonic elapsed time.
 3. **Electron beam** — plasma-ground relay **OFF** (= beam ON), hold a set
    *exposure* time while watching sample current.
@@ -144,7 +145,7 @@ grounds the beam on teardown, abort, or a crash — never left energized.
   accumulates while `|Keithley current|` ≥ `min_current`. If the plasma
   extinguishes, the switch is pulsed ON→OFF to reignite (default
   0.10 s pulse / 0.15 s settle, ≈2.2 attempts/s including the 0.2 s
-  current-check poll — tune from the UI's Advanced timing panel, which shows
+  current-check poll — tune from the UI's Advanced Controls panel, which shows
   the achieved rate live).
 
 ## Timing: how a run stays on schedule
@@ -391,9 +392,13 @@ for getting the tool ready before pressing Start:
    also states the sample bias explicitly — magnitude, sign, and that pre-start
    only arms it. (The DC supply outputs are no longer a manual step: pre-start
    switches the three coils on itself, see below.)
+   Advanced Controls supplies the plasma current limit (200 mA), grid voltage
+   (100 V), steering current limit (3.7 A), and collimating current limit
+   (2.5 A). The protected pre-start programs them before the beam strike;
+   Glassman HV must already be on for its current write.
 2. Open the Ar pneumatic isolation valve — **soft-opened**: one 0.05 s bleed
    pulse, a 0.5 s wait, then open, so the Ar built up behind it does not dump
-   into the reactor (2026-08-26; the numbers are in Advanced timing). This adds
+   into the reactor (2026-08-26; the numbers are in Advanced Controls). This adds
    ~0.55 s at the default settings, before step 3's settle. Every other open of
    that valve is pulsed the same way, including a manual one from the Hardware
    tab.
@@ -495,18 +500,24 @@ second start (409) and the UI disables it.
 |---|---|---|---|
 | Cycles | `cycles` | 100 | |
 | Dose pressure (Torr) | `dose_pressure_torr` | 0.020 | full-volume setpoint (ai1 Baratron) |
-| Dose time (s) | `dose_s` | 0.05 | micro-pulse valve open time |
+| Dose time (s) | `dose_s` | 0.05 | valve open time for each pulse |
+| Pulses per cycle | `dose_pulses` | 1 | **Advanced Controls**; repeat before Pump A |
+| Wait between pulses (s) | `dose_pulse_gap_s` | 0 | **Advanced Controls**; valve stays closed |
 | Pump A after dose (s) | `pump_a_s` | 10 | EE-ALD: monotonic elapsed time. EE-CVD: lit-time gated |
 | Beam exposure (s) | `beam_s` | 5 | EE-ALD only; counted only while current present |
 | Pump B after beam (s) | `pump_b_s` | 10 | EE-ALD only |
 | Sample bias (V) | `sample_bias_v` | 0 | magnitude; 0 leaves the stage bias supply off |
 | Bias polarity | `sample_bias_polarity` | +1 | lead orientation; signs the LOGGED voltage only |
-| Bias lead before beam (s) | `sample_bias_lead_s` | 0.2 | bias on this long before the beam. **Advanced timing** |
-| Bias trail after beam (s) | `sample_bias_trail_s` | 0.2 | bias off this long after the beam. **Advanced timing** |
-| Ar soft-open pulses | `ar_soft_open_pulses` | 1 | 0 = plain flip. **Advanced timing**; server-side, applies to every open |
+| Plasma current limit (mA) | `plasma_current_ma` | 200 | Advanced Controls; pre-start writes only with front-panel HV already on; Glassman voltage limit remains 800 V |
+| Grid voltage (V) | `grid_voltage_v` | 100 | Advanced Controls; pre-start |
+| Steering current limit (A) | `steering_current_a` | 3.7 | Advanced Controls; pre-start |
+| Collimating current limit (A) | `collimating_current_a` | 2.5 | Advanced Controls; pre-start |
+| Bias lead before beam (s) | `sample_bias_lead_s` | 0.2 | bias on this long before the beam. **Advanced Controls** |
+| Bias trail after beam (s) | `sample_bias_trail_s` | 0.2 | bias off this long after the beam. **Advanced Controls** |
+| Ar soft-open pulses | `ar_soft_open_pulses` | 1 | 0 = plain flip. **Advanced Controls**; server-side, applies to every open |
 | Ar pulse width (s) | `ar_soft_open_on_s` | 0.05 | width of each soft-open pulse |
 | Ar pulse gap (s) | `ar_soft_open_gap_s` | 0.5 | delay between them |
-| Min beam current (µA) | `min_current_ua` | 500 | UI takes µA, sends amps. **Advanced timing** since 2026-08-25 |
+| Min beam current (µA) | `min_current_ua` | 500 | UI takes µA, sends amps. **Advanced Controls** since 2026-08-25 |
 | Gas overlap (s) | `gas_overlap_s` | 0.5 | single handoff time shared by both gas transitions; with Simultaneous it is only the lead-in |
 | Gas order | `{mfc1,mfc2}_gas_order` | first / second | or `simultaneous` — both gases cover the whole window, % ignored. Needs two |
 | Fill pulse on/off (s) | `fill_pulse_on_s` / `fill_pulse_off_s` | 0.10 / 0.30 | fill valve pulse timing |
@@ -516,15 +527,17 @@ second start (409) and the UI disables it.
 | Ar valve settle (s) | `valve_delay_s` | 1 | pre-start only |
 | Current hold time (s) | `hold_s` | 5 | pre-start only; a drop restarts the count |
 
-Every parameter in this table can be changed **while the run is running**
+Run timing and gas parameters in this table can be changed **while the run is running**
 (2026-09-01). The browser posts the same body it would start a run with, the
 server diffs it against what the run is using, and only what moved is applied
 and logged. Timing changes land the next time that step runs; a gas flow that is
 on right now is re-commanded immediately; the cycle count is re-read every
 cycle. Each edit is recorded in the run's `_run_params.txt` under **CHANGES
 DURING THE RUN**, with the elapsed time and cycle number it happened at.
+The four supply defaults are pre-start settings; changing their saved fields
+during a run does not reprogram an energized supply.
 
-**Advanced timing** is grouped by mechanism (2026-08-28): precursor fill
+**Advanced Controls** is grouped by mechanism (2026-08-28): supply defaults, precursor fill
 regulation, beam strike and reignite, the sample-bias bracket, the Ar soft
 open, and end of run — each group with its own explanation under it, rather
 than twelve fields in one grid under one paragraph explaining all of them.
@@ -554,7 +567,7 @@ Three tabs (`localStorage`-persisted): **Run**, **Hardware**, **Diagnostics**.
 - **Run panel** (left column): mode selector (EE-ALD/EE-CVD), the shared
   parameter fields, a collapsible **Gas scheduling** panel (open by
   default) with a live plain-English timeline, a collapsible **Advanced
-  timing** panel (the reignite/fill fields, with the achieved reignite rate
+  Controls** panel (the supply/reignite/fill fields, with the achieved reignite rate
   in its summary), a collapsible **Pre-start** panel (its own params +
   live status in its summary), Start/Pause/Resume/Abort, Pre-start/Stop
   pre-start, and Initiate/Stop fill pulse. A **phase strip** highlights the

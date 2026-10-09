@@ -392,7 +392,7 @@ class Supervisor:
                             f"power supply {ps.id}: {ps.model or ps.driver} on "
                             f"{ps.port} @{ps.baud} addr {ps.address}, "
                             f"firmware {dev.firmware or '?'} "
-                            f"(monitor only; HV off at run end)")
+                            f"(current limit while HV on; HV off at run end)")
             else:
                 # The port is REPORTED, not configured - it is resolved from the
                 # USB serial - so this line is the record of where it landed.
@@ -1301,7 +1301,9 @@ class Supervisor:
             return
         owned = (
             kind == "mfc"
-            or (kind == "supply" and device_id in HCPES_SUPPLIES)
+            or (kind == "supply" and (device_id in HCPES_SUPPLIES
+                                       or getattr(getattr(self.supplies.get(device_id), "cfg", None),
+                                                  "driver", None) == "glassman_fl"))
             or (kind == "valve" and device_id in {"ar_pneumatic", "plasma_ground"})
         )
         if owned:
@@ -1425,12 +1427,15 @@ class Supervisor:
             raise RuntimeError(
                 f"{supply_id} has no current control in this program")
         await setter(amps)
-        self._setpoint_changed[f"psu.{supply_id}"] = self.clock.elapsed()
-        self._event("command", f"{supply_id}: current limit set to {float(amps):g} A")
+        is_hv = getattr(dev.cfg, "driver", "") == "glassman_fl"
+        self._setpoint_changed[f"{'hv' if is_hv else 'psu'}.{supply_id}"] = self.clock.elapsed()
+        self._event("command", f"{supply_id}: current limit set to {float(amps):g} "
+                    f"{'mA (800 V limit)' if is_hv else 'A'}")
         return {
             "id": supply_id,
             "current": float(getattr(dev, "current_setpoint", amps)),
-            "output_on": bool(getattr(dev, "output_on", False)),
+            "output_on": bool(dev.status().get("hv_on") if is_hv
+                              else getattr(dev, "output_on", False)),
         }
 
     def _settling(self, key: str) -> bool:

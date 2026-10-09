@@ -3,16 +3,17 @@
 The plasma power supply: an **XP Glassman FL1.5F1.0**, rated **1500 V / 1.0 A**,
 connected to the reactor PC by USB.
 
-The reactor **reads it and logs it, and sends only one command type: HV OFF,
-from the requested run, pre-start and HCPES cleanup paths.** Zach sets voltage
-and current by hand on the
-front panel; there is no way to set a level or to turn HV *on* from this
-program, no UI setpoint, and no software limit. See
+The reactor reads and logs it, commands HV OFF during cleanup, and can set its
+current limit after a fresh query confirms HV is already on. Every remote Set
+command carries the operator-approved 800 V voltage limit. HV can only be
+turned on at the front panel. See
 [What this program commands, and why](#what-this-program-commands-and-why).
 
 Sources: XP Glassman *Series FL* instruction manual, doc **102002-168 Rev H**,
 26 Aug 2021 (Figures 18–37), and direct observation on this supply. Everything
 below marked CONFIRMED was seen on the wire on 2026-08-21.
+The 2026-09-30 current-control path has fake-device coverage but has not yet
+been qualified on the physical supply.
 
 ---
 
@@ -188,16 +189,15 @@ is ever added, confirm this on the bench before relying on it.
 ---
 
 **Confirmed on real hardware 2026-08-25**: the supply's voltage is killed at
-the end of a run, as intended. HV OFF remains the one command type this program
-sends it; HCPES sequencing itself is not thereby hardware-qualified.
+the end of a run, as intended. HCPES sequencing and current-limit changes are
+not thereby hardware-qualified.
 
 ## What this program commands, and why
 
 `reactor/devices/glassman_fl.py` implements the full protocol, including
-`set_levels`, `set_hv`, `reset` and `hv_off`. Only **`hv_off` is wired up**. The
-rest are not reachable from the supervisor, the HTTP API, or the browser: Zach
-asked for the protocol to be complete and in place for later, with no
-level-setting control surface today.
+`set_levels`, `set_hv`, `reset`, `set_current` and `hv_off`. Only `set_current`
+and `hv_off` are reachable from the supervisor. Current control requires a
+fresh HV-on query; the Set command carries 800 V and never asserts HV on.
 
 **Updated 2026-08-21:** one of them, `hv_off()`, is now wired up. Zach asked for
 HV to be commanded off whenever a run ends or is aborted. It is now used by
@@ -205,12 +205,12 @@ normal-run cleanup, pre-start abort, and HCPES completion/stop/failure cleanup.
 Two things about how the off is sent are load-bearing:
 
 - The Set frame always carries a V and an I program, so there is no "HV off
-  only" packet. `hv_off()` echoes the supply's **last-read levels** back with the
-  frame rather than sending 0/0, which would wipe the front-panel settings.
+  only" packet. `hv_off()` sends the approved 800 V limit and last commanded
+  current, or the 200 mA default if no current was commanded.
 - Any Set command moves the supply into **REMOTE** until LOC/REM is pressed.
   Expect the supply to be in remote after a run ends.
 
-There is still no way to set a level, or to turn HV *on*, from this program.
+There is still no remote HV-on command or arbitrary voltage control.
 
 Three consequences, all deliberate:
 
@@ -220,15 +220,12 @@ Three consequences, all deliberate:
    belongs to cleanup of an owned run, pre-start or HCPES acquisition, not an
    otherwise idle server stopping — otherwise closing the program would kill a
    plasma Zach had set by hand. An idle stop closes the port and nothing else.
-2. **There is no voltage limit.** An earlier plan capped the setpoint at 1000 V.
-   Zach withdrew it once this became read-only: with no way to set a voltage
-   there is nothing to clamp. **If remote control is ever added, revisit that
-   decision before wiring up `set_levels`** — 1000 V on a 1500 V supply was
-   2730 counts (`0xAAA`), exactly.
-3. **The UI card has no inputs.** Not disabled inputs — absent ones.
+2. **Voltage is fixed at 800 V for remote Set commands.** The older withdrawn
+   1000 V cap is superseded by Zach's 2026-09-30 instruction.
+3. **The UI card has one current-limit input.** It is disabled while HV is off.
 
-Adding remote control is a change to reactor behaviour and needs Zach's explicit
-go-ahead. See [CONTROL_MODEL.md](CONTROL_MODEL.md).
+These current-only controls follow Zach's 2026-09-30 request. See
+[CONTROL_MODEL.md](CONTROL_MODEL.md).
 
 ---
 

@@ -93,6 +93,8 @@ export function launchReview(preview, sessionId, campaignId=""){
     + `\nRecovery retry budget ${settings.recovery_window_s}s (settling does not consume it)`
     + `\n\nPARAMETER CHANGES\n${settings.condition_settle_mode === "time" ? `${settings.parameter_settle_s}s timed delay after each changed parameter` : `Measure a ${parameter.trend_window_s}s rolling RoC, then keep it below ${(parameter.max_drift_a_per_min*1000).toFixed(3)} mA/min for ${parameter.stable_window_s}s; maximum ${parameter.maximum_wait_s}s`}`
     + `\n\nCONFIRM BEFORE START\nThe physical stage leads are in the ${sign} orientation.`
+    + (plan.axes.some(axis => axis.target === "supply:hv")
+      ? `\nGlassman HV is already on at its front panel; current changes carry an 800 V voltage limit.` : "")
     + `\nAll background MFCs are explicitly swept/fixed or locked at zero.`
     + `\n\nEVERY EXIT\nAll MFCs → 0; Ar isolation closes after Ar zero; HV off;`
     + `\nfour HCPES support supplies output off; plasma relay parked.`;
@@ -254,6 +256,8 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
     <div class="hcpes-profile"><b>Restricted HCPES pre-start</b><span>all MFCs zero → Ar isolation open → initial plasma condition programmed → four supplies on → plasma relay to beam mode → establishment stability → sweep point 1. No precursor fill or precursor-valve action.</span></div>
     ${initialSetpointsHtml(locked)}
     <div class="hcpes-subhead"><span>Parameter-space blocks</span><small>Drag-free buttons set deterministic outer-to-inner nesting.</small></div>
+    ${!locked && capability("supply:hv") && !plan.axes.some(axis => axis.target === "supply:hv")
+      ? '<button id="hcpesAddHvAxis">Add plasma current limit sweep</button>' : ''}
     <div class="hcpes-axes">${plan.axes.map((axis, index) => axisCard(axis, index, locked)).join("")}</div>
     <details class="hcpes-settings" open><summary>Stability, recovery, and collection</summary>${settingsHtml(locked)}
       <div class="hint">If plasma disappears during a parameter-change check, that short check stops and recovery begins. Once plasma returns, the stricter full establishment profile replaces the interrupted parameter check. A settle timeout continues with <code>settled=false</code>; an exhausted retry budget rejects only that condition.</div></details>
@@ -397,6 +401,11 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
       moveAxis(plan.axes, from, to); markDirty(); render(); return;
     }
     try{
+      if(button.id === "hcpesAddHvAxis"){
+        plan.axes.push({target:"supply:hv", mode:"fixed", value:200});
+        plan.initial_setpoints["supply:hv"] = 200;
+        markDirty(); render(); return;
+      }
       if(button.id === "hcpesNewPlan" || button.id === "hcpesDuplicatePlan"){
         if(!guardDirty()) return;
         const name=promptImpl("Name for the HCPES plan:", button.id === "hcpesDuplicatePlan" ? `${plan.name} copy` : "New HCPES characterization");

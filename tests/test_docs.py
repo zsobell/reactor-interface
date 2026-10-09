@@ -81,6 +81,8 @@ async def main() -> int:
     c.check("stage TC channel", cfg.stage_temp.channel in ALL, cfg.stage_temp.channel)
     aux = {a.id: a.channel for a in cfg.aux_inputs}
     c.check("bubbler TC channel", aux.get("bubbler", "") in ALL, str(aux.get("bubbler")))
+    c.check("Bakeout temp 2 channel", aux.get("bakeout2") == "cDAQ1Mod4/ai3"
+            and aux["bakeout2"] in ALL, str(aux.get("bakeout2")))
     c.check(f"valve count ({len(cfg.valves)}) is stated",
             f"{len(cfg.valves)} valves" in ALL, f"{len(cfg.valves)} valves")
     pg = next((v for v in cfg.valves if v.id == "plasma_ground"), None)

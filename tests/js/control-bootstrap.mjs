@@ -19,13 +19,20 @@ function element(tag, attrs = '') {
 for (const match of html.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
   elements.set(match[3], element(match[1], match[2]));
 }
+const documentEvents = new Map();
 globalThis.document = {
   getElementById: id => elements.get(id) || null,
-  querySelectorAll: () => [], addEventListener() {}, removeEventListener() {},
+  querySelectorAll: () => [],
+  addEventListener(name, fn) {documentEvents.set(name,[...(documentEvents.get(name)||[]),fn]);},
+  removeEventListener() {},
   createElement: tag => element(tag), documentElement: element('html'), body: {appendChild() {}},
 };
 const windowEvents = {};
-globalThis.window = {addEventListener(name, fn) {windowEvents[name] = fn;}, devicePixelRatio: 1};
+const opened = [];
+globalThis.window = {
+  addEventListener(name, fn) {windowEvents[name] = fn;}, devicePixelRatio: 1,
+  open(url,name){opened.push({url,name});return {focus(){}};},
+};
 globalThis.location = {protocol: 'https:', host: 'reactor.test'};
 const stored = new Map();
 globalThis.localStorage = {getItem: k => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v)};
@@ -68,6 +75,18 @@ assert.ok(requested.includes('/api/events'), 'event history loaded');
 assert.match(elements.get('events').innerHTML, /seeded startup event/,
   'seeded event history renders before a new telemetry event arrives');
 assert.match(elements.get('smoothHint').textContent, /off/, 'page reads extracted chart settings during bootstrap');
+const sensor = {dataset:{plotKey:'stage.temp',plotLabel:'Stage temperature'},
+  closest(selector){return selector === '[data-pane="hardware"]' ? {} :
+    selector === '[data-plot-key]' ? this : null;}};
+for(const listener of documentEvents.get('click')||[])
+  listener({target:sensor});
+assert.match(opened[0].url,/sensor-plot\.html\?key=stage\.temp&label=Stage\+temperature/,
+  'clicking a Hardware temperature value opens its own sensor popup');
+let prevented = false;
+for(const listener of documentEvents.get('keydown')||[])
+  listener({target:sensor,key:'Enter',preventDefault(){prevented=true;}});
+assert.equal(prevented,true,'keyboard activation works on a sensor value');
+assert.equal(opened.length,2,'keyboard activation opens the same plot');
 assert.equal(restartStored.has('reactor.restart.success'), false,
   'restart-success notice is consumed once after the replacement page boots');
 const oldWorkerError = {logging:{active:true,run_export:{active:false},ellipsometer:{active:false},

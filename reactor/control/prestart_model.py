@@ -215,7 +215,13 @@ def capability_catalog(cfg: ReactorConfig) -> dict[str, Any]:
         if not ps.enabled:
             continue
         if ps.driver == "glassman_fl":
-            actions = [_action("hv.off", "HV off", summary="Command {target} HV off")]
+            actions = [
+                _action("hv.off", "HV off", summary="Command {target} HV off"),
+                _action("supply.set_current", "Set current limit (HV already on)", [
+                    _field("amps", "Current limit", "number", unit=ps.unit_i,
+                           default=200.0, minimum=0.0),
+                ], summary="Set {target} current limit to {amps} mA"),
+            ]
         else:
             actions = [
                 _action("supply.output_on", "Output on", summary="Turn {target} output on"),
@@ -335,10 +341,34 @@ def current_prestart_recipe(cfg: ReactorConfig) -> PrestartRecipe:
                         value_type="choice", default=1, source="sample_bias_polarity",
                         choices=[{"value": 1, "label": "+ positive to stage"},
                                  {"value": -1, "label": "- negative to stage"}]),
+        RecipeParameter(id="plasma_current_ma", label="Plasma current limit",
+                        value_type="number", default=200.0, unit="mA", minimum=0.0,
+                        source="plasma_current_ma"),
+        RecipeParameter(id="grid_voltage_v", label="Grid voltage",
+                        value_type="number", default=100.0, unit="V", minimum=0.0,
+                        source="grid_voltage_v"),
+        RecipeParameter(id="steering_current_a", label="Steering current limit",
+                        value_type="number", default=3.7, unit="A", minimum=0.0,
+                        source="steering_current_a"),
+        RecipeParameter(id="collimating_current_a", label="Collimating current limit",
+                        value_type="number", default=2.5, unit="A", minimum=0.0,
+                        source="collimating_current_a"),
     ]
     steps: list[PrestartStep] = []
     for ps in cfg.power_supplies:
-        if not ps.enabled or not ps.prestart_output:
+        if not ps.enabled:
+            continue
+        defaults = {"hv": ("plasma_current_ma", "supply.set_current", "amps"),
+                    "grid_bias": ("grid_voltage_v", "supply.set_voltage", "volts"),
+                    "steering": ("steering_current_a", "supply.set_current", "amps"),
+                    "collimating": ("collimating_current_a", "supply.set_current", "amps")}
+        if ps.id in defaults:
+            param, action, field_name = defaults[ps.id]
+            steps.append(PrestartStep(
+                id=f"default-{ps.id}", target=f"supply:{ps.id}", action=action,
+                args={field_name: ref(param)},
+                on_error="stop" if ps.driver == "glassman_fl" else "continue"))
+        if not ps.prestart_output:
             continue
         if ps.sample_bias:
             steps.append(PrestartStep(

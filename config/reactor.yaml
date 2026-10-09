@@ -112,8 +112,8 @@ stage_temp:
 # ---------------------------------------------------------------------------
 #  Other analog inputs
 # ---------------------------------------------------------------------------
-#  Five of the eight thermocouple inputs are physically connected: the stage TC
-#  (cDAQ1Mod4/ai1, configured above) and four aux channels below. The three
+#  Six of the eight thermocouple inputs are configured as connected: the stage TC
+#  (cDAQ1Mod4/ai1, configured above) and five aux channels below. The two
 #  unused inputs read 2385 C, the NI 9211 open-circuit full-scale. That also
 #  settles the old log's A/B/C/D columns:
 #  four channels of a four-channel TC module, not four heater zones.
@@ -136,13 +136,19 @@ aux_inputs:
   # Bakeout thermocouple, plugged into cDAQ1Mod4/ai2 on 2026-09-11. Expected
   # 60-70 C during a bake. Listed right after the bubbler because the Hardware
   # tab's Thermocouples card draws aux inputs in this file's order. An NI 9211
-  # open-circuit reads its full scale (~2385 C) - if it shows that, the TC is
-  # not on ai2 (ai3 is the only other free port on this module).
+  # open-circuit reads its full scale (~2385 C) - if it shows that, check wiring.
   - id: "bakeout1"
     label: "Bakeout temp 1"
     channel: "cDAQ1Mod4/ai2"
     kind: "thermocouple"
     tc_type: "K"
+    unit: "C"
+  # Fourth input on the stage/bubbler/bakeout module, identified by Zach.
+  - id: "bakeout2"
+    label: "Bakeout temp 2"
+    channel: "cDAQ1Mod4/ai3"
+    kind: "thermocouple"
+    tc_type: "K"                           # Confirm physical TC type
     unit: "C"
   - id: "tc_a"
     label: "Thermocouple A (unidentified)"
@@ -233,7 +239,7 @@ valves:
     # Requested by operator 2026-08-26: opening this in one flip dumps the Ar
     # that has built up behind it into the reactor, so EVERY open of it - the
     # Hardware tab, pre-start, a recipe step - is pulsed in instead and only
-    # then left open. Pulse count/width/gap are in the UI's Advanced timing.
+    # then left open. Pulse count/width/gap are in the UI's Advanced Controls.
     soft_open: true
   # line6, line7 unused
 
@@ -365,6 +371,21 @@ mfcs:
 #  connect, and it selects the measurement function. Empty the list to leave the
 #  DMM exactly as you set it up by hand and just read what it is showing.
 instruments:
+  # MKS 937B on the Auger analysis chamber. Read-only RS232 at address 253.
+  # Identified live 2026-10-09: COM3 answered MT=HC,HC,NC,NA; U=TORR;
+  # PR3=3.00E-10 while PR1=OFF and the other channels had no gauge.
+  # Prolific adapter VID:PID 067B:2303 has no serial number; verify COM3 if
+  # the USB adapter is moved or Windows reassigns its port.
+  - id: "auger_pressure"
+    label: "Auger chamber hot cathode"
+    enabled: true
+    driver: "mks_937b"
+    resource: "COM3"
+    baud: 9600
+    address: 253
+    query: "PR3"
+    unit: "Torr"
+
   - id: "ammeter"
     label: "Keithley DMM6500"
     enabled: true
@@ -383,12 +404,10 @@ instruments:
 # ---------------------------------------------------------------------------
 #  Power supplies (XP Glassman FL high-voltage plasma supply)
 # ---------------------------------------------------------------------------
-#  MONITOR + ONE COMMAND. The reactor polls the supply's voltage and current
-#  monitors and logs them, and commands HV OFF when a run ends or is aborted
-#  (operator request, 2026-08-21). Zach sets voltage and current by hand on the
-#  front panel: there is no way to set a level or turn HV on from this program,
-#  no UI setpoint, and no software limit - see docs/CONTROL_MODEL.md before
-#  changing that. Note that any Set command (including the HV-off one) leaves
+#  The reactor polls the voltage/current monitors and logs them. It commands
+#  HV OFF during cleanup. Current limit can be changed remotely only after
+#  fresh status proves HV is already on; every Set carries an 800 V limit.
+#  HV ON remains front-panel only. Any Set command leaves
 #  the supply in REMOTE until its front-panel LOC/REM button is pressed.
 #
 #  CONFIRMED on the wire 2026-08-21 (see docs/GLASSMAN_FL.md):
@@ -449,10 +468,10 @@ power_supplies:
   #  (2026-08-21): the collimating coil is what holds the plasma stable when the
   #  beam dump is grounded, so cycling it with the beam would be harmful.
   #
-  #  Voltage and current LIMITS are set by hand on each front panel and this
-  #  program never touches them. The one exception is the sample-bias unit's
-  #  VOLTAGE, which comes from the run's "Sample bias" field; its current limit
-  #  is still Zach's. As found 2026-08-21: 20 V/0.5 A, 30.07 V/3.7 A,
+  #  Advanced Controls sets the grid voltage and steering/collimating current
+  #  limits at ALD/CVD pre-start. Sample-bias voltage follows the run's field;
+  #  its current limit remains under manual control. As found 2026-08-21:
+  #  20 V/0.5 A, 30.07 V/3.7 A,
   #  100 V/0.2 A, 150 V/2.5 A, all outputs off.
   #
   #  Rated maxima are NOT listed here - the driver asks each supply for its own
@@ -522,6 +541,7 @@ logging:
   columns:
     Time: "_elapsed"
     Pressure: "pressure"
+    "Auger pressure": "inst.auger_pressure"
     "Stage T": "stage.temp"
     "Bubbler T": "aux.bubbler"
     Current: "inst.ammeter"

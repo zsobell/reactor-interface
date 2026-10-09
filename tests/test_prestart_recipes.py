@@ -31,8 +31,8 @@ async def main() -> int:
             all(f"mfc:{m.id}" in targets for m in cfg.mfcs))
 
     glassman = targets["supply:hv"]
-    c.check("Glassman remains off-only",
-            [a["id"] for a in glassman["actions"]] == ["hv.off"],
+    c.check("Glassman exposes current limit and HV off, never remote HV on or voltage",
+            [a["id"] for a in glassman["actions"]] == ["hv.off", "supply.set_current"],
             str([a["id"] for a in glassman["actions"]]))
     bias_actions = {a["id"] for a in targets["supply:stage_bias"]["actions"]}
     c.check("stage bias exposes generic controls and arm metadata",

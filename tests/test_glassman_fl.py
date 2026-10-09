@@ -13,8 +13,8 @@ Two halves:
 2. **End to end through the virtual reactor**, confirming the readings reach
    the snapshot and land in the per-run CSV under stable column names.
 
-Nothing here can talk to the real supply, and there is deliberately no test of
-a write path: the program has none (see docs/CONTROL_MODEL.md).
+Nothing here can talk to the real supply. Current-limit writes use a fake
+serial exchange and assert the fixed 800 V program and no HV-on bit.
 
 Run directly: python -m tests.test_glassman_fl
 """
@@ -29,12 +29,14 @@ sys.path.insert(0, ".")
 
 from reactor.config import PowerSupplyCfg
 from reactor.devices.glassman_fl import (GlassmanFL, GlassmanProtocolError,
+                                         PLASMA_VOLTAGE_LIMIT_V,
                                          build_frame, checksum,
                                          counts_to_units, parse_query_response,
                                          parse_version_response,
                                          units_to_counts)
 from reactor.testing.virtual_reactor import VirtualReactor
-from tests._support import Checker, autotick
+from reactor.server.app import create_app
+from tests._support import Checker, asgi_call, autotick
 
 # This reactor's supply: FL1.5F1.0, 1500 V / 1000 mA.
 CFG = PowerSupplyCfg(id="hv", enabled=True, port="COM_TEST", baud=19200,
@@ -46,6 +48,14 @@ P = dict(cycles=2, dose_s=0.05, pump_a_s=0.15, beam_s=0.2, pump_b_s=0.1,
 
 def _cols(header: str) -> dict[str, int]:
     return {name: i for i, name in enumerate(header.split(","))}
+
+
+async def _raises_async(fn, exc_type) -> bool:
+    try:
+        await fn()
+    except exc_type:
+        return True
+    return False
 
 
 async def main() -> int:
@@ -148,6 +158,13 @@ async def main() -> int:
             str(h.fault_names()))
     c.check("HV on / remote / current-trip-enabled all set",
             h.hv_on and h.remote and h.current_trip_enabled)
+    dev.last_reply = h
+    c.check("Glassman CV status uses the card's CV label", dev.status()["mode"] == "CV")
+    cc_body = b"800400FFF0" + b"7C"
+    dev.last_reply = parse_query_response(b"R" + cc_body + checksum(cc_body) + b"\r")
+    c.check("Glassman CC status uses the card's CC label", dev.status()["mode"] == "CC")
+    dev.last_reply = r
+    c.check("mode is blank with HV off", dev.status()["mode"] is None)
 
     # ------------------------------------------------------------------ #
     c.section("4. bad frames are rejected, not silently decoded")
@@ -194,6 +211,39 @@ async def main() -> int:
             units_to_counts(250.0, 1000.0) == 0x3FF,
             hex(units_to_counts(250.0, 1000.0)))
 
+    c.section("5a. current-only command requires fresh HV-on proof")
+    sent = []
+    reply = raw
+    def exchange(body):
+        sent.append(body)
+        return reply if body == b"Q" else b"A\r"
+    dev._exchange = exchange
+    dev.connected = True
+    c.check("off unit rejects a current command without a Set frame",
+            await _raises_async(lambda: dev.set_current(200.0), RuntimeError)
+            and sent == [b"Q"], repr(sent))
+    sent.clear()
+    reply = hot
+    await dev.set_current(200.0)
+    expected_v = f"{units_to_counts(PLASMA_VOLTAGE_LIMIT_V, 1500.0):03X}".encode()
+    c.check("current command writes 800 V and 200 mA with no HV-on bit",
+            sent[0] == b"Q" and sent[1][1:4] == expected_v
+            and sent[1][4:7] == f"{units_to_counts(200.0, 1000.0):03X}".encode()
+            and sent[1][13:14] == b"0", repr(sent))
+    c.check("out-of-range current rejected before any I/O",
+            await _raises_async(lambda: dev.set_current(1001.0), ValueError)
+            and len(sent) == 2)
+    sent.clear()
+    await dev.hv_off()
+    c.check("HV off retains 800 V and last commanded current",
+            sent[0][1:7] == expected_v
+            + f"{units_to_counts(200.0, 1000.0):03X}".encode()
+            and sent[0][13:14] == b"1", repr(sent))
+    dev._drop()
+    c.check("reconnect cannot claim stale current or HV state",
+            dev.current_setpoint is None and dev.last_reply is None
+            and dev.connected is False)
+
     # ------------------------------------------------------------------ #
     c.section("6. readings reach the snapshot and the run export")
 
@@ -206,6 +256,25 @@ async def main() -> int:
         vr.instruments["ammeter"].value = 1.0e-3
         hv = vr.supplies["hv"]
         hv.voltage, hv.current, hv.arc_count = 812.5, 43.25, 7
+        c.check("supervisor refuses remote HV on",
+                await _raises_async(lambda: vr.sup.set_supply_output("hv", True), RuntimeError))
+        hv.hv_on = False
+        c.check("supervisor refuses current while HV is off",
+                await _raises_async(lambda: vr.sup.set_supply_current("hv", 200), RuntimeError)
+                and hv.current_calls == [])
+        hv.hv_on = True
+        result = await vr.sup.set_supply_current("hv", 200)
+        c.check("supervisor routes current only after front-panel HV on",
+                hv.current_calls == [200] and result["output_on"] is True)
+        app = create_app(supervisor=vr.sup)
+        status, api_result = await asgi_call(app, "POST", "/api/hv/hv/current",
+                                             {"milliamps": 250})
+        c.check("HV API explicitly uses milliamps",
+                status == 200 and api_result["current"] == 250
+                and hv.current_calls[-1] == 250)
+        status, _ = await asgi_call(app, "POST", "/api/supply/hv/current",
+                                    {"amps": 0.25})
+        c.check("Keithley ampere route refuses Glassman", status == 400)
 
         await vr.tick()
         snap = vr.sup.snapshot
@@ -216,8 +285,8 @@ async def main() -> int:
         c.check("arc count in snapshot", snap.get("hv.hv.arc_count") == 7.0,
                 repr(snap.get("hv.hv.arc_count")))
 
-        c.check("state() exposes the supply as read-only",
-                any(p.get("read_only") for p in vr.sup.state()["power_supplies"]))
+        c.check("state() exposes current-only control",
+                any(p.get("current_control_only") for p in vr.sup.state()["power_supplies"]))
 
         tick_task = await autotick(vr, period=0.05)
         try:

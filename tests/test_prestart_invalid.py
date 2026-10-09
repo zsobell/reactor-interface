@@ -27,6 +27,7 @@ async def main():
             try:
                 if next_operation == "prestart":
                     vr.sup.snapshot["inst.ammeter"] = 0.001
+                    vr.supplies["hv"].hv_on = True
                     await vr.sup.start_prestart(dict(valve_delay_s=0, hold_s=0, reignite_settle_s=0))
                     await asyncio.wait_for(vr.sup._prestart.task, timeout=2)
                     success = vr.sup.prestart["done"]

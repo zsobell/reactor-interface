@@ -55,6 +55,7 @@ def _cols(header: str) -> dict[str, int]:
 
 
 async def _prestart(vr, params) -> None:
+    vr.supplies["hv"].hv_on = True  # front-panel HV before each pre-start
     tick = await autotick(vr, period=0.05)
     try:
         await vr.sup.start_prestart(params)
@@ -105,6 +106,10 @@ async def main() -> int:
         # -------------------------------------------------------------- #
         c.section("2. pre-start with NO bias: coils on, stage bias stays off")
         await _prestart(vr, dict(PRE, sample_bias_v=0.0, sample_bias_polarity=1))
+        c.check("default plasma current is 200 mA",
+                vr.supplies["hv"].current_calls == [200.0])
+        c.check("default grid voltage is 100 V",
+                vr.supplies["grid_bias"].voltage_calls == [100.0])
 
         for k in COILS:
             c.check(f"{k} output ON", vr.supplies[k].output_on is True)
@@ -114,6 +119,7 @@ async def main() -> int:
                 str(bias.voltage_calls))
 
         await vr.sup.abort_prestart()
+        vr.supplies["hv"].hv_on = True  # operator turns HV back on at the front panel
         await vr.sup.supplies_output_off(reason="test reset")
         await vr.sup.stop_fill_regulation()
         for k in ("stage_bias", *COILS):
@@ -122,7 +128,14 @@ async def main() -> int:
 
         # -------------------------------------------------------------- #
         c.section("3. pre-start WITH a negative bias: ARMED, not energised")
-        await _prestart(vr, dict(PRE, sample_bias_v=12.0, sample_bias_polarity=-1))
+        await _prestart(vr, dict(PRE, sample_bias_v=12.0, sample_bias_polarity=-1,
+                                 plasma_current_ma=225.0, grid_voltage_v=110.0,
+                                 steering_current_a=3.2, collimating_current_a=2.2))
+        c.check("advanced supply controls override the defaults",
+                vr.supplies["hv"].current_calls[-1:] == [225.0]
+                and vr.supplies["grid_bias"].voltage_calls[-1:] == [110.0]
+                and vr.supplies["steering"].current_calls[-1:] == [3.2]
+                and vr.supplies["collimating"].current_calls[-1:] == [2.2])
 
         bias = vr.supplies["stage_bias"]
         # The change of 2026-08-26: the level is programmed but the stage is
@@ -206,6 +219,7 @@ async def main() -> int:
 
         # -------------------------------------------------------------- #
         c.section("7. stop_prestart hands over primed - it must NOT switch off")
+        vr.supplies["hv"].hv_on = True  # front-panel restart after run-end HV off
         await vr.sup.supplies_output_off(reason="test reset")
         for k in ("stage_bias", *COILS):
             vr.supplies[k].output_calls.clear()
@@ -290,14 +304,14 @@ async def main() -> int:
                         RuntimeError))
 
         # -------------------------------------------------------------- #
-        c.section("10. normal deposition does not change CURRENT limits")
-        # HCPES plans deliberately own these currents, but an ALD/CVD run that
-        # silently re-limited a supply would be a real hazard.
+        c.section("10. pre-start applies reviewed coil current defaults")
         for k in ("stage_bias", *COILS):
             if k == "grid_bias":
                 continue        # section 9 set this one deliberately
-            c.check(f"{k}: no automatic current change",
-                    vr.supplies[k].current_calls == [],
+            expected = [] if k == "stage_bias" else (
+                [3.7, 3.2, 3.7] if k == "steering" else [2.5, 2.2, 2.5])
+            c.check(f"{k}: expected pre-start current commands",
+                    vr.supplies[k].current_calls == expected,
                     str(vr.supplies[k].current_calls))
 
         # -------------------------------------------------------------- #

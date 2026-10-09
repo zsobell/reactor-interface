@@ -12,7 +12,7 @@ async def main():
     c = Checker("test_static_assets")
     app = create_app()
     try:
-        pending = ["/", "/analysis"]
+        pending = ["/", "/analysis", "/static/sensor-plot.html"]
         visited = set()
         while pending:
             url = pending.pop()
@@ -37,6 +37,9 @@ async def main():
         c.check("analysis and control assets are separate",
                 {"/static/analysis.js", "/static/control.js", "/static/analysis.css",
                  "/static/control.css"}.issubset(visited))
+        c.check("sensor popup and data helper are reachable",
+                {"/static/sensor-plot.html", "/static/sensor-plot.js",
+                 "/static/sensor-plot-data.js", "/static/sensor-plot.css"}.issubset(visited))
     finally:
         await app.state.supervisor.recording.close()
     return c.summary()

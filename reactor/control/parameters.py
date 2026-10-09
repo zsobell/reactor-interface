@@ -88,6 +88,8 @@ class RunParameters:
     cycles: int
     dose_valve: str
     dose_s: float
+    dose_pulses: int
+    dose_pulse_gap_s: float
     pump_a_s: float
     beam_s: float | None
     pump_b_s: float | None
@@ -117,7 +119,10 @@ class RunParameters:
         return cls(mode=mode, name=raw.get("name", "ALD + e-beam (precursor 1)" if mode == "ald"
                                           else "EE-CVD (precursor 1)"),
                    cycles=int(raw.get("cycles", 100)), dose_valve=raw.get("dose_valve", "prec1"),
-                   dose_s=float(raw.get("dose_s", 0.05)), pump_a_s=float(raw.get("pump_a_s", 10.0)),
+                   dose_s=float(raw.get("dose_s", 0.05)),
+                   dose_pulses=int(raw.get("dose_pulses", 1)),
+                   dose_pulse_gap_s=float(raw.get("dose_pulse_gap_s", 0.0)),
+                   pump_a_s=float(raw.get("pump_a_s", 10.0)),
                    beam_s=float(raw.get("beam_s", 5.0)) if mode == "ald" else None,
                    pump_b_s=float(raw.get("pump_b_s", 10.0)) if mode == "ald" else None,
                    fill=FillParameters.normalize(raw), beam=BeamParameters.normalize(raw),

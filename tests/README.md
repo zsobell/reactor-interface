@@ -42,7 +42,7 @@ low-level enough to skip the exact code path that arms that behavior. See
 
 The right way — what `reactor/testing/virtual_reactor.py` does — is to fake
 the five device classes `Supervisor.start()` actually constructs:
-`NiDaqBackend`, `MksMfc`, `ScpiInstrument`, `GlassmanFL`, `Keithley2260B`. Everything above that boundary —
+`NiDaqBackend`, `MksMfc`, `ScpiInstrument`/`Mks937B`, `GlassmanFL`, `Keithley2260B`. Everything above that boundary —
 `Supervisor` itself, `RecipeRunner`, every method in `recipe.py` — runs
 completely unmodified, the exact same code path that runs against the real
 reactor. A test doesn't call a look-alike `set_valve`; it calls the real
@@ -159,6 +159,7 @@ Supervisor integration with fake devices and isolated file/number processing.
 |---|---|
 | `test_ee_ald_recipe.py` | Pulsed-beam mode: per-cycle beam pulse, gas lead/handoff off the single overlap, reignite mid-exposure, abort mid-dose |
 | `test_ee_cvd_recipe.py` | Continuous-beam mode: beam on/off lifecycle, reignite watchdog, the cycle-clock gas schedule staying locked across a reignite, abort |
+| `test_dose_pulses.py` | ALD/CVD repeated precursor dose counts, closed-valve waits, and cycle duration |
 | `test_prestart.py` | The operator pre-start sequence: happy path, unlimited-retry strike, a drop mid-hold restarting the hold, grounding the beam however it ends |
 | `test_prestart_recipes.py` | Pre-start schema/capability coverage, protected Current recipe parity, typed parameter resolution and fail-closed target/action validation |
 | `test_prestart_recipe_api.py` | Recipe CRUD/select/preview APIs, revision conflicts, restart persistence, corrupt-schema refusal and atomic/concurrent writes without hardware construction |
@@ -171,6 +172,9 @@ Supervisor integration with fake devices and isolated file/number processing.
 | `test_docs.py` | The docs still describe THIS program: poll rates, hardware addresses, the channel map, MFC register addresses and run-file names quoted in prose are checked against the config and code, every module and test is listed where it should be, and superseded claims plus HCPES mA/acquisition-order and active-only header-error semantics are pinned. Reads files only |
 | `test_sample_freshness.py` | The run export blanking a channel on rows where it was not resampled: state columns always filled, a slow channel blank on the ticks it missed and present on the ones it made, and the run-name prefix reaching the filename |
 | `test_keithley_supplies.py` | The four DC supplies: *IDN? parsing, and above all WHEN their outputs are switched — coils on at pre-start, off at run end/abort, untouched by a reignite; the sample bias only *armed* at pre-start since 2026-08-26. The "not cycled by a reignite" assertion is the load-bearing one |
+| `test_keithley_reconnect.py` | Failed serial handshake cleanup, COM renumbering on retry, and malformed poll recovery without output commands |
+| `test_mks_937b.py` | Read-only Auger pressure protocol, invalid statuses, serial loss, telemetry and manual logging |
+| `test_sensor_plot.py` | Popup series allowlist and bounded live-history projection that retains extrema and gaps |
 | `test_sample_bias_bracket.py` | The sample bias following the beam (2026-08-26, so the stage thermocouple reads clean while the beam is off): it comes up a lead time before every beam and drops a trail time after, once per beam in EE-ALD and once per run in EE-CVD, a reignite does not cycle it, the bracket does not lengthen a cycle, and an abort drops it at once with no queued flip able to bring it back |
 | `test_analysis_layout_api.py` | `/api/analysis_layout` — the Analysis page's plot grid being server-owned (2026-08-26) so every machine sees the same plots: round trip, last-write-wins between browsers, and a damaged file degrading to "nothing saved" rather than a 500. Drives the real FastAPI app over raw ASGI **without** running its lifespan, so it never touches the DAQ or the serial ports |
 | `test_gas_simultaneous.py` | The Simultaneous gas order (2026-08-26): two gases sharing the whole window instead of dividing it — each at its own flow, nothing switching mid-exposure, on once for the run in EE-CVD, and a lone Simultaneous gas refusing the run before it starts |

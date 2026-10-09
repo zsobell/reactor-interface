@@ -1,6 +1,7 @@
 /** Run-parameter form state, persistence, mode selection and derived hints. */
-const PARAM_KEYS = ["cycles","dose_pressure_torr","dose_s","pump_a_s","beam_s",
+const PARAM_KEYS = ["cycles","dose_pressure_torr","dose_s","dose_pulses","dose_pulse_gap_s","pump_a_s","beam_s",
   "pump_b_s","min_current_ua","sample_bias_v","sample_bias_polarity",
+  "plasma_current_ma","grid_voltage_v","steering_current_a","collimating_current_a",
   "sample_bias_lead_s","sample_bias_trail_s",
   "fill_pulse_on_s","fill_pulse_off_s","tolerance_pct",
   "reignite_pulse_s","reignite_settle_s","ar_close_delay_s",
@@ -83,7 +84,8 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     const key = id.slice(2);
     if(key === "min_current_ua") return "min_current_a";
     if(key === "tolerance_pct") return "tolerance_frac";
-    if(key === "run_name" || key.startsWith("pre_") || key.startsWith("smooth_")) return null;
+    if(key === "run_name" || key.startsWith("pre_") || key.startsWith("smooth_")
+       || ["plasma_current_ma", "grid_voltage_v", "steering_current_a", "collimating_current_a"].includes(key)) return null;
     return key;
   }
   function saveParams(event){
@@ -139,8 +141,11 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     // offsets from cycle start. Mirrors _electron_beam and _beam_watch in
     // recipe.py respectively.
     const cvd = runMode() === "cvd";
+    const pulses = Math.max(1, parseInt($("p_dose_pulses").value, 10) || 1);
+    const doseSpan = pulses * (parseFloat($("p_dose_s").value) || 0)
+      + (pulses - 1) * (parseFloat($("p_dose_pulse_gap_s").value) || 0);
     const span = cvd
-      ? (parseFloat($("p_dose_s").value) || 0) + (parseFloat($("p_pump_a_s").value) || 0)
+      ? doseSpan + (parseFloat($("p_pump_a_s").value) || 0)
       : (parseFloat($("p_beam_s").value) || 0);
     const anchor = cvd ? "cycle" : "beam";
     const ov = parseFloat($("p_gas_overlap_s").value) || 0;
@@ -202,13 +207,18 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     const params = {
       cycles: parseInt($("p_cycles").value,10)||1,
       dose_pressure_torr: P("dose_pressure_torr"),
-      dose_s: P("dose_s"), pump_a_s: P("pump_a_s"),
+      dose_s: P("dose_s"), dose_pulses: parseInt($("p_dose_pulses").value, 10),
+      dose_pulse_gap_s: P("dose_pulse_gap_s"), pump_a_s: P("pump_a_s"),
       min_current_a: (P("min_current_ua")||500)*1e-6,
       // Magnitude and lead orientation. The supply is single-quadrant, so the
       // sign only ever reaches the LOG, never the instrument - see
       // Supervisor.supplies_output_on.
       sample_bias_v: Math.abs(P("sample_bias_v") || 0),
       sample_bias_polarity: parseInt($("p_sample_bias_polarity").value, 10) || 1,
+      plasma_current_ma: P("plasma_current_ma"),
+      grid_voltage_v: P("grid_voltage_v"),
+      steering_current_a: P("steering_current_a"),
+      collimating_current_a: P("collimating_current_a"),
       // How far the bias brackets the beam. Scheduled inside pump A / pump B, so
       // these never lengthen a cycle - see RecipeRunner._schedule_bias.
       sample_bias_lead_s: P("sample_bias_lead_s") || 0,

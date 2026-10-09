@@ -228,12 +228,24 @@ class Keithley2260B(Device):
     # -- lifecycle ---------------------------------------------------------- #
 
     async def connect(self) -> None:
-        await asyncio.to_thread(self._open)
+        async with self._lock:
+            try:
+                await asyncio.to_thread(self._open)
+            except Exception:
+                # A failed IDN/read after Serial() succeeds otherwise leaves a
+                # live Windows COM handle behind on every reconnect attempt.
+                await asyncio.to_thread(self._close)
+                self.connected = False
+                raise
         self.connected = True
         self.last_error = ""
 
     def _open(self) -> None:
         import serial
+
+        # Always release the previous handle before rediscovering a port. A
+        # USB reconnect can assign a different COM number to the same serial.
+        self._close()
 
         port = self.cfg.port.strip() or find_port(self.cfg.usb_serial)
         if not port:
@@ -282,7 +294,8 @@ class Keithley2260B(Device):
         collimating coil out from under a running plasma. And there is no
         remote/local handoff to do: see the module docstring.
         """
-        await asyncio.to_thread(self._close)
+        async with self._lock:
+            await asyncio.to_thread(self._close)
         self.connected = False
 
     def _close(self) -> None:
@@ -346,6 +359,7 @@ class Keithley2260B(Device):
         fields = raw.split(";")
         if len(fields) < 3:
             detail = f"unparseable poll reply {raw!r}"
+            self._drop()
             return [self._bad(vkey, "V", detail), self._bad(ikey, "A", detail)]
         try:
             volts = float(fields[0])
@@ -357,6 +371,7 @@ class Keithley2260B(Device):
                 self.current_setpoint = float(fields[5])
         except ValueError as exc:
             detail = f"unparseable poll reply {raw!r}: {exc}"
+            self._drop()
             return [self._bad(vkey, "V", detail), self._bad(ikey, "A", detail)]
 
         # Signed by the lead orientation, so the log records the bias as it is

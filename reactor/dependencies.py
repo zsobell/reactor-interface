@@ -10,6 +10,7 @@ from typing import Callable, Any
 from .devices.nidaq import NiDaqBackend
 from .devices.mks_mfc import MfcRegisters, MksMfc
 from .devices.instrument import ScpiInstrument
+from .devices.mks_937b import Mks937B
 from .devices.glassman_fl import GlassmanFL
 from .devices.keithley_2260b import Keithley2260B
 from .devices.ellipsometer import EllipsometerClient
@@ -56,6 +57,10 @@ def make_supply(cfg):
     return GlassmanFL(cfg) if cfg.driver == "glassman_fl" else Keithley2260B(cfg)
 
 
+def make_instrument(cfg):
+    return Mks937B(cfg) if cfg.driver == "mks_937b" else ScpiInstrument(cfg)
+
+
 def make_ellipsometer(cfg, *, on_point, on_state):
     if not cfg.enabled or not cfg.host:
         return None
@@ -66,6 +71,6 @@ def make_ellipsometer(cfg, *, on_point, on_state):
 class DeviceFactory:
     daq: Callable[..., Any] = NiDaqBackend
     mfc: Callable[..., Any] = make_mfc
-    instrument: Callable[..., Any] = ScpiInstrument
+    instrument: Callable[..., Any] = make_instrument
     supply: Callable[..., Any] = make_supply
     ellipsometer: Callable[..., Any] = make_ellipsometer

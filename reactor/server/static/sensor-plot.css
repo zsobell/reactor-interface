@@ -1,0 +1,21 @@
+main{max-width:1100px;margin:0 auto;width:100%}
+header h1{font-size:15px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.spacer{flex:1}
+.plot{width:100%}
+.phead strong{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#hoverReadout{font:12px var(--mono);color:var(--fg);white-space:nowrap}
+.canvasbox{height:min(62vh,470px);min-height:300px}
+.settings{gap:10px}
+.ranges,.bounds{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.ranges span,.bounds label{font-size:12px;color:var(--dim)}
+.ranges button{font-size:12px;padding:4px 10px}
+.ranges button.active{border-color:var(--accent);background:#17304b;color:#9dcbff}
+#pointCount{margin-left:auto;font:11px var(--mono)}
+.bounds input:not([type="checkbox"]){width:min(185px,41vw);font:12px var(--mono)}
+.bounds .log{display:flex;align-items:center;gap:4px;color:var(--fg)}
+.bounds .log input{width:auto}
+@media(max-width:600px){
+  .phead{flex-wrap:wrap}
+  #hoverReadout{width:100%;white-space:normal}
+  .canvasbox{height:52vh;min-height:260px}
+}

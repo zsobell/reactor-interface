@@ -73,7 +73,7 @@ async def main() -> int:
             "plan_id": "current-hcpes-plan", "expected_revision": 1,
             "session_id": "must-not-run", "polarity_confirmed": True,
         })
-        c.check("protected zero template cannot launch",
+        c.check("protected template cannot launch",
                 status == 409 and "duplicate" in refused["detail"])
 
         c.section("revisioned create, save, preview, and stale containment")
@@ -98,7 +98,7 @@ async def main() -> int:
                 status == 200
                 and preview["plan"]["revision"] == saved["revision"]
                 and preview["estimate"]["points"] == 1
-                and preview["nesting"][:2] == ["mfc:ar", "supply:stage_bias"]
+                and preview["nesting"][:3] == ["mfc:ar", "supply:hv", "supply:stage_bias"]
                 and all(preview["cleanup"].values()))
         status, stale_start = await asgi_call(app, "POST", "/api/hcpes/start", {
             "plan_id": saved["id"], "expected_revision": 1,
@@ -145,6 +145,7 @@ async def main() -> int:
                 and not plans_path.with_name(plans_path.name + ".tmp").exists())
 
         c.section("completed positive run creates exact negative follow-up")
+        vr.supplies["hv"].hv_on = True  # operator enables HV at front panel
         vr.instruments["ammeter"].value = 0.001
         ticker = await autotick(vr, period=0.005)
         try:
@@ -171,6 +172,8 @@ async def main() -> int:
                     and negative["revision"] == 1
                     and campaign["status"] == "awaiting_opposite"
                     and campaign["sessions"][0]["session_id"] == "positive-api")
+
+            vr.supplies["hv"].hv_on = True  # front-panel restart after cleanup
 
             status, negative_started = await asgi_call(
                 app, "POST", "/api/hcpes/start", {

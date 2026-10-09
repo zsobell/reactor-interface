@@ -19,6 +19,9 @@ class Step(BaseModel):
     state: bool | None = None
     # timing
     seconds: float | None = Field(default=None, ge=0)
+    # Repeated precursor doses; the valve remains closed during each gap.
+    dose_pulses: int = Field(default=1, ge=1)
+    dose_pulse_gap_s: float = Field(default=0.0, ge=0)
     #: `wait` only: count down while the plasma is lit, freezing during a
     #: reignite. Used for EE-CVD's pump A so it stays locked to the gas clock.
     #: Never set this on a `dose` - a frozen precursor pulse holds its valve
@@ -84,6 +87,12 @@ class Step(BaseModel):
     bias_lead_s: float = Field(default=0.0, ge=0)
     bias_trail_s: float = Field(default=0.0, ge=0)
 
+    def duration_s(self) -> float:
+        if self.op == "dose":
+            return ((self.seconds or 0.0) * self.dose_pulses
+                    + self.dose_pulse_gap_s * (self.dose_pulses - 1))
+        return self.seconds or 0.0
+
     def _bias_note(self) -> str:
         """The sample-bias bracket, for `describe()`. Empty when unset - a step
         that does not touch the bias must not claim to."""
@@ -102,6 +111,9 @@ class Step(BaseModel):
         parameters report, the UI's step readout and the `recipe_step` column,
         so an MFC is named by the GAS it is flowing, not by its channel id."""
         if self.op == "dose":
+            if self.dose_pulses > 1:
+                return (f"dose {self.valve} {self.dose_pulses} times for "
+                        f"{self.seconds:g} s, {self.dose_pulse_gap_s:g} s between pulses")
             return f"dose {self.valve} for {self.seconds:g} s"
         if self.op == "wait":
             return f"wait {self.seconds:g} s"
@@ -195,7 +207,7 @@ class Recipe(BaseModel):
         return Recipe.model_validate(data)
 
     def cycle_seconds(self) -> float:
-        return sum(s.seconds or 0.0 for s in self.steps)
+        return sum(s.duration_s() for s in self.steps)
 
 
 #: Poll period for the beam's current check and the EE-CVD reignite watchdog.
@@ -269,7 +281,8 @@ def build_ald_recipe(p: dict | RunParameters) -> Recipe:
             *[Step(op="set_flow", mfc=gs.mfc, sccm=0.0) for gs in gas_schedules],
         ],
         steps=[
-            Step(op="dose", valve=dose_valve, seconds=p.dose_s),
+            Step(op="dose", valve=dose_valve, seconds=p.dose_s,
+                 dose_pulses=p.dose_pulses, dose_pulse_gap_s=p.dose_pulse_gap_s),
             Step(op="wait", seconds=p.pump_a_s),
             Step(op="electron_beam", switch=plasma, ammeter=ammeter,
                  min_current=p.beam.min_current,
@@ -360,7 +373,8 @@ def build_cvd_recipe(p: dict | RunParameters) -> Recipe:
         ],
         steps=[
             # Dose on wall clock - never gated (see the docstring).
-            Step(op="dose", valve=dose_valve, seconds=p.dose_s),
+            Step(op="dose", valve=dose_valve, seconds=p.dose_s,
+                 dose_pulses=p.dose_pulses, dose_pulse_gap_s=p.dose_pulse_gap_s),
             # Pump A freezes with the plasma, in lockstep with the gas clock.
             Step(op="wait", seconds=p.pump_a_s, lit_gated=True),
         ],

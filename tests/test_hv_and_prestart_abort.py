@@ -146,6 +146,7 @@ async def main() -> int:
     # ------------------------------------------------------------------ 4
     c.section("4. abort_prestart also works mid-strike (plasma never lights)")
     async with VirtualReactor() as vr:
+        vr.supplies["hv"].hv_on = True
         vr.instruments["ammeter"].value = 0.0           # never strikes
         tick = await autotick(vr, period=0.02)
         try:
@@ -174,6 +175,7 @@ async def main() -> int:
     # left the tool primed.
     async with VirtualReactor() as vr:
         c.section("server shutdown aborts a RUNNING pre-start")
+        vr.supplies["hv"].hv_on = True
         vr.instruments["ammeter"].value = 0.0        # never strikes, so it stays running
         tick = await autotick(vr, period=0.05)
         try:
@@ -209,6 +211,7 @@ async def main() -> int:
 
     async with VirtualReactor() as vr:
         c.section("server shutdown aborts a COMPLETED (primed) pre-start")
+        vr.supplies["hv"].hv_on = True
         vr.instruments["ammeter"].value = 1.0e-3     # strikes immediately
         tick = await autotick(vr, period=0.05)
         try:

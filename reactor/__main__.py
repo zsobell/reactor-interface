@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     def _supply_line(p) -> str:
         if p.driver == "glassman_fl":
             return (f"{p.id}@{p.port} {p.baud}/8N1 addr {p.address} "
-                    f"(monitor + HV off)")
+                    f"(monitor + guarded current limit + HV off)")
         # Port is resolved from the USB serial at connect, so there is nothing
         # useful to print for it here - the serial is the identity.
         if p.sample_bias:

@@ -76,6 +76,10 @@
   .kv>span:last-child{font-family:var(--mono);min-width:0;overflow:hidden;
                       text-overflow:ellipsis;white-space:nowrap}
   .stale{color:var(--bad)!important}
+  [data-pane="hardware"] [data-plot-key]{cursor:pointer;border-bottom:1px dotted var(--accent)}
+  [data-pane="hardware"] [data-plot-key]:hover{color:var(--accent)}
+  [data-pane="hardware"] [data-plot-key]:focus-visible{
+    outline:2px solid var(--accent);outline-offset:3px;border-radius:2px}
 
   /* ---- hero numeric readouts (Run tab) --------------------------------- */
   .readouts{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:12px}

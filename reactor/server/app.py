@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .data import DataFiles, create_data_router, merged_name
 from .hcpes_analysis import HcpesAnalysisFiles, create_hcpes_analysis_router
+from .sensor_plot import compact_sensor_history, sensor_plot_specs
 from .. import __version__, instances
 from ..config import ReactorConfig, load_config
 from ..control.recipe import Recipe, build_ald_recipe, build_cvd_recipe
@@ -292,6 +293,18 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     @app.get("/api/trend")
     async def get_trend(limit: int = 1800) -> dict[str, Any]:
         return {"samples": sup.trend(limit)}
+
+    @app.get("/api/sensor-trend")
+    async def get_sensor_trend(key: str) -> dict[str, Any]:
+        """One approved pressure/temperature series from bounded live history."""
+        spec = sensor_plot_specs(cfg).get(key)
+        if spec is None:
+            raise HTTPException(status_code=404, detail="unknown plottable sensor")
+        return {
+            "key": spec.key, "label": spec.label, "unit": spec.unit,
+            "pressure": spec.pressure,
+            "samples": compact_sensor_history(sup.trend(18000), spec.column),
+        }
 
     @app.get("/api/config")
     async def get_config() -> dict[str, Any]:
@@ -627,11 +640,9 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
 
     # -- power supplies -------------------------------------------------- #
     #
-    # Operator-requested 2026-08-25: voltage/current fields and an output
-    # toggle per supply on the Hardware tab. These are the ONLY paths from the
-    # browser to a supply output, and they exist for the Keithley 2260B DC
-    # supplies. The Glassman has no route here at all - it has no set path in
-    # its driver beyond hv_off, by design (docs/CONTROL_MODEL.md).
+    # Keithley controls use A and V; the separate Glassman current route uses
+    # mA so an API caller cannot confuse these instruments' units. No route
+    # here can assert Glassman HV On or set an arbitrary Glassman voltage.
 
     @app.post("/api/supply/{supply_id}/voltage")
     async def set_supply_voltage(
@@ -643,7 +654,18 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     async def set_supply_current(
         supply_id: str, amps: float = Body(..., embed=True)
     ) -> dict[str, Any]:
+        if getattr(getattr(sup.supplies.get(supply_id), "cfg", None), "driver", None) == "glassman_fl":
+            raise HTTPException(status_code=400, detail="use /api/hv/{id}/current with milliamps")
         return await sup.set_supply_current(supply_id, amps)
+
+    @app.post("/api/hv/{supply_id}/current")
+    async def set_hv_current(
+        supply_id: str, milliamps: float = Body(..., embed=True)
+    ) -> dict[str, Any]:
+        dev = sup.supplies.get(supply_id)
+        if getattr(getattr(dev, "cfg", None), "driver", None) != "glassman_fl":
+            raise HTTPException(status_code=404, detail="no such HV supply")
+        return await sup.set_supply_current(supply_id, milliamps)
 
     @app.post("/api/supply/{supply_id}/output")
     async def set_supply_output(

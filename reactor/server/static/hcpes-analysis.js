@@ -452,9 +452,13 @@ function drawHeat(g,width,height,points){
   ys.forEach((value,i)=>{g.textAlign="right";g.fillText(fmt(value),left-7,bottom-(i+.5)*ch+3);});
   g.textAlign="center";g.fillText(label(xKey),left+(right-left)/2,height-13);
   g.save();g.translate(14,top+(bottom-top)/2);g.rotate(-Math.PI/2);g.fillText(label(yKey),0,0);g.restore();
-  const grad=g.createLinearGradient(0,bottom,0,top);grad.addColorStop(0,heatColour(0));grad.addColorStop(1,heatColour(1));
+  const grad=g.createLinearGradient(0,bottom,0,top);
+  for(let i=0;i<=8;i++) grad.addColorStop(i/8,heatColour(i/8));
   g.fillStyle=grad;g.fillRect(right+18,top,14,bottom-top);
-  g.textAlign="left";g.fillText(fmt(hi),right+36,top+5);g.fillText(fmt(lo),right+36,bottom);
+  g.textAlign="left";
+  g.fillText(fmt(hi),right+36,top+5);
+  g.fillText(fmt((lo+hi)/2),right+36,top+(bottom-top)/2+3);
+  g.fillText(fmt(lo),right+36,bottom);
   legend([
     {name:`${label(metric)} low ${fmt(lo)}`,colour:heatColour(0)},
     {name:`mid ${fmt((lo+hi)/2)}`,colour:heatColour(.5)},

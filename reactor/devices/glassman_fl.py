@@ -5,28 +5,25 @@ connected by USB to the rear-panel J3 socket.
 
 WHAT THIS DRIVER DOES TO THE SUPPLY
 ===================================
-**It reads, and it turns HV off. That is the whole list.**
+It reads, turns HV off during cleanup, and sets current limit only after a
+fresh query proves front-panel HV is already on. It never turns HV on remotely.
 
 `connect()` sends `V` (software-version request) and `read()` sends `Q`
 (request monitors). Both are read commands: the FL manual is explicit that a
 Query works "while still in LOCAL control mode ... at any time", and neither
 command can change a setpoint or enable high voltage.
 
-`hv_off()` is the one write, added 2026-08-21 at Zach's request so a run that
-ends - completed, aborted, or crashed - cannot leave HV energised. It asserts
-the HV Off control bit and echoes the supply's own last-read levels back with
-the frame, because the FL's Set packet always carries a voltage and a current
-program and sending zeros would wipe what Zach dialled in at the front panel.
+`hv_off()` was added 2026-08-21 so a run that ends cannot leave HV energised.
+It asserts the HV Off control bit. The FL Set packet always carries voltage
+and current programs; every remote Set now uses Zach's 800 V voltage limit,
+with the last commanded current or 200 mA default on cleanup.
 Note that ANY Set command moves the supply into REMOTE until LOC/REM is
 pressed. It is called by `Supervisor.hv_off`, from run teardown and the
 pre-start abort - nowhere else, and never on `disconnect()`.
 
-The rest of the set-command support (`set_levels`, `set_hv`, `reset`) is
-implemented below because Zach asked for the full protocol to be in place for
-later. **Nothing calls it.** There is still no way to set a level or turn HV
-*on* from the supervisor, the HTTP API or the UI. Zach operates this supply by
-hand from its front panel; adding setpoint control is a separate, explicitly-
-requested change (see docs/CONTROL_MODEL.md).
+The other protocol commands (`set_levels`, `set_hv`, `reset`) remain inaccessible
+from the supervisor, API and UI. Current control uses a dedicated guarded
+method and cannot assert the HV On bit.
 
 Two consequences of that, both deliberate:
 
@@ -37,10 +34,8 @@ Two consequences of that, both deliberate:
   would be an unrequested automatic action that could switch off a supply Zach
   had set by hand at the front panel - stopping the server would silently kill
   his plasma. Closing the port is all that happens here.
-* There is no watchdog, no clamp and no limit. An earlier plan capped the
-  voltage setpoint at 1000 V; Zach withdrew that once this became read-only,
-  since with no way to set a voltage there is nothing to clamp. **If remote
-  control is ever added, revisit that decision before wiring up `set_levels`.**
+* Remote Set commands use an 800 V limit, including cleanup. No arbitrary
+  voltage entry is exposed.
 
 PROTOCOL
 ========
@@ -89,6 +84,7 @@ broken; `tools/probe_glassman.py` does exactly that.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 
 from ..config import PowerSupplyCfg
@@ -99,6 +95,8 @@ CR = 0x0D
 
 #: Full scale for every 12-bit analog field, per manual Figures 31 and 33.
 FULL_SCALE_COUNTS = 0xFFF
+PLASMA_VOLTAGE_LIMIT_V = 800.0
+PLASMA_DEFAULT_CURRENT_MA = 200.0
 
 #: Manual Figure 37. Returned in a 5-byte 'E' packet.
 ERROR_CODES = {
@@ -289,6 +287,7 @@ class GlassmanFL(Device):
         self._ser = None
         self.firmware = ""
         self.last_reply: GlassmanReply | None = None
+        self.current_setpoint: float | None = None
         # One serial exchange at a time. Only the poll loop uses the port today,
         # but reset_input_buffer() in one exchange would eat another's reply.
         self._lock = asyncio.Lock()
@@ -303,6 +302,10 @@ class GlassmanFL(Device):
     async def connect(self) -> None:
         """Open the port and read the firmware revision. Writes no settings."""
         await asyncio.to_thread(self._open)
+        # Query exposes measured current, never the programmed limit. A new
+        # session cannot claim a prior acknowledged command is still active.
+        self.current_setpoint = None
+        self.last_reply = None
         self.connected = True
         self.last_error = ""
 
@@ -339,6 +342,8 @@ class GlassmanFL(Device):
         """
         await asyncio.to_thread(self._close)
         self.connected = False
+        self.current_setpoint = None
+        self.last_reply = None
 
     def _close(self) -> None:
         if self._ser is not None:
@@ -352,6 +357,8 @@ class GlassmanFL(Device):
         """Discard a dead session so the reconnect loop opens a clean one."""
         self._close()
         self.connected = False
+        self.current_setpoint = None
+        self.last_reply = None
 
     # -- io ----------------------------------------------------------------- #
 
@@ -426,15 +433,8 @@ class GlassmanFL(Device):
 
     # -- control ------------------------------------------------------------ #
     #
-    # ONE of these is wired up: `hv_off`, called by the supervisor when a run
-    # ends or is aborted (operator request, 2026-08-21). Everything else below
-    # is still implemented-but-unused, per Zach's instruction to "add everything
-    # now anyway" while keeping voltage/current control off the UI.
-    #
-    # Before exposing any of the rest, read docs/CONTROL_MODEL.md: adding a
-    # remote *energising* path to a 1.5 kV supply is a change to reactor
-    # behaviour and needs Zach's explicit go-ahead, not a code review. The
-    # withdrawn 1000 V cap should be reconsidered at the same time.
+    # The supervisor exposes only guarded current control and HV off. Raw
+    # level/HV-on/reset protocol helpers below remain unreachable from the UI.
 
     def _set_body(self, voltage: float, current: float, *,
                   hv_on: bool | None = None, reset: bool = False,
@@ -452,8 +452,7 @@ class GlassmanFL(Device):
         you change setpoints while leaving the output state alone.
         """
         if counts is not None:
-            # Raw 12-bit programs, used by hv_off to echo the supply's own last
-            # reading back at it without a units round-trip.
+            # Raw 12-bit programs for protocol-level callers.
             v_counts, i_counts = counts
         else:
             v_counts = units_to_counts(voltage, self.cfg.full_scale_v)
@@ -491,24 +490,45 @@ class GlassmanFL(Device):
         """Set the voltage and current programs, leaving HV state alone. NOT CALLED."""
         await self._send_set(voltage, current, hv_on=None)
 
+    async def set_current(self, current: float) -> None:
+        """Change only the plasma current limit after fresh proof HV is on.
+
+        The FL Set packet requires both programs. The operator's approved
+        voltage limit is always 800 V; a measured voltage is not a program
+        readback and could be far lower in constant-current operation.
+        """
+        current = float(current)
+        if not math.isfinite(current) or not 0 <= current <= self.cfg.full_scale_i:
+            raise ValueError(f"current must be 0..{self.cfg.full_scale_i:g} {self.cfg.unit_i}")
+        if not self.connected:
+            raise RuntimeError(f"{self.id} is not connected")
+        async with self._lock:
+            reply = parse_query_response(await asyncio.to_thread(self._exchange, b"Q"))
+            self.last_reply = reply
+            if not reply.hv_on:
+                raise RuntimeError("Glassman HV must be on at the front panel before setting current")
+            body = self._set_body(PLASMA_VOLTAGE_LIMIT_V, current)
+            raw = await asyncio.to_thread(self._exchange, body)
+            if raw[0:1] == b"E":
+                parse_query_response(raw)
+            if raw != b"A\r":
+                raise GlassmanProtocolError(f"expected 'A' acknowledge, got {raw!r}")
+            self.current_setpoint = current
+            reply.remote = True
+
     async def set_hv(self, on: bool, voltage: float, current: float) -> None:
         """Assert HV On or HV Off alongside the setpoints. NOT CALLED."""
         await self._send_set(voltage, current, hv_on=on)
 
     async def hv_off(self) -> None:
-        """Turn the output off, leaving the voltage and current programs alone.
+        """Turn HV off with the approved 800 V limit and last current program.
 
-        THE ONE COMMAND THIS PROGRAM SENDS. Called when a run ends or is
-        aborted (operator request, 2026-08-21) so a finished run cannot leave
-        HV energised.
+        Called when a run ends or is aborted so it cannot leave HV energised.
 
         Two protocol facts shape this:
 
-        * The Set frame ALWAYS carries a V and an I program - there is no
-          "HV off only" packet. Sending zeros would wipe the levels Zach
-          dialled in on the front panel, so instead the supply's own last
-          reading goes back out with the frame: the programs it lands on are
-          the ones it was already delivering, not 0/0.
+        * The Set frame ALWAYS carries a V and an I program. This command
+          carries 800 V plus the last current command or 200 mA default.
         * Any Set command puts the supply in REMOTE. The front-panel LOC/REM
           button switches it back (it only ever switches *to* local, which is
           why it looks dead while already local - see docs/GLASSMAN_FL.md).
@@ -518,9 +538,13 @@ class GlassmanFL(Device):
         """
         if not self.connected:
             return
-        r = self.last_reply
-        counts = (r.voltage_counts, r.current_counts) if r else None
-        await self._send_set(0.0, 0.0, hv_on=False, counts=counts)
+        current = (self.current_setpoint if self.current_setpoint is not None
+                   else PLASMA_DEFAULT_CURRENT_MA)
+        await self._send_set(PLASMA_VOLTAGE_LIMIT_V, current, hv_on=False)
+        self.current_setpoint = current
+        if self.last_reply is not None:
+            self.last_reply.hv_on = False
+            self.last_reply.remote = True
 
     async def reset(self) -> None:
         """Power-supply reset: zeroes V, I and the arc count, HV off. NOT CALLED."""
@@ -542,10 +566,12 @@ class GlassmanFL(Device):
             "full_scale_i": self.cfg.full_scale_i,
             "unit_v": self.cfg.unit_v,
             "unit_i": self.cfg.unit_i,
-            # "No setpoint controls" - the UI reads this to decide not to draw
-            # any. Still true after hv_off was wired up: that is a teardown
-            # action, not something the operator drives from this card.
-            "read_only": True,
+            # UI renders only a current-limit control while HV is on.
+            "read_only": False,
+            "current_control_only": True,
+            "voltage_limit": PLASMA_VOLTAGE_LIMIT_V,
+            "current_setpoint": self.current_setpoint,
+            "mode": ("CV" if r.voltage_mode else "CC") if r and r.hv_on else None,
             "voltage": (counts_to_units(r.voltage_counts, self.cfg.full_scale_v)
                         if r else None),
             "current": (counts_to_units(r.current_counts, self.cfg.full_scale_i)

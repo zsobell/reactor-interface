@@ -272,10 +272,10 @@ class AxisCapability(BaseModel):
     label: str
     role: Literal[
         "ar_flow", "background_flow", "stage_bias", "grid_bias",
-        "collimating_current", "steering_current",
+        "collimating_current", "steering_current", "hv_current",
     ]
     quantity: Literal["flow", "voltage", "current"]
-    unit: Literal["sccm", "V", "A"]
+    unit: Literal["sccm", "V", "A", "mA"]
     read_key: str
     locked_zero_allowed: bool = False
 
@@ -293,6 +293,13 @@ def axis_capabilities(cfg: ReactorConfig) -> tuple[AxisCapability, ...]:
             target=AR_TARGET, label=ar.label or "Ar", role="ar_flow",
             quantity="flow", unit="sccm", read_key="mfc.ar.flow",
         ))
+    for supply in cfg.power_supplies:
+        if supply.enabled and supply.driver == "glassman_fl":
+            result.append(AxisCapability(
+                target=f"supply:{supply.id}", label=f"{supply.label or supply.id} current limit",
+                role="hv_current", quantity="current", unit=supply.unit_i,
+                read_key=f"hv.{supply.id}.current",
+            ))
     for supply_id, role, quantity in (
         ("stage_bias", "stage_bias", "voltage"),
         ("collimating", "collimating_current", "current"),
@@ -328,16 +335,17 @@ def capability_catalog(cfg: ReactorConfig) -> dict:
 def current_hcpes_plan(cfg: ReactorConfig) -> HcpesPlan:
     """Code-owned safe template used to seed the visual plan library.
 
-    Required controls start as explicit fixed zeroes and every background MFC
-    starts locked at zero.  The protected template therefore supplies the
-    complete configured shape without inventing operating setpoints; an
-    operator duplicates and edits it before launch.
+    Required controls start as explicit fixed zeroes, except plasma current,
+    which uses the reviewed 200 mA recipe default. Every background MFC starts
+    locked at zero. An operator duplicates and edits the protected template
+    before launch.
     """
     axes = [
         SweepAxis(
             target=capability.target,
             mode="locked_zero" if capability.locked_zero_allowed else "fixed",
-            **({} if capability.locked_zero_allowed else {"value": 0.0}),
+            **({} if capability.locked_zero_allowed else {
+                "value": 200.0 if capability.role == "hv_current" else 0.0}),
         )
         for capability in axis_capabilities(cfg)
     ]
@@ -515,7 +523,10 @@ def resolve_plan(plan: HcpesPlan, cfg: ReactorConfig) -> ResolvedHcpesPlan:
     configured = set(by_target)
     supplied = {axis.target for axis in snapshot.axes}
     unknown = supplied - configured
-    missing = configured - supplied
+    # Older saved plans have no HV-current axis. Retain their original command
+    # sequence; only a reviewed plan that names this axis may change it.
+    optional = {cap.target for cap in capabilities if cap.role == "hv_current"}
+    missing = configured - supplied - optional
     if unknown:
         raise ValueError(f"unknown HCPES axis target(s): {sorted(unknown)}")
     if missing:
@@ -528,6 +539,15 @@ def resolve_plan(plan: HcpesPlan, cfg: ReactorConfig) -> ResolvedHcpesPlan:
         capability = by_target[axis.target]
         if axis.locked and not capability.locked_zero_allowed:
             raise ValueError(f"{axis.target} cannot be locked at zero")
+        if capability.role == "hv_current":
+            ps = next(ps for ps in cfg.power_supplies
+                      if f"supply:{ps.id}" == axis.target)
+            highest = max(axis.iter_values()) if axis.mode == "list" else max(
+                axis.value_at(0), axis.value_at(axis.count - 1))
+            highest = max(highest, snapshot.initial_setpoints[axis.target])
+            if highest > ps.full_scale_i:
+                raise ValueError(
+                    f"{axis.target} exceeds {ps.full_scale_i:g} {ps.unit_i} rating")
     return ResolvedHcpesPlan(snapshot, capabilities)
 
 

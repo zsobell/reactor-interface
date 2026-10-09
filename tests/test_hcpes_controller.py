@@ -638,6 +638,41 @@ async def main() -> int:
             vr.sup.start_hcpes(
                 resolved, "unconfirmed", polarity_confirmed=False),
             "confirm the physical stage leads") and not vr.daq.do_writes)
+
+    c.section("reviewed HV current axis uses guarded current-only control")
+    async with VirtualReactor() as vr:
+        vr.supplies["hv"].hv_on = True
+        vr.instruments["ammeter"].value = 0.001
+        payload = plan(vr.sup.cfg, qualified=1, settle=0.0,
+                       stability_window=0.01, stability_wait=0.05).model_dump(mode="json")
+        payload["axes"].append({"target": "supply:hv", "mode": "list",
+                                "values": [200.0, 250.0]})
+        payload["initial_setpoints"]["supply:hv"] = 200.0
+        reviewed = resolve_plan(HcpesPlan.model_validate(payload), vr.sup.cfg)
+        ticker = await autotick(vr, period=0.005)
+        try:
+            await vr.sup.start_hcpes(reviewed, "hv-current-axis", polarity_confirmed=True)
+            c.check("manual HV current blocked while HCPES owns it", await rejects(
+                vr.sup.set_supply_current("hv", 300), "HCPES characterization owns"))
+            c.check("both HV current conditions complete", await wait_for(
+                lambda: not vr.sup.hcpes_running, timeout=3))
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+        c.check("HCPES programs HV current without an HV-on command",
+                vr.supplies["hv"].current_calls == [200.0, 250.0]
+                and vr.supplies["hv"].hv_off_calls == 1,
+                str(vr.supplies["hv"].current_calls))
+    async with VirtualReactor() as vr:
+        payload = plan(vr.sup.cfg).model_dump(mode="json")
+        payload["axes"].append({"target": "supply:hv", "mode": "fixed", "value": 200.0})
+        payload["initial_setpoints"]["supply:hv"] = 200.0
+        reviewed = resolve_plan(HcpesPlan.model_validate(payload), vr.sup.cfg)
+        await vr.sup.start_hcpes(reviewed, "hv-still-off", polarity_confirmed=True)
+        c.check("HCPES refuses HV current while front-panel HV is off",
+                await wait_for(lambda: not vr.sup.hcpes_running, timeout=2)
+                and vr.sup.hcpes["phase"] == "failed"
+                and vr.supplies["hv"].current_calls == [])
     return c.summary()
 
 

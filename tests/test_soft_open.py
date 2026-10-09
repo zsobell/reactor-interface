@@ -143,6 +143,7 @@ async def main() -> int:
 
         # ---------------------------------------------------------------- #
         c.section("7. pre-start opens it the same way")
+        vr.supplies["hv"].hv_on = True
         vr.sup.set_soft_open_params(FAST)
         vr.daq.do_writes.clear()
         vr.instruments["ammeter"].value = 1.0e-3

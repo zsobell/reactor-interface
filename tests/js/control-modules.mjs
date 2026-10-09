@@ -123,8 +123,9 @@ function fakeElement(value = '') {
 {
   const ids = ['modeSel','runTitle','gasWindowWord','smoothHint','reigniteHint','gasSchedHint',
     'aldParams','gasSchedSection','advSection','preSection','smoothSection',
-    'p_smooth_on','p_smooth_n','p_cycles','p_dose_pressure_torr','p_dose_s','p_pump_a_s',
+    'p_smooth_on','p_smooth_n','p_cycles','p_dose_pressure_torr','p_dose_s','p_dose_pulses','p_dose_pulse_gap_s','p_pump_a_s',
     'p_beam_s','p_pump_b_s','p_min_current_ua','p_sample_bias_v','p_sample_bias_polarity',
+    'p_plasma_current_ma','p_grid_voltage_v','p_steering_current_a','p_collimating_current_a',
     'p_fill_pulse_on_s','p_fill_pulse_off_s','p_tolerance_pct','p_reignite_pulse_s',
     'p_reignite_settle_s','p_ar_close_delay_s','p_pre_ar_sccm','p_pre_valve_delay_s',
     'p_pre_hold_s','p_gas_overlap_s','p_mfc1_gas_enable','p_mfc1_gas_order','p_mfc1_gas_pct',
@@ -158,9 +159,13 @@ function fakeElement(value = '') {
   assert.equal(stored.get('runMode'), 'cvd');
   assert.equal(elements.get('runTitle').textContent, 'EE-CVD run');
   assert.equal(modeAld.hidden, true); assert.equal(modeCvd.hidden, false);
+  elements.get('p_dose_pulses').value = '3';
+  elements.get('p_dose_pulse_gap_s').value = '0.4';
   forms.saveParams(); await pendingSave();
   assert.equal(posts[0][0], '/api/run_params');
   assert.equal(posts[0][1].cycles, '12', 'saved payload contains the effective parameter values');
+  assert.equal(posts[0][1].dose_pulses, '3', 'pulse count is saved with run parameters');
+  assert.equal(posts[0][1].dose_pulse_gap_s, '0.4', 'pulse gap is saved with run parameters');
   forms.dispose();
   assert.equal(elements.get('aldParams').events.input.size, 0, 'dispose removes parameter handlers');
 }
@@ -170,8 +175,9 @@ function fakeElement(value = '') {
   const ids = ['modeSel','runTitle','gasWindowWord','smoothHint','reigniteHint','gasSchedHint',
     'aldParams','gasSchedSection','advSection','preSection','smoothSection','liveEditStatus',
     'liveEditRefresh','liveEditReapply','p_smooth_on','p_smooth_n','p_cycles',
-    'p_dose_pressure_torr','p_dose_s','p_pump_a_s','p_beam_s','p_pump_b_s',
+    'p_dose_pressure_torr','p_dose_s','p_dose_pulses','p_dose_pulse_gap_s','p_pump_a_s','p_beam_s','p_pump_b_s',
     'p_min_current_ua','p_sample_bias_v','p_sample_bias_polarity','p_sample_bias_lead_s',
+    'p_plasma_current_ma','p_grid_voltage_v','p_steering_current_a','p_collimating_current_a',
     'p_sample_bias_trail_s','p_ar_soft_open_pulses','p_ar_soft_open_on_s',
     'p_ar_soft_open_gap_s','p_fill_pulse_on_s','p_fill_pulse_off_s','p_tolerance_pct',
     'p_reignite_pulse_s','p_reignite_settle_s','p_ar_close_delay_s','p_pre_ar_sccm',
@@ -219,7 +225,8 @@ function fakeElement(value = '') {
     querySelector: selector => selectors.get(selector) || null,
   };
   const selectors = new Map([['#mfc_ar', fakeElement('4.5')],
-    ['#psuv_bias', fakeElement('120')], ['#psui_bias', fakeElement('0.2')]]);
+    ['#psuv_bias', fakeElement('120')], ['#psui_bias', fakeElement('0.2')],
+    ['#hvi_hv', fakeElement('200')]]);
   const calls = [], toasts = [];
   let supplyOutputOn = false;
   const panels = createDevicePanels({$:() => fakeElement(), document,
@@ -238,13 +245,15 @@ function fakeElement(value = '') {
   await click({target:target({dataset:{act:'valve',id:'dose',state:'1'}})});
   await click({target:target({dataset:{act:'mfc',id:'ar'}})});
   await click({target:target({dataset:{act:'psuset',id:'bias'}})});
+  await click({target:target({dataset:{act:'hvset',id:'hv'}})});
   assert.deepEqual(calls, [
     ['/api/valve/dose', {state:true}],
     ['/api/mfc/ar/setpoint', {sccm:4.5}],
     ['/api/supply/bias/voltage', {volts:120}],
     ['/api/supply/bias/current', {amps:0.2}],
+    ['/api/hv/hv/current', {milliamps:200}],
   ]);
-  assert.match(toasts.at(-1)[0], /setpoint set to 120 V · 0.2 A; output remains off/,
+  assert.match(toasts.at(-2)[0], /setpoint set to 120 V · 0.2 A; output remains off/,
     'inactive supply confirmation describes a stored setpoint');
   supplyOutputOn = true;
   await click({target:target({dataset:{act:'psuset',id:'bias'}})});
@@ -253,6 +262,40 @@ function fakeElement(value = '') {
   panels.dispose();
   assert.equal(handlers.click.size, 0, 'dispose removes delegated click handlers');
   assert.equal(handlers.keydown.size, 0, 'dispose removes keyboard handler');
+}
+
+// Glassman uses the same CV/CC light as the Keithleys and gates its current input.
+{
+  const fields = new Map(['mode','v','i','model','err','arcs','chipHv','chipMode',
+    'chipRem','chipTrip','link','faults','sp','hvin'].map(name => [name, fakeElement()]));
+  const setButton = fakeElement();
+  const tile = {querySelector(selector){
+    const field = /data-f="([^"]+)"/.exec(selector)?.[1];
+    return field ? fields.get(field) : selector === '[data-act="hvset"]' ? setButton : null;
+  }};
+  const panels = createDevicePanels({$:() => ({querySelector:()=>tile}),
+    document:{}, cssEscape:String, esc:String, num:String, sci:String,
+    put:(root,field,value) => {const el=root.querySelector(`[data-f="${field}"]`);
+      if(el) el.textContent=value; return el;},
+    cls:(el,name,on) => {(el.classStates ||= {})[name]=on;},
+    reconcile() {}, post:async()=>({}), toast() {}, confirmImpl:()=>true, promptImpl:()=>null});
+  const supply={id:'hv',driver:'glassman_fl',connected:true,hv_on:true,
+    mode:'CC',voltage_mode:false,current_setpoint:200,unit_v:'V',unit_i:'mA'};
+  const state={power_supplies:[supply],readings:{},snapshot:{
+    'hv.hv.voltage':650,'hv.hv.current':200,'hv.hv.arc_count':0}};
+  panels.supplies(state);
+  assert.equal(fields.get('mode').textContent,'CC');
+  assert.equal(fields.get('mode').classStates.cc,true);
+  assert.equal(fields.get('hvin').disabled,false);
+  supply.mode='CV'; supply.voltage_mode=true;
+  panels.supplies(state);
+  assert.equal(fields.get('mode').textContent,'CV');
+  assert.equal(fields.get('mode').classStates.cv,true);
+  supply.hv_on=false; supply.mode=null;
+  panels.supplies(state);
+  assert.equal(fields.get('mode').textContent,'');
+  assert.equal(fields.get('hvin').disabled,true);
+  assert.equal(setButton.disabled,true);
 }
 
 // MFC telemetry keeps the requested isolation interlock visible in its live tile.

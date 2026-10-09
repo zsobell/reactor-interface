@@ -47,6 +47,7 @@ async def main():
         c.check('next run succeeds after drain', await wait_for(lambda: not vr.sup.run_in_progress))
     async with VirtualReactor() as vr:
         vr.sup.snapshot['inst.ammeter'] = 0.001
+        vr.supplies['hv'].hv_on = True
         await vr.sup.start_prestart(dict(valve_delay_s=0, hold_s=0.01))
         c.check('prestart reaches primed handover', await wait_for(lambda: vr.sup.prestart.get('done')))
         await vr.sup.start_ald_run(dict(run_name='Handover', cycles=1))

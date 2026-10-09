@@ -58,6 +58,21 @@ async def main() -> int:
             and targets["supply:grid_bias"]["quantity"] == "voltage"
             and targets["supply:collimating"]["quantity"] == "current"
             and targets["supply:steering"]["quantity"] == "current")
+    c.check("HV current is offered as a mA sweep axis",
+            targets["supply:hv"]["role"] == "hv_current"
+            and targets["supply:hv"]["unit"] == "mA")
+    hv_plan = HcpesPlan.model_validate({
+        **plan_payload(),
+        "axes": [*plan_payload()["axes"],
+                 {"target": "supply:hv", "mode": "list", "values": [200, 250]}],
+    })
+    c.check("HV current expands as a reviewed 200/250 mA sweep",
+            [point.setpoints["supply:hv"] for point in
+             resolve_plan(hv_plan, cfg).iter_points()][:2] == [200, 250])
+    excessive = hv_plan.model_copy(deep=True)
+    excessive.axes[-1] = SweepAxis(target="supply:hv", mode="fixed", value=1001)
+    c.check("HV sweep refuses current beyond supply rating", raises(
+        lambda: resolve_plan(excessive, cfg), "exceeds 1000 mA rating"))
     c.check("all configured MFCs are represented",
             all(f"mfc:{mfc.id}" in targets for mfc in cfg.mfcs))
     c.check("only background MFCs may be locked zero",

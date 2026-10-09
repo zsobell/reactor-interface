@@ -45,6 +45,7 @@ async def main():
         c.check("accepted request owns the name", vr.sup.last_run_name == "Winner")
 
     async with VirtualReactor() as vr:
+        vr.supplies["hv"].hv_on = True
         await vr.sup.start_prestart(dict(valve_delay_s=10))
         try:
             await vr.sup.start_recipe(Recipe(steps=[Step(op="wait", seconds=10)]))

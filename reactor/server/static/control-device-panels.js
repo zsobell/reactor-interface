@@ -3,17 +3,14 @@ export function createDevicePanels({$, document, cssEscape, esc, num, sci, put, 
                                     reconcile, post, toast, confirmImpl, promptImpl}) {
   let mounted = false;
 
-  /* The Glassman card remains monitor-only. Keithley fields and output controls
-     preserve the manually requested browser command paths. */
+  /* Glassman exposes current limit while its front-panel HV is already on.
+     Keithley fields and output controls preserve their command paths. */
   function supplies(s){
     const box = $("supplies");
     const list = s.power_supplies || [];
     const isK = p => p.driver === "keithley_2260b";
-    /* Two shapes on one card grid. The Glassman is monitor-only and reports arc
-       count / HV status / fault flags; the Keithley DC supplies report measured
-       V and I and an output state this program switches. Neither has a setpoint
-       input: the Glassman is set by hand, and the Keithleys take only their
-       output enable plus (bias unit only) a voltage from the run parameters. */
+    /* Two shapes on one card grid. The Glassman reports HV state, mode and
+       faults and accepts current-limit writes only while HV is on. */
     reconcile(box, list, p => p.id, p => isK(p) ? `
       <div class="tile psu" data-id="${esc(p.id)}">
         <div class="top">
@@ -50,6 +47,7 @@ export function createDevicePanels({$, document, cssEscape, esc, num, sci, put, 
       <div class="tile" data-id="${esc(p.id)}">
         <div class="top">
           <span class="name">${esc(p.label || p.id)}</span>
+          <span class="mode" data-f="mode" title="constant-voltage / constant-current"></span>
           <div style="flex:1"></div>
           <span class="read"><span data-f="v">—</span
             ><span class="unit">${esc(p.unit_v || "V")}</span></span>
@@ -57,6 +55,12 @@ export function createDevicePanels({$, document, cssEscape, esc, num, sci, put, 
         <div class="kv"><span>Current</span>
           <span><span data-f="i">—</span> ${esc(p.unit_i || "mA")}</span></div>
         <div class="kv"><span>Arc count</span><span data-f="arcs">—</span></div>
+        <div class="row" style="margin-top:6px">
+          <input type="number" step="1" min="0" max="1000" placeholder="mA"
+                 id="hvi_${esc(p.id)}" data-f="hvin" style="flex:1;min-width:64px">
+          <button data-act="hvset" data-id="${esc(p.id)}">Set current limit</button>
+        </div>
+        <div class="kv"><span>Commanded current limit</span><span data-f="sp">—</span></div>
         <div class="chips">
           <span class="chip" data-f="chipHv">HV</span>
           <span class="chip" data-f="chipMode">mode</span>
@@ -67,8 +71,7 @@ export function createDevicePanels({$, document, cssEscape, esc, num, sci, put, 
         <div class="kv"><span>Link</span><span data-f="link">—</span></div>
         <div class="note" data-f="faults"></div>
         <div class="note" data-f="err"></div>
-        <div class="hint">Monitor only — set voltage and current on the supply's
-          front panel. HV is commanded off at the end of a run.</div>
+        <div class="hint">HV on is front-panel only. Current limit can be set while HV is on; every set command carries the fixed 800 V voltage limit. HV is commanded off at the end of a run.</div>
       </div>`);
 
     for(const p of list){
@@ -145,9 +148,14 @@ export function createDevicePanels({$, document, cssEscape, esc, num, sci, put, 
         const arcs = s.snapshot["hv."+p.id+".arc_count"];
         put(el, "arcs", (arcs === null || arcs === undefined) ? "—" : String(arcs));
         chip("chipHv",   p.hv_on ? "HV ON" : "HV off", p.hv_on, p.hv_on);
-        chip("chipMode", p.voltage_mode === null || p.voltage_mode === undefined
-                           ? "mode —"
-                           : (p.voltage_mode ? "V mode" : "I mode"), false, false);
+        const md = put(el, "mode", p.mode || "");
+        if(md){ cls(md, "cv", p.mode === "CV"); cls(md, "cc", p.mode === "CC"); }
+        chip("chipMode", p.mode || "mode —", false, false);
+        put(el, "sp", p.current_setpoint == null ? "—" : `${Number(p.current_setpoint).toFixed(1)} mA`);
+        const hvInput = el.querySelector('[data-f="hvin"]');
+        const hvButton = el.querySelector('[data-act="hvset"]');
+        if(hvInput) hvInput.disabled = !p.connected || !p.hv_on;
+        if(hvButton) hvButton.disabled = !p.connected || !p.hv_on;
         chip("chipRem",  p.remote ? "remote" : "local", false, false);
         chip("chipTrip", p.current_trip_enabled ? "I-trip on" : "I-trip off",
                          p.current_trip_enabled, false);
@@ -326,6 +334,11 @@ export function createDevicePanels({$, document, cssEscape, esc, num, sci, put, 
         if(on && !confirmImpl(`Turn ON the ${id} output?\n\nIt will source at whatever this supply's setpoints currently are.`)) return;
         await post(`/api/supply/${id}/output`, {on});
         toast(`${id} output ${on ? "ON" : "off"}`, true);
+      }else if(button.dataset.act === "hvset"){
+        const value = readNumber(`#hvi_${cssEscape(id)}`, `${id} current limit`);
+        if(value === null) return;
+        const result = await post(`/api/hv/${id}/current`, {milliamps:value});
+        toast(`${id} current limit set to ${result.current ?? value} mA with 800 V voltage limit`, true);
       }
     }catch(_){}
   }

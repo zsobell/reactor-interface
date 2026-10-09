@@ -42,6 +42,7 @@ async def main() -> int:
         vr.instruments["ammeter"].value = 1.0e-3
         tick_task = await autotick(vr, period=0.05)
         try:
+            vr.supplies["hv"].hv_on = True  # operator's front-panel action
             await vr.sup.start_prestart(PARAMS)
             while vr.sup.prestart.get("running"):
                 await asyncio.sleep(0.02)
@@ -71,6 +72,7 @@ async def main() -> int:
         vr.instruments["ammeter"].value = 0.0
         tick_task = await autotick(vr, period=0.05)
         try:
+            vr.supplies["hv"].hv_on = True
             await vr.sup.start_prestart(PARAMS)
             await asyncio.sleep(1.2)
             still_running = vr.sup.prestart.get("running")
@@ -114,6 +116,7 @@ async def main() -> int:
         flick_task = asyncio.create_task(flicker())
         t0 = time.time()
         try:
+            vr.supplies["hv"].hv_on = True
             await vr.sup.start_prestart(PARAMS)
             while vr.sup.prestart.get("running"):
                 await asyncio.sleep(0.02)
@@ -141,6 +144,7 @@ async def main() -> int:
         vr.instruments["ammeter"].value = 1.0e-3
         tick_task = await autotick(vr, period=0.05)
         try:
+            vr.supplies["hv"].hv_on = True
             await vr.sup.start_prestart(dict(PARAMS, valve_delay_s=5.0))
             await asyncio.sleep(0.1)
             await vr.sup.stop_prestart()
@@ -157,6 +161,7 @@ async def main() -> int:
         c.section("5. run refused while pre-start owns the plasma relay, and vice versa")
         tick_task = await autotick(vr, period=0.05)
         try:
+            vr.supplies["hv"].hv_on = True
             await vr.sup.start_prestart(dict(PARAMS, valve_delay_s=5.0, hold_s=5.0))
             try:
                 await vr.sup.start_ald_run(dict(cycles=1, dose_s=0.05, pump_a_s=0.1,

@@ -124,8 +124,8 @@ class Telemetry:
             ],
             "instruments": [{**i.status(), "retry": self.sup.reconnect.get(iid)}
                             for iid, i in self.sup.instruments.items()],
-            # Read-only. Each status() carries read_only=True, which is what the
-            # UI keys off to render a monitor card with no controls on it.
+            # Each supply status advertises its own permitted controls; the
+            # Glassman has guarded current-only control and no HV-on path.
             "power_supplies": [{**p.status(), "retry": self.sup.reconnect.get(pid)}
                                for pid, p in self.sup.supplies.items()],
             "regulator": self.sup.regulator,

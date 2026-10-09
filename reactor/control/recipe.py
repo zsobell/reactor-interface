@@ -358,7 +358,8 @@ class RecipeRunner:
     #: and changing it under a running recipe would mean the log no longer
     #: describes what ran.
     LIVE_STEP_FIELDS = (
-        "seconds", "target_torr", "pulse_on_s", "pulse_off_s", "tolerance_frac",
+        "seconds", "dose_pulses", "dose_pulse_gap_s", "target_torr",
+        "pulse_on_s", "pulse_off_s", "tolerance_frac",
         "min_current", "reignite_pulse_s", "reignite_settle_s",
         "bias_v", "bias_polarity", "bias_lead_s", "bias_trail_s", "sccm",
     )
@@ -508,7 +509,7 @@ class RecipeRunner:
             for s in recipe.steps:
                 if s.op == "electron_beam":
                     break
-                beam_runway_s += s.seconds or 0.0
+                beam_runway_s += s.duration_s()
             # The same runway carries the sample bias's lead-in (EE-ALD). The
             # bias comes up bias_lead_s before the beam step starts, which is
             # inside dose/pump A, and goes down bias_trail_s after it ends,
@@ -534,7 +535,7 @@ class RecipeRunner:
                 for step in recipe.steps:
                     if step.op == "electron_beam":
                         break
-                    beam_runway_s = beam_runway_s + (step.seconds or 0.0)
+                    beam_runway_s = beam_runway_s + step.duration_s()
                 self.progress.cycle = cycle
                 self._begin_cycle_clock()
                 if recipe.mode == "cvd":
@@ -626,7 +627,7 @@ class RecipeRunner:
             self.progress.step_index = i
             self.progress.step_op = step.op
             self.progress.step_desc = step.describe(self.gas_names())
-            self.progress.step_duration = step.seconds
+            self.progress.step_duration = step.duration_s() if step.seconds is not None else None
             self.progress.step_started = self.clock.wall()
             self.progress.step_elapsed_started = self.clock.elapsed()
             self.progress.step_remaining_hint = None
@@ -652,16 +653,21 @@ class RecipeRunner:
             # hold the valve open for as long as the operator was away, dumping
             # precursor - the one place where "pause only takes effect at the
             # next step" was actively harmful rather than merely wrong.
-            await sup.set_valve(step.valve, True, reason="recipe dose")
-            try:
-                await self._sleep(
-                    step.seconds,
-                    on_pause=lambda: sup.set_valve(step.valve, False,
-                                                   reason="dose paused"),
-                    on_resume=lambda: sup.set_valve(step.valve, True,
-                                                    reason="dose resumed"))
-            finally:
-                await sup.set_valve(step.valve, False, reason="recipe dose end")
+            for pulse in range(step.dose_pulses):
+                if self._abort.is_set():
+                    break
+                await sup.set_valve(step.valve, True, reason="recipe dose")
+                try:
+                    await self._sleep(
+                        step.seconds,
+                        on_pause=lambda: sup.set_valve(step.valve, False,
+                                                       reason="dose paused"),
+                        on_resume=lambda: sup.set_valve(step.valve, True,
+                                                        reason="dose resumed"))
+                finally:
+                    await sup.set_valve(step.valve, False, reason="recipe dose end")
+                if pulse < step.dose_pulses - 1 and not self._abort.is_set():
+                    await self._sleep(step.dose_pulse_gap_s)
 
         elif step.op == "wait":
             if step.lit_gated:

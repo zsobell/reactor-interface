@@ -51,6 +51,7 @@ identify the owner; public Supervisor commands remain the hardware boundary.
 | Valve identification sweep | [sweep.py](../reactor/control/sweep.py), [supervisor.py](../reactor/supervisor.py) | `test_sweep_controller` |
 | Recording and file formats | [recording.py](../reactor/recording.py), [datalog.py](../reactor/datalog.py) | `test_recording_api`, `test_recording_worker`, `test_recording_errors`, `test_run_export`, `test_file_naming`, `test_sample_freshness` |
 | Telemetry and data routes | [telemetry.py](../reactor/telemetry.py), [data.py](../reactor/server/data.py) | `test_telemetry`, `test_data_routes`, `test_ellipsometer_merge` |
+| Hardware sensor popup and compact history | [sensor_plot.py](../reactor/server/sensor_plot.py), [sensor-plot.js](../reactor/server/static/sensor-plot.js), [sensor-plot-data.js](../reactor/server/static/sensor-plot-data.js) | `test_sensor_plot`, `test_static_assets`, `tests/js/sensor-plot.mjs`, `tests/js/control-bootstrap.mjs` |
 | Frontend modules | [control.js](../reactor/server/static/control.js), [live-charts.js](../reactor/server/static/live-charts.js), [aperture-card.js](../reactor/server/static/aperture-card.js), [hcpes-editor.js](../reactor/server/static/hcpes-editor.js), [analysis.js](../reactor/server/static/analysis.js), [analysis-plot.js](../reactor/server/static/analysis-plot.js), [hcpes-analysis.js](../reactor/server/static/hcpes-analysis.js) | `test_static_assets` plus Node commands below |
 | Documentation and entry guidance | [AGENTS.md](../AGENTS.md), [test guide](../tests/README.md) | `test_docs` |
 

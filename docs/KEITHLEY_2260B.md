@@ -2,8 +2,9 @@
 
 Four programmable DC supplies drive the beam column and the sample stage. The
 reactor logs all four. Normal ALD/CVD operation switches the three support
-outputs on at pre-start, brackets stage bias with the beam, and sets only stage
-voltage. HCPES characterization follows its own reviewed four-supply program.
+outputs on at pre-start, brackets stage bias with the beam, and programs stage
+and grid voltage plus steering and collimating current defaults. HCPES
+characterization follows its own reviewed four-supply program.
 
 | Role | Model | Serial | Rated | Power |
 |---|---|---|---|---|
@@ -37,6 +38,9 @@ stable handle:
 - `Keithley2260B.find_port` resolves the port from it at connect.
 - `connect()` then checks the serial reported by `*IDN?` against the configured
   one and **refuses the device on a mismatch.**
+- A failed identity handshake closes the COM handle before the next 5-second
+  retry; each retry discovers the port again by USB serial. This recovers from
+  stale handles and COM renumbering without commanding supply outputs.
 
 That last check is not paranoia. The failure it prevents is putting 800 V of
 grid supply onto the sample stage because two USB cables were swapped at the
@@ -99,8 +103,9 @@ This supersedes an earlier rule worth recording, because the reasoning changed
 rather than being forgotten. Until 2026-08-25 the driver deliberately never
 touched a current limit at all: all four supplies were found with Zach's working
 setpoints dialled in, and those were his alone. He then asked for current fields,
-so `set_current` exists. Outside an active HCPES characterization, only the
-operator's field reaches it.
+so `set_current` exists. Since 2026-09-30, ALD/CVD pre-start also programs the
+steering and collimating limits from Advanced Controls. Stage-bias current
+remains manual.
 
 As found 2026-08-21, and still the values the supplies carry:
 
@@ -181,13 +186,13 @@ off.
 ## Sample bias, and the polarity toggle
 
 The run's **Sample bias (V)** field replaced *Min current (µA)* in the main
-EE-ALD / EE-CVD parameter grid; min current moved into **Advanced timing**.
+EE-ALD / EE-CVD parameter grid; min current moved into **Advanced Controls**.
 
 - Enter a **magnitude**. Zero means the stage bias output stays off for that
   run, and the event log says so rather than leaving you to infer it.
 - **It follows the beam** (2026-08-26). Pre-start arms the supply at this level
   with its output off; the beam then switches it on `Bias lead` seconds early
-  and off `Bias trail` seconds late (Advanced timing, 0.2 s each). The reason
+  and off `Bias trail` seconds late (Advanced Controls, 0.2 s each). The reason
   is the stage thermocouple: a bias held on all run made it unreadable, and
   Zach wanted *"good thermocouple data when the e-beam is off"*. A reignite
   does not cycle it, and the bracket adds nothing to a cycle's length — both
@@ -198,7 +203,7 @@ EE-ALD / EE-CVD parameter grid; min current moved into **Advanced timing**.
   negative voltage, so the sign never reaches the instrument — it is applied to
   the **logged** voltage, so `psu_stage_bias_voltage` reads `−12` when the leads
   are reversed. That is bookkeeping Zach asked for, not a control feature.
-- The current limit is not part of this: pre-start never sets one. It stays
+- The stage-bias current limit is not part of this: pre-start never sets it. It stays
   whatever the front panel or the Hardware-tab current field last put there.
 
 The pre-start confirmation dialog states the bias explicitly — magnitude, sign,

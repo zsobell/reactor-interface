@@ -265,6 +265,7 @@ reactor/
     nidaq.py                  DAQ inputs; one output task per valve line
     mks_mfc.py                MKS G50 Modbus measurements/setpoints; HTTP metadata/fallback
     instrument.py             VISA/SCPI instruments such as the DMM6500
+    mks_937b.py               read-only Auger hot-cathode pressure over RS232
     glassman_fl.py             Glassman monitoring; application commands HV off only
     keithley_2260b.py          Keithley monitoring, manual controls and requested run outputs
     ellipsometer.py            read-only FS-1 TCP stream and decoder
@@ -273,6 +274,7 @@ reactor/
     app.py                    HTTP control, lifecycle, authentication and pages
     data.py                   analysis/file routes, with worker-based file operations
     hcpes_analysis.py         read-only HCPES bundle validation and analysis routes
+    sensor_plot.py            read-only pressure/temperature history projection
     static/index.html         control page markup
     static/control.css        control-page styles
     static/control.js         page composition and telemetry rendering
@@ -286,6 +288,10 @@ reactor/
     static/analysis.css       analysis-page styles
     static/analysis.js        finished-run and Auger analysis
     static/analysis-plot.js   reusable run/Auger plot rendering and interaction
+    static/sensor-plot.html   one-sensor popup from Hardware values
+    static/sensor-plot.js     live popup plot, axes and hover readout
+    static/sensor-plot-data.js  bounded canvas point reduction
+    static/sensor-plot.css    popup layout
     static/hcpes-analysis.js  HCPES slices, heat maps, trends and raw inspector
   testing/virtual_reactor.py   fake hardware, real application/controllers, temporary files
   testing/validate.py          focused/full Windows Python and Node validation

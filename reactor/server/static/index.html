@@ -100,10 +100,11 @@
               <option value="-1">&minus; negative to stage</option>
             </select></label>
           </div>
-          <div class="hint">Sample bias <strong>follows the electron
+          <div class="hint">Multiple precursor dose settings are in <em>Advanced Controls</em>.
+            Sample bias <strong>follows the electron
             beam</strong>: pre-start arms the supply at this level but leaves its
             output off, and each beam brings it on a lead time early and drops it
-            a trail time late (both in <em>Advanced timing</em>). That leaves the
+            a trail time late (both in <em>Advanced Controls</em>). That leaves the
             stage unenergised for the rest of the cycle, so the stage
             thermocouple reads clean whenever the beam is off. A reignite does
             not cycle it. Zero here means the supply is never switched on at all.
@@ -177,7 +178,7 @@
         </details>
 
         <details class="sub" id="advSection">
-          <summary><span class="stitle">Advanced timing</span><span class="sum" id="reigniteHint"></span></summary>
+          <summary><span class="stitle">Advanced Controls</span><span class="sum" id="reigniteHint"></span></summary>
           <!-- Grouped by the mechanism each number belongs to (2026-08-28). As
                one flat 12-field grid, "Ar pulse gap" sat next to "Bias trail"
                with nothing to say they have nothing to do with each other, and
@@ -185,6 +186,20 @@
                Each group now carries its own explanation, under the fields it
                is about. -->
           <div class="dbody">
+            <div class="subhead">Supply defaults for ALD/CVD pre-start</div>
+            <div class="params">
+              <label class="adv">Plasma current limit (mA)<input type="number" id="p_plasma_current_ma" step="1" min="0" max="1000" value="200"></label>
+              <label class="adv">Grid voltage (V)<input type="number" id="p_grid_voltage_v" step="1" min="0" value="100"></label>
+              <label class="adv">Steering current limit (A)<input type="number" id="p_steering_current_a" step="0.01" min="0" value="3.7"></label>
+              <label class="adv">Collimating current limit (A)<input type="number" id="p_collimating_current_a" step="0.01" min="0" value="2.5"></label>
+            </div>
+            <div class="hint">Pre-start programs these limits before the beam strike. Turn Glassman HV on at its front panel first; remote commands can change its current limit only while HV is already on, and always use an 800 V voltage limit.</div>
+            <div class="subhead">Precursor dose pulses</div>
+            <div class="params">
+              <label class="adv">Pulses per cycle<input type="number" id="p_dose_pulses" step="1" min="1" value="1"></label>
+              <label class="adv">Wait between pulses (s)<input type="number" id="p_dose_pulse_gap_s" step="0.01" min="0" value="0"></label>
+            </div>
+            <div class="hint">Each pulse opens the precursor valve for Dose time. The valve closes during each wait; Pump A starts after the last pulse.</div>
             <div class="subhead">Precursor fill regulation</div>
             <div class="params">
               <label class="adv">Fill pulse on (s)<input type="number" id="p_fill_pulse_on_s" step="0.01" value="0.10"></label>
@@ -434,18 +449,35 @@
     <section class="card" id="gaugeCard">
       <h2>Pressure Sensors</h2>
       <div class="body">
+        <div class="hint">Click a pressure value to open its live plot.</div>
         <div class="subhead">Chamber (cold cathode)</div>
         <div class="tile" style="background:transparent;border:0;padding:0">
           <div class="top">
             <span class="name">Chamber pressure</span>
             <div style="flex:1"></div>
-            <span class="read"><span id="hwPressure">—</span
+            <span class="read"><span id="hwPressure" data-plot-key="pressure"
+              data-plot-label="Chamber pressure" role="button" tabindex="0"
+              title="Open pressure plot">—</span
               ><span class="unit">Torr</span></span>
           </div>
         </div>
         <div class="kv"><span>Gauge output</span><span id="hwPressureV">—</span></div>
         <div class="kv"><span>Channel</span><span id="pressureChan">—</span></div>
         <div class="kv"><span>Curve</span><span id="pressureCurve">—</span></div>
+        <div class="subhead">Auger analysis chamber (hot cathode)</div>
+        <div class="tile" style="background:transparent;border:0;padding:0">
+          <div class="top">
+            <span class="name">Auger chamber pressure</span>
+            <div style="flex:1"></div>
+            <span class="read"><span id="hwAugerPressure" data-plot-key="inst.auger_pressure"
+              data-plot-label="Auger chamber pressure" role="button" tabindex="0"
+              title="Open pressure plot">—</span
+              ><span class="unit">Torr</span></span>
+          </div>
+        </div>
+        <div class="kv"><span>Controller</span><span id="augerController">—</span></div>
+        <div class="kv"><span>Channel</span><span id="augerChannel">—</span></div>
+        <div class="note" id="augerPressureError"></div>
         <div class="subhead" id="gaugeSub">Capacitance manometers</div>
         <div id="gauges" class="tilegrid"></div>
       </div>
@@ -454,12 +486,15 @@
     <section class="card" id="auxCard">
       <h2>Thermocouples</h2>
       <div class="body">
+        <div class="hint">Click a temperature value to open its live plot.</div>
         <div class="subhead">Stage</div>
         <div class="tile" style="background:transparent;border:0;padding:0">
           <div class="top">
             <span class="name">Stage temperature</span>
             <div style="flex:1"></div>
-            <span class="read"><span id="hwStageTemp">—</span
+            <span class="read"><span id="hwStageTemp" data-plot-key="stage.temp"
+              data-plot-label="Stage temperature" role="button" tabindex="0"
+              title="Open temperature plot">—</span
               ><span class="unit">°C</span></span>
           </div>
         </div>
@@ -630,7 +665,7 @@
     <div class="body" id="hcpesEditor"></div>
   </details>
 
-  <div class="pageversion">Reactor Interface 2.1.1</div>
+  <div class="pageversion">Reactor Interface 2.1.2</div>
 </section>
 
 </main>

@@ -10,6 +10,7 @@ control - the sample-stage thermocouple is read and logged only.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -201,7 +202,7 @@ class ValveCfg(BaseModel):
     #: (operator request 2026-08-26, for the Ar pneumatic: opening it in one go
     #: dumps the Ar built up behind it into the reactor). WHICH valve behaves
     #: this way is a fact about the plumbing and lives here; the pulse count,
-    #: width and gap are operator settings and live in the UI's Advanced timing
+    #: width and gap are operator settings and live in the UI's Advanced Controls
     #: panel - see Supervisor.soft_open and set_valve.
     soft_open: bool = False
 
@@ -246,9 +247,10 @@ class InstrumentCfg(BaseModel):
     id: str
     label: str = ""
     enabled: bool = False
-    driver: Literal["scpi", "keithley_dmm6500"] = "scpi"
+    driver: Literal["scpi", "keithley_dmm6500", "mks_937b"] = "scpi"
     resource: str = ""
     baud: int = 9600
+    address: int = Field(default=253, ge=1, le=253)
     setup: list[str] = Field(default_factory=list)
     query: str = "READ?"
     unit: str = ""
@@ -256,22 +258,33 @@ class InstrumentCfg(BaseModel):
     #: such as Keithley's 9.9e37).
     overload_above: float = 1e30
 
+    @model_validator(mode="after")
+    def _validate_937b(self) -> "InstrumentCfg":
+        if self.driver == "mks_937b":
+            if not re.fullmatch(r"PR[1-6]", self.query):
+                raise ValueError("mks_937b query must be PR1 through PR6")
+            if self.setup:
+                raise ValueError("mks_937b does not permit setup commands")
+            if self.unit != "Torr":
+                raise ValueError("mks_937b logging unit must be Torr")
+        return self
+
 
 class PowerSupplyCfg(BaseModel):
     """A programmable power supply on a serial (or USB virtual-COM) port.
 
     Two drivers today, with very different scopes:
 
-    * ``glassman_fl`` - the XP Glassman FL high-voltage plasma supply. Monitor
-      only, apart from one command: the reactor polls its voltage/current
-      monitors and logs them, and commands HV OFF at the end of a run or on an
-      abort. There is no way to set a level or turn HV on.
+    * ``glassman_fl`` - the XP Glassman FL high-voltage plasma supply. The
+      reactor polls and logs it, commands HV OFF during cleanup, and can set
+      its current limit while HV is already on. Every current write carries
+      the operator-approved 800 V voltage limit. HV ON is front-panel only.
       See reactor/devices/glassman_fl.py.
     * ``keithley_2260b`` - the four DC supplies driving the stage bias,
       steering coils, grid bias and collimating coils. Their voltage and current
       are logged, their outputs are switched on at pre-start and off at run end,
-      and the sample-bias unit alone has its voltage set from a run parameter.
-      Current limits are never touched. See reactor/devices/keithley_2260b.py.
+      and pre-start programs grid voltage plus steering/collimating current
+      defaults from Advanced Controls. See reactor/devices/keithley_2260b.py.
 
     `baud` and `address` are NOT guessable and must not be assumed from the
     supply's DIP switches - this reactor's FL answers at 19200/address 1 while

@@ -60,6 +60,7 @@ const catalog = {schema_version:1, axes:[
   {target:"mfc:ar", label:"Ar", unit:"sccm", role:"ar_flow", locked_zero_allowed:false},
   {target:"supply:stage_bias", label:"Stage", unit:"V", role:"stage_bias", locked_zero_allowed:false},
   {target:"supply:collimating", label:"Collimating", unit:"A", quantity:"current", role:"collimating_current", locked_zero_allowed:false},
+  {target:"supply:hv", label:"Glassman current limit", unit:"mA", quantity:"current", role:"hv_current", locked_zero_allowed:false},
   {target:"mfc:bg", label:"Background", unit:"sccm", role:"background_flow", locked_zero_allowed:true},
 ]};
 const library = {schema_version:1, selected_id:"map", plans:[plan], campaigns:[]};
@@ -80,6 +81,8 @@ await editor.mount();
 assert.equal(root.events.size, 3, "mount installs one delegated handler per event");
 assert.equal(windowObj.events.size, 1, "unsaved-change guard is installed once");
 assert.match(root.innerHTML, /Parameter-space blocks/);
+assert.match(root.innerHTML, /Add plasma current limit sweep/,
+  "a saved plan predating the HV axis can add it");
 assert.match(root.innerHTML, /Initial plasma condition[\s\S]*used only to ignite/);
 assert.match(root.innerHTML, /four HCPES support supplies output off/);
 assert.match(root.innerHTML, /next fresh sample-current readings/);
@@ -92,6 +95,10 @@ assert.match(root.innerHTML, /Move Ar inward/);
 assert.match(root.innerHTML, /Collimating[\s\S]*1\.5[\s\S]*A/,
   "steering and collimating sweep blocks display amperes");
 assert.equal(editor.currentPreview().estimate.points, 2);
+await root.events.get("click")({target:{closest:selector => selector === "button"
+  ? {id:"hcpesAddHvAxis", dataset:{}, closest:()=>null} : null}});
+assert.equal(editor.selected().initial_setpoints["supply:hv"], 200);
+assert.equal(editor.selected().axes.at(-1).target, "supply:hv");
 
 const nameInput = {dataset:{meta:"name"}, value:"Changed map", closest:()=>null};
 await root.events.get("input")({target:nameInput});

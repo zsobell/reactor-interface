@@ -50,7 +50,7 @@ scoped:
    far, so five pulses were simply five inrushes and the chamber gauge tripped
    off anyway. Which valve behaves this way is `soft_open` in
    `config/reactor.yaml`; the three numbers are operator settings in the Run
-   tab's **Advanced timing** panel, and setting the pulse count to 0 turns it
+   tab's **Advanced Controls** panel, and setting the pulse count to 0 turns it
    back into a plain flip. It is in `Supervisor.set_valve`, not in the callers,
    precisely so that "any time" means any time.
 
@@ -144,11 +144,10 @@ This changed a previous rule rather than overlooking it. Until 2026-08-25 the
 driver deliberately never touched a **current limit** — the supplies were found
 with Zach's working setpoints dialled in and those were his alone to set. He
 asked for current fields, so `set_current` now exists. In the normal
-ALD/CVD/pre-start workflow, **nothing sets a current automatically**; only the
-operator's field reaches it, and the test suite asserts that a full
-pre-start-plus-run produces zero current writes. HCPES is the explicit
-exception: its reviewed plan programs steering and collimating current for each
-condition, as described in the HCPES section below.
+ALD/CVD pre-start now programs the steering and collimating current defaults
+from Advanced Controls (3.7 A and 2.5 A initially). Stage-bias current stays
+under operator control. HCPES can sweep steering, collimating, and plasma
+current from its reviewed plan.
 
 The **CV/CC indicator** on each card is derived from measurement versus
 setpoint — whichever limit the output has actually reached — and shows nothing
@@ -174,7 +173,7 @@ So now:
   At a Sample bias of 0 the supply is never switched on at all.
 - **Each beam brackets it.** In EE-ALD the bias comes up `Bias lead` seconds
   before every cycle's beam and drops `Bias trail` seconds after it — both in
-  the Run tab's Advanced timing panel, 0.2 s by default. In EE-CVD the beam is
+  the Run tab's Advanced Controls panel, 0.2 s by default. In EE-CVD the beam is
   one long step, so the bias leads the strike at the start of the run and drops
   after the beam at the end of it.
 - **A reignite does not cycle it.** It brackets the beam *step*, not every flip
@@ -189,9 +188,9 @@ So now:
 - **However a run ends** — finished, aborted, or crashed — every queued flip is
   cancelled and the output is switched off. An abort does not honour the trail.
 
-Only the voltage is set. **Pre-start never sets a current limit** on any of the
-four — that stays wherever the front panel or the Hardware-tab current field
-last put it.
+Pre-start sets the stage-bias voltage but leaves its current limit alone. It
+also sets grid voltage (100 V by default) and steering/collimating current
+limits (3.7 A / 2.5 A by default) before enabling their outputs.
 
 The `+`/`−` polarity toggle is **bookkeeping, not control**. A 2260B is
 single-quadrant and cannot source a negative voltage, so the sign never reaches
@@ -206,18 +205,17 @@ starts.
 
 Details in [KEITHLEY_2260B.md](KEITHLEY_2260B.md).
 
-## Devices this program reads but (almost) never commands
+## Film Sense and Glassman control
 
-Some hardware is deliberately monitor-only. Connecting to it is read-only, and
-there is no path from the UI to any write.
+Connecting to these devices does not change their outputs.
 
 - **Film Sense FS-1 ellipsometer.** Subscribes to the instrument's broadcast;
   the trigger sockets are deliberately untouched. Still fully read-only.
 - **XP Glassman FL1.5F1.0 HV plasma supply.** Polled for voltage, current and
-  arc count at 2 Hz and logged. Zach sets voltage and current by hand on the
-  front panel, and this program **sends it exactly one command: HV OFF.**
+  arc count at 2 Hz and logged. HV can only be turned on at its front panel.
+  While HV is already on, the operator or a recipe can set its current limit.
 
-### The one HV command (requested 2026-08-21)
+### Glassman commands (expanded 2026-09-30)
 
 `Supervisor.hv_off()` asserts HV Off on every configured supply as part of the
 requested cleanup paths:
@@ -228,33 +226,36 @@ requested cleanup paths:
 - HCPES cleanup — completion, stop, failure or server shutdown while HCPES owns
   the reactor.
 
-There is still **no way to set a voltage, and no way to turn HV on**, from the
-supervisor, the API or the browser. The Hardware-tab card has no inputs; not
-disabled inputs, absent ones. Voltage/current control remains a not-yet.
+There is still **no way to turn HV on remotely** or enter an arbitrary voltage
+setpoint. The Hardware card offers current-limit control only while fresh
+Glassman status confirms HV on. Every current Set packet carries an **800 V
+voltage limit** and no HV-on bit. The built-in ALD/CVD pre-start applies the
+Advanced Controls current default (200 mA initially) before the beam strike.
+The dedicated `POST /api/hv/{id}/current` route accepts `milliamps`; the
+Keithley `/api/supply/{id}/current` route accepts amperes and refuses Glassman.
+The Glassman CC/CV state uses the same card indicator as the Keithleys, from
+the FL's own mode status bit.
 
 Two protocol facts shape how the off is sent, and both are load-bearing:
 
 - The FL's Set frame **always carries a voltage and a current program** — there
-  is no "HV off only" packet. Sending zeros would wipe the levels Zach dialled
-  in, so `GlassmanFL.hv_off` echoes the supply's own last reading back with the
-  frame. Do not "simplify" that to `set_hv(False, 0, 0)`.
+  is no "HV off only" packet. Cleanup sends 800 V and the most recently
+  commanded current limit, or the 200 mA default if none was commanded.
 - **Any Set command puts the supply into REMOTE.** The front-panel LOC/REM
   button switches it back; the button does nothing while already local, which is
   normal and not a fault. So after a run ends, the supply will be sitting in
   remote until Zach presses LOC/REM.
 
-Two older decisions still stand and should not be quietly reversed:
+The shutdown decision still stands:
 
 - **`disconnect()` does not send HV OFF.** A driver for this same supply
   elsewhere in the group does, after an incident where their app exited leaving
   HV energised. This program still does not: HV off belongs to *a run ending*,
   not to *the server stopping*, or closing a browser tab would kill a plasma
   Zach set by hand. Stopping the server closes the port and nothing else.
-- **There is no voltage limit.** An earlier plan capped the setpoint at 1000 V;
-  Zach withdrew it once this became read-only. Nothing here sets a voltage, so
-  there is still nothing to clamp — but **if setpoint control is ever added, the
-  cap should be reconsidered at the same time** (on a 1500 V supply, 1000 V was
-  2730 counts, `0xAAA`). Details in [GLASSMAN_FL.md](GLASSMAN_FL.md).
+
+The 2026-09-30 current-control request fixes every remote Set packet at an
+800 V voltage limit. Details in [GLASSMAN_FL.md](GLASSMAN_FL.md).
 
 ## The pre-start abort (requested 2026-08-21)
 
@@ -298,6 +299,7 @@ whose ordered blocks define the Cartesian parameter space. Every plan resolves:
 - stage-bias magnitude plus a separately confirmed physical polarity;
 - grid-bias voltage;
 - steering and collimating current; and
+- optionally, Glassman HV current limit in mA, after front-panel HV on;
 - every configured background MFC, either explicitly fixed/swept or locked at
   zero. There is no unowned background MFC during an HCPES run.
 
@@ -305,16 +307,19 @@ The supply protocol and machine-readable records retain amperes. The HCPES
 builder, readable condition YAML and Analysis page present steering and
 collimating supply settings in **A**. Only measured stage current and its drift
 default to **mA** and **mA/min** at the human-facing boundary.
+The Glassman current-limit axis is in **mA**. Older saved plans without it
+retain their former command sequence; the Diagnostics editor can add the axis.
 
 Start is refused until the exact saved revision is previewed and the operator
 confirms the displayed stage-lead orientation. Positive is the default. HCPES
-then owns all configured MFCs, the four support supplies and plasma relay;
+then owns all configured MFCs, the four support supplies, the Glassman current
+control and plasma relay;
 manual writes and competing run/pre-start/fill/sweep starts are refused until
 cleanup finishes. Its restricted startup commands, in order:
 
 1. every MFC to zero;
 2. the Ar pneumatic isolation valve open;
-3. the plan's separate initial-plasma MFC and four-supply programs (without artificial
+3. the plan's separate initial-plasma MFC and supply programs (without artificial
    per-parameter delays while there is not yet a plasma to settle);
 4. all four HCPES support-supply outputs on; and
 5. the plasma relay to beam-on, followed immediately by the startup

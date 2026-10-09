@@ -231,12 +231,8 @@ class FakeSupply(Device):
         vr.supplies["hv"].hv_on = True
         vr.supplies["hv"].faults = ["interlock"]
 
-    The program sends this supply exactly ONE command - `hv_off()`, at the end
-    of a run or on abort - so that is the only write modelled here. Calls land
-    in `.hv_off_calls` and clear `.hv_on`; the voltage and current programs are
-    deliberately left alone, mirroring GlassmanFL.hv_off, so a test can catch a
-    regression that zeroes the operator's front-panel levels. There is still no
-    way to set a level or turn HV *on*, because there is none in the program.
+    `set_current()` is guarded by the front-panel HV state; `hv_off()` is used
+    during cleanup. No fake operation turns HV on remotely.
     """
 
     key_prefix = "hv"
@@ -259,6 +255,18 @@ class FakeSupply(Device):
         self.current_trip_enabled = False
         self.faults: list[str] = []
         self.hv_off_calls = 0
+        self.current_setpoint: float | None = None
+        self.current_calls: list[float] = []
+
+    async def set_current(self, milliamps: float) -> None:
+        if not self.connected or not self.hv_on:
+            raise RuntimeError("Glassman HV must be on at the front panel before setting current")
+        milliamps = float(milliamps)
+        if not 0 <= milliamps <= self.cfg.full_scale_i:
+            raise ValueError("Glassman current limit outside rated range")
+        self.current_calls.append(milliamps)
+        self.current_setpoint = milliamps
+        self.remote = True
 
     async def hv_off(self) -> None:
         """Mirror of GlassmanFL.hv_off: no-op while disconnected, and it clears
@@ -268,6 +276,8 @@ class FakeSupply(Device):
         self.hv_off_calls += 1
         self.hv_on = False
         self.remote = True          # any Set command moves the supply to remote
+        if self.current_setpoint is None:
+            self.current_setpoint = 200.0
 
     async def connect(self) -> None:
         self.connected = True
@@ -302,7 +312,11 @@ class FakeSupply(Device):
             "full_scale_i": self.cfg.full_scale_i,
             "unit_v": self.cfg.unit_v,
             "unit_i": self.cfg.unit_i,
-            "read_only": True,
+            "read_only": False,
+            "current_control_only": True,
+            "voltage_limit": 800.0,
+            "current_setpoint": self.current_setpoint,
+            "mode": ("CV" if self.voltage_mode else "CC") if self.hv_on else None,
             "voltage": self.voltage,
             "current": self.current,
             "arc_count": self.arc_count,
