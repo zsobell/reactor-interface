@@ -132,16 +132,29 @@ editor.updateStatus({running:true, phase:"timed settle after mfc:ar",
   stability_window_required_s:3, stability_wait_elapsed_s:2.1,
   stability_max_wait_s:10, recovery_count:0,
   inaccessible_points:0,
-  applied_setpoints:{"mfc:ar":2,"supply:stage_bias":10}});
+  applied_setpoints:{"mfc:ar":2,"supply:stage_bias":10},
+  changed_target:null,last_changed_target:"mfc:ar"});
 assert.match(elements.get("hcpesLivePoint").textContent, /1 \/ 10 · 10%/);
 assert.match(elements.get("hcpesLiveRateCard").className, /good/);
 assert.match(elements.get("hcpesLiveRate").textContent, /3\.0 s window/);
 assert.match(elements.get("hcpesLiveWindow").textContent, /parameter 1.7 \/ 3.0 s/);
 assert.equal(elements.get("hcpesLiveRetry").textContent, "18.2 s");
 assert.match(elements.get("hcpesLiveSetpoints").innerHTML, /Ar/);
+assert.match(elements.get("hcpesLiveSetpoints").innerHTML,
+  /class="recent-change"[^>]*>.*Ar/,
+  "last command remains outlined after change phase clears");
+assert.equal((elements.get("hcpesLiveSetpoints").innerHTML.match(/recent-change/g) || []).length,1);
+editor.updateStatus({running:true, phase:"collecting qualified samples",
+  applied_setpoints:{"mfc:ar":2,"supply:stage_bias":10},
+  last_changed_target:"supply:stage_bias"});
+assert.match(elements.get("hcpesLiveSetpoints").innerHTML,
+  /class="recent-change"[^>]*>.*Stage/,
+  "outline moves to the next successfully changed parameter");
 editor.updateStatus({running:false, phase:"complete",
-  applied_setpoints:{"mfc:ar":0,"mfc:bg":0}});
+  applied_setpoints:{"mfc:ar":0,"mfc:bg":0},last_changed_target:"mfc:ar"});
 assert.match(elements.get("hcpesLiveSetpoints").innerHTML, /Ar[\s\S]*0 sccm/);
+assert.doesNotMatch(elements.get("hcpesLiveSetpoints").innerHTML, /recent-change/,
+  "outline clears when the characterization is no longer running");
 assert.doesNotMatch(elements.get("hcpesLiveSetpoints").innerHTML, /Stage/,
   "cleanup clears de-energized supply commands while retaining zeroed MFCs");
 editor.updateStatus({running:true, phase:"timed settle", session_id:"positive-001",

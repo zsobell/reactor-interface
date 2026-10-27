@@ -5,15 +5,27 @@ connected to the reactor PC by USB.
 
 The reactor reads and logs it, commands HV OFF during cleanup, and can set its
 current limit after a fresh query confirms HV is already on. Every remote Set
-command carries the operator-approved 800 V voltage limit. HV can only be
-turned on at the front panel. See
+command carries the operator-approved 800 V voltage limit. The operator enables
+HV at the front panel; the first current Set from local mode asserts remote
+HV On to preserve that output during the control transfer. See
 [What this program commands, and why](#what-this-program-commands-and-why).
 
 Sources: XP Glassman *Series FL* instruction manual, doc **102002-168 Rev H**,
-26 Aug 2021 (Figures 18–37), and direct observation on this supply. Everything
-below marked CONFIRMED was seen on the wire on 2026-08-21.
-The 2026-09-30 current-control path has fake-device coverage but has not yet
-been qualified on the physical supply.
+26 Aug 2021 (Figures 18–37), the current
+[Rev J manual](https://www.xppower.com/storage/products/series/resources/FL_Instruction_Manual_750V-1500V.pdf),
+and direct observation on this supply. Everything below marked CONFIRMED was
+seen on the wire on 2026-08-21.
+The 2026-10-27 live check showed that a current Set without remote HV On
+switches this supply from local to remote and drops HV without a fault.
+After the guarded change, a 100 mA Set from local mode kept HV on in remote
+mode and the unloaded output settled near the 800 V limit. Current regulation
+under a plasma load still needs operator qualification.
+The front-panel current display and serial Query return **measured output
+current**, not the remote current program: the unloaded check showed about
+1.2 mA while the command was 100 mA, with the supply in CV mode. In remote
+serial mode, PRESET shows the *local* settings. The UI's **Commanded current
+limit** is the last acknowledged application command, not a supply setpoint
+readback.
 
 ---
 
@@ -197,7 +209,11 @@ not thereby hardware-qualified.
 `reactor/devices/glassman_fl.py` implements the full protocol, including
 `set_levels`, `set_hv`, `reset`, `set_current` and `hv_off`. Only `set_current`
 and `hv_off` are reachable from the supervisor. Current control requires a
-fresh HV-on query; the Set command carries 800 V and never asserts HV on.
+fresh HV-on query; the Set command carries 800 V. If the supply is local,
+it asserts remote HV On to retain the front-panel-enabled output across the
+transfer to serial control. When already remote, it leaves HV control alone.
+It queries again after the Set and errors if HV is off. Zach authorized this
+guarded behavior on 2026-10-27 following the live check.
 
 **Updated 2026-08-21:** one of them, `hv_off()`, is now wired up. Zach asked for
 HV to be commanded off whenever a run ends or is aborted. It is now used by
@@ -210,7 +226,7 @@ Two things about how the off is sent are load-bearing:
 - Any Set command moves the supply into **REMOTE** until LOC/REM is pressed.
   Expect the supply to be in remote after a run ends.
 
-There is still no remote HV-on command or arbitrary voltage control.
+There is still no standalone remote HV-on command or arbitrary voltage control.
 
 Three consequences, all deliberate:
 
@@ -304,8 +320,8 @@ Much of the early work used doc **102002-177 Rev M2**, the *EJ/ET/EY/FJ/FR*
 manual, because the FL manual was not to hand. It is a different product and
 misled on every specific: connector numbering, interlock pins, monitor
 resolution (10-bit vs 12-bit), the absence of an address byte, and a 1.5 s comms
-watchdog the FL does not appear to have. **Use 102002-168 Rev H for this
-supply.**
+watchdog the FL does not appear to have. **Use the FL-series 102002-168 manual
+(Rev H or newer) for this supply.**
 
 ### A note on the reference driver
 

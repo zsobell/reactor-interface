@@ -25,6 +25,7 @@ from .hcpes_recording import (
 )
 
 if TYPE_CHECKING:
+    from .sensor_archive import SensorArchive
     from .control.hcpes_model import PolarityCampaign, ResolvedHcpesPlan
     from .control.recipe import Recipe, RecipeProgress
     from .devices.ellipsometer import EllipsometerPoint
@@ -171,6 +172,10 @@ class RecordingService:
 
     def submit_event(self, entry: dict[str, Any]) -> bool:
         return self._submit(self.logger.write_event, entry)
+
+    def submit_sensor_sample(self, archive: SensorArchive,
+                             row: dict[str, Any]) -> bool:
+        return self._submit(archive.append, row)
 
     def submit_run_sample(
         self,

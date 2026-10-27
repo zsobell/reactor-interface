@@ -1,14 +1,15 @@
 """Analysis endpoints retain their contract and do not block the event loop."""
 import asyncio
+import json
 import sys
 import tempfile
 import threading
 from unittest.mock import patch
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from reactor.server.data import DataFiles, create_data_router
-from tests._support import Checker, request
+from tests._support import Checker, asgi_call, request
 
 
 async def main():
@@ -55,6 +56,74 @@ async def main():
         c.check("saved and downloaded CSV agree", saved.read_bytes() == data["csv"].encode())
         status, _ = await request(app, url, method="POST")
         c.check("empty upload still rejected", status == 400)
+
+        c.section("delete selected run data")
+        run = folder / "Test_260101_120000_run.csv"
+        cycle = folder / "Test_260101_120000_bycycle.csv"
+        events = folder / "Test_260101_120000_events.log"
+        other = folder / "Test_260101_130000_run.csv"
+        for path in (run, cycle, events, other):
+            path.write_text("test", encoding="utf-8")
+        identity = folder / "Test_260101_120000_analysis.json"
+        identity.write_text(json.dumps({"schema_version": 1, "name": "Test",
+            "date": "2026-01-01", "number": 1}), encoding="utf-8")
+        (folder / "Test_260101_130000_analysis.json").write_text(json.dumps({
+            "schema_version": 1, "name": "Better run", "date": "2026-01-01",
+            "number": 1}), encoding="utf-8")
+        selected = "Test/Test_260101_120000_bycycle.csv"
+        status, data = await request(app, "/api/data/files")
+        chosen = next(row for row in data["files"] if row["name"] == selected)
+        c.check("new run selector entry has readable name and date",
+                status == 200 and chosen["display_name"] == "Test · 2026-01-01")
+        status, data = await asgi_call(app, "POST", "/api/data/rename",
+            {"name": selected, "new_name": "Better run"})
+        c.check("rename updates persistent display identity",
+                status == 200 and data["display_name"] == "Better run · 2026-01-01 · 02"
+                and json.loads(identity.read_text(encoding="utf-8"))["name"] == "Better run",
+                str({"status": status, "response": data,
+                     "identity": identity.read_text(encoding="utf-8")}))
+        status, data = await request(app,
+            f"/api/data/delete-preview?name={selected}")
+        c.check("confirmation preview names exact run companions",
+                status == 200 and set(data["files"]) == {
+                    "Test/Test_260101_120000_run.csv",
+                    "Test/Test_260101_120000_bycycle.csv",
+                    "Test/Test_260101_120000_events.log",
+                    "Test/Test_260101_120000_analysis.json",
+                })
+        status, _ = await request(app,
+            "/api/data/file?name=../outside.csv", method="DELETE")
+        c.check("delete cannot escape the data directory", status == 404)
+        hcpes = root / "HCPES-test"
+        hcpes.mkdir()
+        hcpes_csv = hcpes / "points.csv"
+        hcpes_csv.write_text("point_index\n", encoding="utf-8")
+        status, _ = await request(app,
+            "/api/data/file?name=HCPES-test/points.csv", method="DELETE")
+        c.check("run-data delete cannot erase HCPES files",
+                status == 404 and hcpes_csv.exists())
+        guarded = FastAPI()
+
+        def refuse(_name):
+            raise HTTPException(409, "active run")
+
+        guarded.include_router(create_data_router(files, before_delete=refuse))
+        status, _ = await request(guarded,
+            f"/api/data/file?name={selected}", method="DELETE")
+        c.check("active-run guard preserves data", status == 409 and cycle.exists())
+        status, _ = await asgi_call(guarded, "POST", "/api/data/rename",
+            {"name": selected, "new_name": "Unsafe now"})
+        c.check("active-run guard also refuses rename", status == 409)
+        status, _ = await asgi_call(app, "POST", "/api/data/rename",
+            {"name": "Test/Test_ellipsometer.csv", "new_name": "Old data"})
+        c.check("historical files without an identity are not renamed", status == 404)
+        status, data = await request(app,
+            f"/api/data/file?name={selected}", method="DELETE")
+        c.check("only the chosen run stem is deleted",
+                status == 200 and len(data["deleted"]) == 4
+                and not run.exists() and not cycle.exists() and not events.exists()
+                and not identity.exists()
+                and other.exists() and side.exists())
 
         entered, release = threading.Event(), threading.Event()
         original = files.merge

@@ -38,11 +38,13 @@ Desktop.ini
 /config/run_params.json
 /config/prestart_recipes.json
 /config/hcpes_plans.json
+/config/hcpes_analysis_plots.json
 /config/aperture_lifetime.json
 /config/server_lifecycle.jsonl
 
 # Local browser/visual-QA fixtures
 /.visual-state/
+/.codex-remote-attachments/
 
 # Per-instance runtime process registry
 config/instances/

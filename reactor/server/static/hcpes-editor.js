@@ -315,7 +315,8 @@ export function createHcpesEditor({$, windowObj=window, fetchImpl=fetch, toast=(
       const active=runtime.applied_setpoints || {};
       setpoints.innerHTML=Object.entries(active).length ? Object.entries(active).map(([target,value]) => {
         const cap=capability(target), shown=Number(value)*axisDisplayScale(cap);
-        return `<span><i>${esc(cap?.label || target)}</i><strong>${esc(shown)} ${esc(axisDisplayUnit(cap))}</strong></span>`;
+        const recent=runtime.running && runtime.last_changed_target === target;
+        return `<span${recent ? ' class="recent-change" title="Last parameter changed"' : ""}><i>${esc(cap?.label || target)}</i><strong>${esc(shown)} ${esc(axisDisplayUnit(cap))}</strong></span>`;
       }).join("") : "—";
     }
     set("hcpesLiveNote", runtime.error || (runtime.running ? `Session ${runtime.session_id || ""} owns all HCPES controls.` : ""));

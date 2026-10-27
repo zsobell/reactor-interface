@@ -7,10 +7,12 @@ import json
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
-from reactor.control.hcpes import _robust_slope_a_per_min
+from reactor.control.clock import Clock
+from reactor.control.hcpes import HcpesController, _robust_slope_a_per_min
 from reactor.control.hcpes_model import HcpesPlan, resolve_plan
 from reactor.testing.virtual_reactor import VirtualReactor
 from tests._support import Checker, autotick, wait_for
@@ -69,6 +71,22 @@ async def rejects(awaitable, text: str) -> bool:
 
 async def main() -> int:
     c = Checker("test_hcpes_controller")
+    c.section("remaining-time estimate excludes initial plasma establishment")
+    now = [140.0]
+    progress = HcpesController(None, None, clock=Clock(elapsed=lambda: now[0]))
+    progress.resolved = SimpleNamespace(point_count=4)
+    progress._started_elapsed = 100.0
+    progress._sweep_started_elapsed = 130.0
+    progress._update_progress(1, 1, 0)
+    c.check("first point projects sweep time while elapsed stays total",
+            progress.state["elapsed_s"] == 40.0
+            and progress.state["estimated_remaining_s"] == 30.0)
+    now[0] = 150.0
+    progress._update_progress(2, 2, 0)
+    c.check("later point updates estimate from sweep average",
+            progress.state["elapsed_s"] == 50.0
+            and progress.state["estimated_remaining_s"] == 20.0)
+
     c.section("exclusive owner and successful condition")
     async with VirtualReactor() as vr:
         vr.instruments["ammeter"].value = 0.001
@@ -174,6 +192,41 @@ async def main() -> int:
                         for row in raw)
                 and any(row.get("exclusion_reason") == "stability_window"
                         for row in raw))
+
+    c.section("zero initial bias replaces a stale voltage before output on")
+    async with VirtualReactor() as vr:
+        vr.instruments["ammeter"].value = 0.001
+        bias = vr.supplies["stage_bias"]
+        bias.voltage_setpoint = 20.0
+        initial_plan = plan(vr.sup.cfg)
+        payload = initial_plan.model_dump(mode="json")
+        payload["initial_setpoints"]["supply:stage_bias"] = 0.0
+        resolved = resolve_plan(HcpesPlan.model_validate(payload), vr.sup.cfg)
+        output_programs = []
+        original_set_output = bias.set_output
+
+        async def capture_output(on):
+            if on:
+                output_programs.append(bias.voltage_setpoint)
+            await original_set_output(on)
+
+        bias.set_output = capture_output
+        ticker = await autotick(vr, period=0.005)
+        try:
+            await vr.sup.start_hcpes(
+                resolved, "zero-initial-bias", polarity_confirmed=True)
+            complete = await wait_for(lambda: not vr.sup.hcpes_running, timeout=3)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+        c.check("stale program is cleared before bias output is enabled",
+                complete and output_programs == [0.0]
+                and bias.voltage_calls[:2] == [0.0, 10.0],
+                str({"on_programs": output_programs,
+                     "voltage_calls": bias.voltage_calls}))
+        c.check("last changed parameter follows point-one bias command",
+                vr.sup.hcpes["last_changed_target"] == "supply:stage_bias",
+                str(vr.sup.hcpes["last_changed_target"]))
 
     c.section("independent initial plasma condition precedes sweep point one")
     async with VirtualReactor() as vr:

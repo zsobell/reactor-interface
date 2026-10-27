@@ -18,6 +18,7 @@ Logging starts on demand, not at launch, so idle time does not fill the disk.
 from __future__ import annotations
 
 import logging
+import json
 from functools import wraps
 import re
 import time
@@ -27,6 +28,7 @@ from typing import Any
 
 from .config import ReactorConfig
 from .run_report import format_run_params
+from .run_identity import META_SUFFIX, next_number
 
 #: column value that means "seconds since logging started"
 ELAPSED_KEY = "_elapsed"
@@ -445,7 +447,7 @@ class DataLogger:
         self.run_dir = self._run_folder(stamp)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         suffixes = ("_run.csv", "_bycycle.csv", "_events.log", "_errors.log")
-        all_companions = (*suffixes, "_run_params.txt", "_ellipsometer.csv")
+        all_companions = (*suffixes, "_run_params.txt", "_ellipsometer.csv", META_SUFFIX)
         while True:
             stem = self._collision_stem(self.run_dir, base_stem, all_companions)
             try:
@@ -456,6 +458,16 @@ class DataLogger:
         self.run_stem = stem
         self._run_fh, self._bycycle_fh, self._events_fh, self._errors_fh = handles
         self.run_path, self.bycycle_path, self.events_path, self.errors_path = paths
+        run_date = datetime.fromtimestamp(started_at).date().isoformat()
+        display_base = self.run_name or recipe_name or "Run"
+        identity = {
+            "schema_version": 1,
+            "name": display_base,
+            "date": run_date,
+            "number": next_number(self.dir, display_base, run_date),
+        }
+        with (self.run_dir / f"{stem}{META_SUFFIX}").open("x", encoding="utf-8") as handle:
+            json.dump(identity, handle, indent=2)
         self.event_rows = 0
         self.error_rows = 0
         self.run_started_at = started_at

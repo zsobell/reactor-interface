@@ -25,6 +25,7 @@ import re
 import sys
 import time
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, ".")
@@ -32,6 +33,7 @@ sys.path.insert(0, ".")
 from reactor import supervisor as supervisor_module
 from reactor.analysis import ellipsometer_merge as ell
 from reactor.server.app import merged_name
+from reactor.run_identity import META_SUFFIX, display_name, read_identity
 from reactor.testing.virtual_reactor import VirtualReactor
 from tests._support import Checker, autotick
 
@@ -173,16 +175,29 @@ async def main() -> int:
         log._run_fh.write("original\n")
         log._run_fh.flush()
         first_stem = log.run_stem
+        first_identity = read_identity(first.parent / f"{first_stem}{META_SUFFIX}")
         log.stop_run_export()
         second = log.start_run_export("ALD", fixed)
+        second_identity = read_identity(second.parent / f"{log.run_stem}{META_SUFFIX}")
         c.check("second run receives the _02 stem",
                 log.run_stem == first_stem + "_02", log.run_stem)
         c.check("the original trace was not truncated",
                 first.read_text(encoding="utf-8") == "original\n")
+        run_date = datetime.fromtimestamp(fixed).date().isoformat()
+        c.check("same-day run names show a simple 02 collision label",
+                first_identity is not None and second_identity is not None
+                and display_name(first_identity) == f"collision · {run_date}"
+                and display_name(second_identity) == f"collision · {run_date} · 02")
         c.check("every companion shares the allocated stem",
                 all(path.name.startswith(log.run_stem)
                     for path in (second, log.bycycle_path, log.events_path,
                                  log.errors_path)))
+        log.stop_run_export()
+        third = log.start_run_export("ALD", fixed + 60)
+        third_identity = read_identity(third.parent / f"{log.run_stem}{META_SUFFIX}")
+        c.check("a later same-day run receives 03 without showing its time",
+                third_identity is not None
+                and display_name(third_identity) == f"collision · {run_date} · 03")
         log.stop_run_export()
 
         ell1 = log.start_ellipsometer_capture(fixed)
@@ -239,7 +254,7 @@ async def main() -> int:
         out.unlink(missing_ok=True)
         temp.cleanup()
 
-    c.section("4. one run = one folder, one stem, no .json")
+    c.section("4. one run = one folder, one stem, one display record")
     async with VirtualReactor() as vr:
         vr.instruments["ammeter"].value = 1.0e-3
         log = vr.sup.logger
@@ -271,7 +286,9 @@ async def main() -> int:
         c.check("nothing the run wrote was left loose in data/",
                 not any(p.is_file() and p.name.startswith("Mo-042")
                         for p in data_dir.iterdir()))
-        c.check("no .json among them", not any(n.endswith(".json") for n in names),
+        c.check("only the analysis identity is JSON",
+                len([n for n in names if n.endswith(".json")]) == 1
+                and any(n.endswith(META_SUFFIX) for n in names),
                 ", ".join(names))
         c.check("the parameters file is a .txt",
                 any(n.endswith("_run_params.txt") for n in names))

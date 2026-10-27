@@ -15,9 +15,11 @@ import base64
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +153,7 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     isolated = paths is not None or supervisor is not None
     run_params_path = sup.paths.run_params if isolated else RUN_PARAMS_PATH
     analysis_layout_path = sup.paths.analysis_layout if isolated else ANALYSIS_LAYOUT_PATH
+    hcpes_plots_path = analysis_layout_path.with_name("hcpes_analysis_plots.json")
     kill_peers = shutdown_peers or (
         (lambda: instances.kill_others(directory=sup.paths.instances)) if isolated
         else _kill_other_reactor_servers)
@@ -181,8 +184,35 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     # runs the same version.  The page uses this per-process value to tell the
     # old server from the new one before it reports success.
     app.state.server_instance_id = secrets.token_urlsafe(12)
-    app.include_router(create_data_router(DataFiles(sup.logger.dir)))
-    app.include_router(create_hcpes_analysis_router(HcpesAnalysisFiles(sup.logger.dir)))
+    def before_run_data_delete(_name: str) -> None:
+        recording = sup.recording.status()
+        if (sup.recipes.busy or recording["run_export"].get("active")
+                or recording["ellipsometer"].get("active")):
+            raise HTTPException(409, "wait for the active run or capture to finish before deleting data")
+
+    app.include_router(create_data_router(
+        DataFiles(sup.logger.dir), before_delete=before_run_data_delete))
+    def before_hcpes_delete(name: str) -> None:
+        campaign_task = sup._hcpes_campaign_task
+        if (sup.hcpes_running or sup.recording.status()["hcpes"].get("active")
+                or (campaign_task is not None and not campaign_task.done())):
+            raise HTTPException(409, "stop the active HCPES session before deleting runs")
+        if any(
+            session.directory_name == name
+            for campaign in sup.hcpes_plans.load().campaigns
+            for session in campaign.sessions
+        ):
+            raise HTTPException(409, "run belongs to a linked campaign and cannot be deleted")
+
+    def before_hcpes_rename(_name: str) -> None:
+        campaign_task = sup._hcpes_campaign_task
+        if (sup.hcpes_running or sup.recording.status()["hcpes"].get("active")
+                or (campaign_task is not None and not campaign_task.done())):
+            raise HTTPException(409, "stop the active HCPES session before renaming runs")
+
+    app.include_router(create_hcpes_analysis_router(
+        HcpesAnalysisFiles(sup.logger.dir), before_delete=before_hcpes_delete,
+        before_rename=before_hcpes_rename))
 
     # Optional login (see BasicAuthMiddleware). Off unless REACTOR_PASSWORD is
     # set, so localhost development is unchanged; set it before exposing the
@@ -229,7 +259,7 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     if STATIC.exists():
         app.mount("/static", ReloadableStaticFiles(directory=STATIC), name="static")
 
-    # -- data files (read-only; feeds the analysis page) ------------------- #
+    # -- analysis data files and confirmed deletion ------------------------ #
 
     # -- state ----------------------------------------------------------- #
 
@@ -295,15 +325,37 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         return {"samples": sup.trend(limit)}
 
     @app.get("/api/sensor-trend")
-    async def get_sensor_trend(key: str) -> dict[str, Any]:
-        """One approved pressure/temperature series from bounded live history."""
+    async def get_sensor_trend(key: str, start: float | None = None,
+                               end: float | None = None) -> dict[str, Any]:
+        """One approved sensor, with optional bounds from durable history."""
         spec = sensor_plot_specs(cfg).get(key)
         if spec is None:
             raise HTTPException(status_code=404, detail="unknown plottable sensor")
+        recent = sup.trend(18000)
+        first_archive = await asyncio.to_thread(sup.sensor_archive.earliest)
+        available = min((t for t in (first_archive,
+                         recent[0]["t"] if recent else None) if t is not None),
+                        default=None)
+        if start is None and end is None:
+            samples = compact_sensor_history(recent, spec.column)
+        else:
+            from_t = start if start is not None else (available or time.time())
+            to_t = end if end is not None else time.time()
+            if not all(math.isfinite(t) for t in (from_t, to_t)) or to_t <= from_t:
+                raise HTTPException(status_code=400, detail="invalid sensor time range")
+            oldest_recent = recent[0]["t"] if recent else float("inf")
+            archive_end = min(to_t, oldest_recent - 1e-6)
+            archived = (await asyncio.to_thread(sup.sensor_archive.query,
+                         spec.column, from_t, archive_end, buckets=1400)
+                        if archive_end > from_t else [])
+            live = (row for row in recent if from_t <= row["t"] <= to_t)
+            samples = archived + compact_sensor_history(live, spec.column)
         return {
             "key": spec.key, "label": spec.label, "unit": spec.unit,
             "pressure": spec.pressure,
-            "samples": compact_sensor_history(sup.trend(18000), spec.column),
+            "availableFrom": available,
+            "archiveActive": sup._sensor_archive_ready,
+            "samples": samples,
         }
 
     @app.get("/api/config")
@@ -449,6 +501,30 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         analysis_layout_path.parent.mkdir(parents=True, exist_ok=True)
         analysis_layout_path.write_text(
             json.dumps(layout, indent=2), encoding="utf-8")
+        return {"ok": True}
+
+    @app.get("/api/hcpes/analysis/plots")
+    async def get_hcpes_analysis_plots() -> dict[str, Any]:
+        try:
+            return json.loads(hcpes_plots_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"plots": None}
+
+    @app.post("/api/hcpes/analysis/plots")
+    async def set_hcpes_analysis_plots(payload: dict = Body(default={})) -> dict[str, bool]:
+        plots = payload.get("plots")
+        if not isinstance(plots, list) or len(plots) > 100:
+            raise HTTPException(422, "expected up to 100 saved HCPES plots")
+        for plot in plots:
+            if (not isinstance(plot, dict) or not isinstance(plot.get("name"), str)
+                    or not plot["name"].strip() or len(plot["name"]) > 100
+                    or plot.get("view") not in ("line", "heat", "trend")
+                    or not isinstance(plot.get("x"), str)
+                    or not isinstance(plot.get("metric"), str)
+                    or not isinstance(plot.get("filters"), dict)):
+                raise HTTPException(422, "invalid saved HCPES plot")
+        hcpes_plots_path.parent.mkdir(parents=True, exist_ok=True)
+        hcpes_plots_path.write_text(json.dumps({"plots": plots}, indent=2), encoding="utf-8")
         return {"ok": True}
 
     # -- server shutdown / restart ---------------------------------------- #

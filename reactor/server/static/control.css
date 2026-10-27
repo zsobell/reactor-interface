@@ -266,6 +266,7 @@
   .hcpes-current-params>div{display:flex;flex-wrap:wrap;gap:5px}
   .hcpes-current-params span{display:flex;gap:5px;border:1px solid var(--line);border-radius:5px;
         padding:2px 6px;background:#0d1117}
+  .hcpes-current-params span.recent-change{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok)}
   .hcpes-current-params i{font-style:normal;color:var(--dim)}
   .hcpes-current-params strong{font-family:var(--mono);color:var(--fg)}
   .hcpes-live-note{min-height:17px;margin-top:6px;font:11px var(--mono);color:var(--warn)}

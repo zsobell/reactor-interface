@@ -20,7 +20,9 @@ async def main():
         path = sup.logger.run_path
         entered, release = threading.Event(), threading.Event()
         worker = sup.recording
-        worker.max_pending = 3
+        # Run and manual samples plus the five-second sensor archive sample
+        # fill this queue while the worker is stalled.
+        worker.max_pending = 4
         def stall():
             entered.set()
             if not release.wait(5):

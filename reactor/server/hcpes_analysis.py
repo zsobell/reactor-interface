@@ -1,4 +1,4 @@
-"""Read-only HCPES session and polarity-campaign analysis endpoints.
+"""HCPES session and polarity-campaign analysis endpoints.
 
 This module deliberately knows nothing about devices or the Supervisor.  It
 validates immutable recording bundles below the configured data directory and
@@ -10,10 +10,11 @@ import contextlib
 import csv
 import json
 import math
+import shutil
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 import yaml
 
 from ..hcpes_recording import SCHEMA_VERSION
@@ -64,6 +65,52 @@ class HcpesAnalysisFiles:
             raise HTTPException(404, "HCPES source is not a directory")
         return directory
 
+    def delete_session(self, name: str) -> None:
+        """Remove one complete HCPES session directory, never a campaign."""
+        if Path(name).name != name or name in (".", ".."):
+            raise HTTPException(404, "not a top-level HCPES session bundle")
+        directory = self._source_dir(name)
+        if (directory.parent != self.directory or directory.name != name
+                or not directory.name.startswith("HCPES-")):
+            raise HTTPException(404, "not a top-level HCPES session bundle")
+        manifest_path = directory / "manifest.yaml"
+        if not manifest_path.is_file():
+            raise HTTPException(404, "not an HCPES session bundle")
+        manifest = self._yaml(manifest_path)
+        if manifest.get("kind") != "hcpes_characterization_session":
+            raise HTTPException(404, "not an HCPES session bundle")
+        try:
+            shutil.rmtree(directory)
+        except OSError as exc:
+            raise HTTPException(500, f"could not delete HCPES session: {exc}") from exc
+
+    def rename(self, name: str, new_name: str) -> dict[str, Any]:
+        """Change a source's display name without changing its data or identity."""
+        title = new_name.strip()
+        if not title or len(title) > 100 or any(ord(ch) < 32 for ch in title):
+            raise HTTPException(422, "run name must be 1–100 printable characters")
+        directory = self._source_dir(name)
+        if directory.parent != self.directory:
+            raise HTTPException(404, "not a top-level HCPES source")
+        is_campaign = (directory / "campaign.yaml").is_file()
+        path = directory / ("campaign.yaml" if is_campaign else "manifest.yaml")
+        document = self._yaml(self._contained(path))
+        expected = "hcpes_polarity_campaign" if is_campaign else "hcpes_characterization_session"
+        if document.get("kind") != expected:
+            raise HTTPException(404, "not an HCPES source")
+        section = "campaign" if is_campaign else "session"
+        document[section]["display_name"] = title
+        temporary = path.with_suffix(".yaml.rename.tmp")
+        try:
+            temporary.write_text(yaml.safe_dump(document, sort_keys=False,
+                                               allow_unicode=True), encoding="utf-8")
+            temporary.replace(path)
+        except OSError as exc:
+            raise HTTPException(500, f"could not rename HCPES source: {exc}") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        return next(entry for entry in self.entries() if entry["name"] == name)
+
     @staticmethod
     def _yaml(path: Path) -> dict[str, Any]:
         try:
@@ -89,10 +136,13 @@ class HcpesAnalysisFiles:
                 entries.append({
                     "name": path.parent.relative_to(self.directory).as_posix(),
                     "kind": "session",
-                    "title": session.get("id", path.parent.name),
+                    "title": session.get("display_name") or
+                             (doc.get("plan") or {}).get("name") or
+                             session.get("id", path.parent.name),
                     "status": session.get("status", "unknown"),
                     "polarity": session.get("stage_polarity"),
                     "started_at": session.get("started_at"),
+                    "date": str(session.get("started_at") or "")[:10],
                     "points": (doc.get("counts") or {}).get("points", 0),
                     "mtime": stat.st_mtime,
                 })
@@ -107,13 +157,22 @@ class HcpesAnalysisFiles:
                 entries.append({
                     "name": path.parent.relative_to(self.directory).as_posix(),
                     "kind": "campaign",
-                    "title": campaign.get("name") or campaign.get("id", path.parent.name),
+                    "title": campaign.get("display_name") or campaign.get("name") or
+                             campaign.get("id", path.parent.name),
                     "status": "complete" if campaign.get("complete") else "partial",
                     "polarity": "linked",
                     "started_at": campaign.get("created_at"),
+                    "date": str(campaign.get("created_at") or "")[:10],
                     "points": (doc.get("derived") or {}).get("row_count", 0),
                     "mtime": stat.st_mtime,
                 })
+        counts: dict[tuple[str, str], int] = {}
+        for entry in sorted(entries, key=lambda row: (row["started_at"] or "", row["name"])):
+            key = (entry["date"], entry["title"].casefold())
+            counts[key] = counts.get(key, 0) + 1
+            ordinal = counts[key]
+            entry["display_name"] = (f'{entry["title"]} · {entry["date"]}'
+                                     + (f" · {ordinal:02d}" if ordinal > 1 else ""))
         entries.sort(key=lambda entry: entry["mtime"], reverse=True)
         return entries
 
@@ -167,7 +226,9 @@ class HcpesAnalysisFiles:
             "schema_version": SCHEMA_VERSION,
             "kind": "session",
             "name": name,
-            "title": session.get("id", directory.name),
+            "title": session.get("display_name") or
+                     (manifest.get("plan") or {}).get("name") or
+                     session.get("id", directory.name),
             "compatible": True,
             "compatibility_issues": [],
             "session": session,
@@ -248,7 +309,8 @@ class HcpesAnalysisFiles:
             "schema_version": SCHEMA_VERSION,
             "kind": "campaign",
             "name": name,
-            "title": (document.get("campaign") or {}).get("name", directory.name),
+            "title": (document.get("campaign") or {}).get("display_name") or
+                     (document.get("campaign") or {}).get("name", directory.name),
             "compatible": not issues,
             "compatibility_issues": issues,
             "campaign": document.get("campaign") or {},
@@ -307,7 +369,10 @@ class HcpesAnalysisFiles:
         }
 
 
-def create_hcpes_analysis_router(files: HcpesAnalysisFiles) -> APIRouter:
+def create_hcpes_analysis_router(
+    files: HcpesAnalysisFiles, *, before_delete: Callable[[str], None] | None = None,
+    before_rename: Callable[[str], None] | None = None,
+) -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/hcpes/analysis/sources")
@@ -317,6 +382,20 @@ def create_hcpes_analysis_router(files: HcpesAnalysisFiles) -> APIRouter:
     @router.get("/api/hcpes/analysis/source")
     def source(name: str):
         return files.load(name)
+
+    @router.delete("/api/hcpes/analysis/source")
+    def delete_source(name: str):
+        if before_delete is not None:
+            before_delete(name)
+        files.delete_session(name)
+        return {"deleted": name}
+
+    @router.post("/api/hcpes/analysis/rename")
+    def rename_source(payload: dict = Body(...)):
+        name = str(payload.get("name") or "")
+        if before_rename is not None:
+            before_rename(name)
+        return files.rename(name, str(payload.get("new_name") or ""))
 
     @router.get("/api/hcpes/analysis/raw")
     def raw(

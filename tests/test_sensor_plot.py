@@ -5,7 +5,9 @@ import sys
 
 from reactor.server.app import create_app
 from reactor.server.sensor_plot import compact_sensor_history, sensor_plot_specs
+from reactor.sensor_archive import SensorArchive
 from reactor.testing.virtual_reactor import VirtualReactor
+from tools.bridge_sensor_archive import select_rows
 from tests._support import Checker, request
 
 
@@ -26,6 +28,14 @@ async def main():
                 any(a["id"] == "bakeout2" and a["label"] == "Bakeout temp 2"
                     and a["value"] == 67.5 for a in state["aux"])
                 and vr.sup.history[-1]["aux_bakeout2"] == 67.5)
+        c.check("long popup scrollback samples the sensor without extra device reads",
+                vr.sup.sensor_history[-1]["aux_bakeout2"] == 67.5)
+        await vr.sup.recording.run(lambda: None)  # flush earlier archive submission
+        archived_at = vr.sup.sensor_history[-1]["t"]
+        reopened = SensorArchive(vr.sup.sensor_archive.path)
+        c.check("sensor archive survives a fresh reader after recording",
+                reopened.query("aux_bakeout2", archived_at-1, archived_at+1)
+                == [[archived_at, 67.5]])
         specs = sensor_plot_specs(vr.sup.cfg)
         c.check("pressure and thermocouple sensors are offered",
                 {"pressure", "inst.auger_pressure", "stage.temp",
@@ -55,7 +65,7 @@ async def main():
                 and samples[-1] == [3999.0, 1e-8])
         c.check("metadata identifies units and pressure axis",
                 payload["key"] == "pressure" and payload["unit"] == "Torr"
-                and payload["pressure"] is True)
+                and payload["pressure"] is True and payload["archiveActive"] is True)
         c.check("plot request performs no additional device read",
                 vr.sup._read_seq == read_seq)
         status, payload = await request(app, "/api/sensor-trend?key=inst.auger_pressure")
@@ -69,6 +79,23 @@ async def main():
                 status == 200 and payload["label"] == "Bakeout temp 2"
                 and payload["pressure"] is False and payload["unit"] == "C"
                 and payload["samples"][0][1] == 67.5)
+        vr.sup.sensor_archive.append({"t": 500.0, "aux_bakeout2": 55.0})
+        status, payload = await request(
+            app, "/api/sensor-trend?key=aux.bakeout2&start=500&end=3999")
+        c.check("manual popup range includes durable history older than Run chart",
+                status == 200 and payload["samples"][0] == [500.0, 55.0]
+                and payload["samples"][1] == [1000.0, 67.5])
+        c.check("reimporting a captured row does not duplicate it",
+                reopened.append_many([{"t": 500.0, "aux_bakeout2": 55.0}]) == 0)
+        reopened.append_many([
+            {"t": 600.0, "pressure": 1e-8},
+            {"t": 601.0, "pressure": 1e-12},
+            {"t": 602.0, "pressure": None},
+            {"t": 603.0, "pressure": 1e-5},
+        ])
+        projected = reopened.query("pressure", 600, 604, buckets=1)
+        c.check("disk projection preserves extrema and an unavailable gap",
+                {point[1] for point in projected} == {1e-8, 1e-12, None, 1e-5})
         for key in ("inst.ammeter", "mfc.ar.flow", "aux.not_connected"):
             status, _ = await request(app, f"/api/sensor-trend?key={key}")
             c.check(f"unapproved series {key} is refused", status == 404)
@@ -76,6 +103,12 @@ async def main():
         [{"t": 1, "pressure": 2}, {"t": 2, "pressure": None}], "pressure")
     c.check("short history preserves exact samples and missing values",
             compact == [[1.0, 2.0], [2.0, None]])
+    bridged = select_rows([{"t": t, "pressure": t, "not_a_sensor": 1}
+                           for t in (100, 102, 105, 107, 110)],
+                          {"pressure"}, 100)
+    c.check("read-only bridge resumes without duplicating or keeping controls",
+            bridged == [{"t": 105, "pressure": 105},
+                        {"t": 110, "pressure": 110}])
     return c.summary()
 
 

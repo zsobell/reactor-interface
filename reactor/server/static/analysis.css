@@ -101,6 +101,10 @@
   .hcpes-analysis-summary span{font-size:9px;text-transform:uppercase;letter-spacing:.07em;
                                color:var(--dim)}
   .hcpes-analysis-controls{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px}
+  .hcpes-saved-row{margin-bottom:12px;align-items:end}
+  .hcpes-saved-row label{display:flex;flex-direction:column;gap:3px;min-width:min(300px,70vw);font-size:10px;color:var(--dim);text-transform:uppercase}
+  .hcpes-saved-row select{width:100%}
+  .hcpes-view-warning{color:var(--bad);font-size:11px}
   .hcpes-analysis-controls label,.hcpes-analysis-filters label{display:flex;flex-direction:column;
                                       gap:3px;font-size:10px;color:var(--dim);
                                       text-transform:uppercase;letter-spacing:.06em}
@@ -113,9 +117,9 @@
   .hcpes-analysis-canvasbox{height:430px;margin-top:12px;position:relative;border:1px solid var(--line);
                             border-radius:8px;overflow:hidden;background:#0d1117}
   .hcpes-analysis-canvasbox canvas,.hcpes-raw-canvasbox canvas{width:100%;height:100%;display:block}
-  .hcpes-hover{position:absolute;pointer-events:none;max-width:430px;padding:7px 9px;
-               border:1px solid var(--line);border-radius:6px;background:rgba(13,17,23,.96);
-               box-shadow:0 4px 14px #0008;font:11px/1.45 var(--mono);white-space:pre-line}
+  .hcpes-hover{margin-top:8px;min-height:40px;padding:7px 9px;
+               border:1px solid var(--line);border-radius:6px;background:#101722;
+               color:var(--dim);font:11px/1.45 var(--mono);white-space:pre-line;overflow-wrap:anywhere}
   .hcpes-analysis-legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;color:var(--dim);
                          font-size:11px}
   .hcpes-analysis-legend span{display:flex;align-items:center;gap:4px}

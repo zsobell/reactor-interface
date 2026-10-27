@@ -83,6 +83,23 @@ async def main() -> int:
         st, body = await call(app, "GET", "/api/run_params")
         c.check("GET /api/run_params still answers", st == 200 and "params" in body,
                 f"{st} {str(body)[:60]}")
+
+        c.section("6. HCPES saved plots persist separately")
+        st, body = await call(app, "GET", "/api/hcpes/analysis/plots")
+        c.check("no HCPES plots saved yet", st == 200 and body == {"plots": None})
+        plots = {"plots": [{"name": "Current map", "view": "heat",
+                            "x": "signed_stage_bias_v", "heatY": "setpoint:mfc:ar",
+                            "metric": "stage_current_mean_a", "filters": {}}]}
+        st, body = await call(app, "POST", "/api/hcpes/analysis/plots", plots)
+        c.check("HCPES plot POST accepted", st == 200 and body == {"ok": True})
+        st, body = await call(app, "GET", "/api/hcpes/analysis/plots")
+        c.check("HCPES plot round trips", st == 200 and body == plots)
+        st, _ = await call(app, "POST", "/api/hcpes/analysis/plots",
+                           {"plots": [{"name": "", "view": "heat", "x": "x",
+                                       "metric": "y", "filters": {}}]})
+        c.check("blank plot names rejected", st == 422)
+        st, body = await call(app, "GET", "/api/analysis_layout")
+        c.check("run analysis layout stays independent", body == {"layout": None})
     finally:
         app_mod.ANALYSIS_LAYOUT_PATH = original
 

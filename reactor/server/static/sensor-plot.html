@@ -27,12 +27,14 @@
         <button data-window="300">5 min</button>
         <button data-window="900">15 min</button>
         <button data-window="3600" class="active">1 hour</button>
+        <span id="manualMode" class="hidden">Custom time range</span>
         <span id="pointCount"></span>
       </div>
       <div class="bounds">
         <label for="xMin">Time from</label><input id="xMin" type="datetime-local" step="1">
         <label for="xMax">to</label><input id="xMax" type="datetime-local" step="1">
       </div>
+      <div class="hint">Leave “to” blank to follow new data. Drag across the plot to zoom; hover and use arrow keys to pan or zoom.</div>
       <div class="bounds">
         <label for="yMin" id="yLabel">Value</label><input id="yMin" placeholder="auto min" inputmode="decimal">
         <label for="yMax">to</label><input id="yMax" placeholder="auto max" inputmode="decimal">

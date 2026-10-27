@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ..analysis import ellipsometer_merge as ell
+from ..run_identity import META_SUFFIX, display_name, next_number, read_identity
 
 def merged_name(reactor_run: str, sidecar: str, filename: str) -> str:
     """Name the merged file after the RUN, not after the dropped refit file.
@@ -74,10 +76,92 @@ class DataFiles:
             for p in d.rglob(pattern):
                 with contextlib.suppress(OSError):
                     st = p.stat()
+                    identity = self.identity_for(p)
                     out.append({"name": p.relative_to(d).as_posix(),
-                                "size": st.st_size, "mtime": st.st_mtime})
+                                "size": st.st_size, "mtime": st.st_mtime,
+                                "run_name": identity["name"] if identity else None,
+                                "display_name": display_name(identity) if identity else None})
         out.sort(key=lambda f: f["mtime"], reverse=True)
         return out
+
+    @staticmethod
+    def identity_path(path: Path) -> Path | None:
+        for suffix in ("_reactor_synced.csv", "_bycycle.csv", "_run.csv"):
+            if path.name.endswith(suffix):
+                return path.with_name(path.name[:-len(suffix)] + META_SUFFIX)
+        return None
+
+    def identity_for(self, path: Path) -> dict | None:
+        identity_path = self.identity_path(path)
+        return read_identity(identity_path) if identity_path else None
+
+    def rename(self, name: str, new_name: str) -> dict[str, Any]:
+        selected = self.in_data_dir(name)
+        identity_path = self.identity_path(selected)
+        identity = read_identity(identity_path) if identity_path else None
+        if (identity is None or identity_path.parent != selected.parent
+                or any(part.startswith("HCPES-") for part in
+                       selected.relative_to(self.directory).parts)):
+            raise HTTPException(404, "run has no editable analysis name")
+        new_name = new_name.strip()
+        if (not new_name or len(new_name) > 80
+                or any(ord(char) < 32 for char in new_name)):
+            raise HTTPException(422, "run name must be 1-80 printable characters")
+        if new_name != identity["name"]:
+            if new_name.casefold() != identity["name"].casefold():
+                identity["number"] = next_number(
+                    self.directory, new_name, identity["date"], exclude=identity_path)
+            identity["name"] = new_name
+            temporary = identity_path.with_suffix(".json.tmp")
+            try:
+                temporary.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+                temporary.replace(identity_path)
+            except OSError as exc:
+                raise HTTPException(500, f"could not rename run: {exc}") from exc
+        return {"name": name, "run_name": identity["name"],
+                "display_name": display_name(identity)}
+
+    def delete_targets(self, name: str) -> list[Path]:
+        """Find the selected CSV and companions with its exact run stem."""
+        if Path(name).is_absolute():
+            raise HTTPException(404, "not a deletable run CSV")
+        selected = self.in_data_dir(name)
+        if (not selected.is_file() or selected.suffix.lower() != ".csv"
+                or any(part.startswith("HCPES-") for part in
+                       selected.relative_to(self.directory).parts)
+                or (self.directory / name).absolute() != selected):
+            raise HTTPException(404, "not a deletable run CSV")
+        suffixes = (
+            "_reactor_synced.csv", "_bycycle.csv", "_run.csv",
+            "_events.log", "_errors.log", "_run_params.txt",
+            "_ellipsometer.csv", META_SUFFIX,
+        )
+        suffix = next((end for end in suffixes if selected.name.endswith(end)), None)
+        if suffix is None:
+            return [selected]
+        stem = selected.name[:-len(suffix)]
+        targets = [selected.parent / f"{stem}{end}" for end in suffixes]
+        return [path for path in targets if path.is_file() and not path.is_symlink()]
+
+    def delete_preview(self, name: str) -> dict[str, Any]:
+        return {"name": name, "files": [
+            path.relative_to(self.directory).as_posix()
+            for path in self.delete_targets(name)]}
+
+    def delete(self, name: str) -> dict[str, Any]:
+        targets = self.delete_targets(name)
+        removed = []
+        for path in targets:
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise HTTPException(500, f"could not delete {path.name}: {exc}") from exc
+            removed.append(path.relative_to(self.directory).as_posix())
+        parent = targets[0].parent
+        if parent != self.directory:
+            with contextlib.suppress(OSError):
+                parent.rmdir()  # only remove the folder when no other data remains
+        return {"deleted": removed}
 
     def merge(self, dyn_text: str, sidecar: str, reactor_run: str = "",
               channels: str = "", filename: str = "refit") -> dict:
@@ -157,7 +241,9 @@ class DataFiles:
 
 
 
-def create_data_router(files: DataFiles) -> APIRouter:
+def create_data_router(
+    files: DataFiles, *, before_delete: Callable[[str], None] | None = None,
+) -> APIRouter:
     router = APIRouter()
     kinds = {"_bycycle.csv": "by cycle", "_run.csv": "run (by time)",
              "_reactor_synced.csv": "merged + ellipsometry",
@@ -174,6 +260,23 @@ def create_data_router(files: DataFiles) -> APIRouter:
     @router.get("/api/data/file")
     def get_file(name: str):
         return FileResponse(files.in_data_dir(name), media_type="text/csv")
+
+    @router.get("/api/data/delete-preview")
+    def delete_preview(name: str):
+        return files.delete_preview(name)
+
+    @router.delete("/api/data/file")
+    def delete_file(name: str):
+        if before_delete is not None:
+            before_delete(name)
+        return files.delete(name)
+
+    @router.post("/api/data/rename")
+    def rename_file(payload: dict = Body(...)):
+        name = str(payload.get("name") or "")
+        if before_delete is not None:
+            before_delete(name)
+        return files.rename(name, str(payload.get("new_name") or ""))
 
     @router.get("/api/ellipsometer/sidecars")
     def list_sidecars():

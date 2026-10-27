@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   axisKeys, continuousOrder, displayScale, displayValue, filterPoints, heatCells,
   heatColour, label, metricKeys, metricValue, pointConditionLines, rawCurrent, sliceGroups,
+  reconcilePlot,
 } from "../../reactor/server/static/hcpes-analysis.js";
 
 const source = {
@@ -75,5 +76,23 @@ assert.equal(zero.value,.0025,"duplicate cells average qualified point summaries
 assert.equal(zero.points.length,2,"heat cell retains both source points");
 assert.equal(rawCurrent({measurements:{"inst.ammeter":.001}}),.001);
 assert.equal(rawCurrent({measurements:{"inst.ammeter":"bad"}}),null);
+
+const saved = {name:"Current map",view:"heat",x:"signed_stage_bias_v",
+  heatY:"setpoint:mfc:ar",metric:"stage_current_mean_a",
+  filters:{"setpoint:supply:grid_bias":"100"}};
+assert.deepEqual(reconcilePlot(saved,source),{
+  view:"heat",x:"signed_stage_bias_v",heatY:"setpoint:mfc:ar",
+  metric:"stage_current_mean_a",filters:{"setpoint:supply:grid_bias":"100"},
+  unavailable:[],
+},"saved plot reapplies to a compatible new source");
+const narrower={...source,fields:source.fields.filter(key=>key!=="setpoint:mfc:ar"),
+  points:source.points.map(({"setpoint:mfc:ar":_ar,...point})=>point)};
+const adjusted=reconcilePlot(saved,narrower);
+assert.equal(adjusted.x,"signed_stage_bias_v");
+assert.notEqual(adjusted.heatY,"setpoint:mfc:ar");
+assert.ok(adjusted.unavailable.includes("MFC ar (sccm)"),
+  "missing axis is reported instead of silently retained");
+assert.deepEqual(reconcilePlot({view:"trend",x:"acquisition_order",
+  metric:"stage_current_mean_a",filters:{}},source).unavailable,[]);
 
 console.log("PASS HCPES analysis filters, signed ordering, heat cells, and provenance");

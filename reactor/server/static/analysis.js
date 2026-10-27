@@ -11,6 +11,7 @@ const LS_KEY = "reactorAnalysis.v1";
 /** The loaded file: {name, n, header[], columns{name->Float64Array},
     numeric[], binary:Set, text[]}  (text[] = non-numeric column names) */
 let DATA = null;
+let FILES = [];
 
 /** Dropped Auger spectra, key -> dataset of the SAME shape as DATA, so every
     drawing and export path below works on one without knowing where it came
@@ -649,8 +650,9 @@ function adopt(name, text){
     const e = finiteExtent(xcol, false);
     if(e) range = `  ·  ${pretty(seedX())} ${fmtTick(e[0])} → ${fmtTick(e[1])}`;
   }
+  const entry = FILES.find(file => file.name === DATA.name);
   $("fileInfo").innerHTML =
-    `<b>${esc(DATA.name)}</b>  ·  ${DATA.n} rows  ·  ${DATA.numeric.length} numeric columns${esc(range)}`;
+    `<b>${esc(entry?.display_name || DATA.name)}</b>  ·  ${DATA.n} rows  ·  ${DATA.numeric.length} numeric columns${esc(range)}`;
   // Existing plots keep their column names and re-resolve against the new
   // file; only a plot with nothing set gets seeded.
   for(const p of LAYOUT.plots){
@@ -673,14 +675,25 @@ async function loadServerFile(name){
   adopt(name, await r.text());
 }
 
+function updateDeleteRun(){
+  const name = $("srcSel").value;
+  const entry = FILES.find(file => file.name === name);
+  $("renameBtn").disabled = !entry?.run_name;
+  $("deleteBtn").disabled = !name || name.startsWith("HCPES-");
+  $("deleteBtn").title = name.startsWith("HCPES-")
+    ? "Delete HCPES sessions from the HCPES characterization tab"
+    : "Delete selected run data";
+}
+
 async function rescan(){
   try{
     const j = await (await fetch("/api/data/files")).json();
+    FILES = j.files;
     const sel = $("srcSel");
     const prev = sel.value;
     sel.innerHTML = j.files.length
       ? j.files.map(f =>
-          `<option value="${esc(f.name)}">${esc(f.name)}  —  ${esc(f.kind)}, ${(f.size/1024).toFixed(0)} kB</option>`
+          `<option value="${esc(f.name)}" title="${esc(f.name)}">${esc(f.display_name || f.name)}  —  ${esc(f.kind)}</option>`
         ).join("")
       : `<option value="">— no CSVs in ${esc(j.dir)} —</option>`;
     // Default to the newest plot-ready file. Files are newest-first, but a
@@ -690,9 +703,12 @@ async function rescan(){
               || j.files.find(f => f.name.endsWith("_bycycle.csv"));
     if(best) sel.value = best.name;
     if(prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+    updateDeleteRun();
   }catch(_){
+    FILES = [];
     $("srcSel").innerHTML =
       `<option value="">— data folder unavailable (is the server running?) —</option>`;
+    updateDeleteRun();
   }
 }
 
@@ -707,6 +723,49 @@ $("loadBtn").onclick = async () => {
   catch(e){ toast(String(e.message || e)); }
 };
 $("rescanBtn").onclick = rescan;
+$("srcSel").onchange = updateDeleteRun;
+$("renameBtn").onclick = async () => {
+  const entry = FILES.find(file => file.name === $("srcSel").value);
+  if(!entry?.run_name) return;
+  const newName = prompt("New run name:", entry.run_name)?.trim();
+  if(!newName || newName === entry.run_name) return;
+  try{
+    const response = await fetch("/api/data/rename", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:entry.name,new_name:newName})});
+    if(!response.ok) throw new Error((await response.json()).detail || `rename failed (${response.status})`);
+    const renamed = await response.json();
+    await rescan();
+    if(DATA?.name === entry.name) $("fileInfo").querySelector("b").textContent = renamed.display_name;
+    toast(`Renamed run to ${renamed.display_name}`, true);
+  }catch(error){ toast(error.message || String(error)); }
+};
+$("deleteBtn").onclick = async () => {
+  const name = $("srcSel").value;
+  if(!name) return;
+  try{
+    const preview = await fetch("/api/data/delete-preview?name=" + encodeURIComponent(name));
+    if(!preview.ok) throw new Error((await preview.json()).detail || `delete preview failed (${preview.status})`);
+    const files = (await preview.json()).files;
+    if(!confirm(`Permanently delete these ${files.length} data file${files.length === 1 ? "" : "s"}?\n\n${files.join("\n")}`)) return;
+    $("deleteBtn").disabled = true;
+    const response = await fetch("/api/data/file?name=" + encodeURIComponent(name), {method:"DELETE"});
+    if(!response.ok) throw new Error((await response.json()).detail || `delete failed (${response.status})`);
+    const removed = (await response.json()).deleted;
+    if(DATA && removed.includes(DATA.name)){
+      DATA = null;
+      $("fileInfo").textContent = "no file loaded";
+      renderGrid();
+    }
+    if(removed.includes(NEWEST_SYNCED)) NEWEST_SYNCED = "";
+    await rescan();
+    await loadEllSidecars();
+    toast(`Deleted ${removed.length} data file${removed.length === 1 ? "" : "s"}`, true);
+  }catch(error){
+    updateDeleteRun();
+    toast(error.message || String(error));
+  }
+};
 
 $("drop").onclick = () => $("fileInput").click();
 $("fileInput").onchange = async ev => {

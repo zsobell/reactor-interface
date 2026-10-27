@@ -212,7 +212,7 @@ Connecting to these devices does not change their outputs.
 - **Film Sense FS-1 ellipsometer.** Subscribes to the instrument's broadcast;
   the trigger sockets are deliberately untouched. Still fully read-only.
 - **XP Glassman FL1.5F1.0 HV plasma supply.** Polled for voltage, current and
-  arc count at 2 Hz and logged. HV can only be turned on at its front panel.
+  arc count at 2 Hz and logged. The operator enables HV at the front panel.
   While HV is already on, the operator or a recipe can set its current limit.
 
 ### Glassman commands (expanded 2026-09-30)
@@ -226,10 +226,16 @@ requested cleanup paths:
 - HCPES cleanup — completion, stop, failure or server shutdown while HCPES owns
   the reactor.
 
-There is still **no way to turn HV on remotely** or enter an arbitrary voltage
+There is still no standalone remote HV-on command or arbitrary voltage
 setpoint. The Hardware card offers current-limit control only while fresh
 Glassman status confirms HV on. Every current Set packet carries an **800 V
-voltage limit** and no HV-on bit. The built-in ALD/CVD pre-start applies the
+voltage limit**. On the first Set from local mode, the command asserts the
+remote HV-on bit to preserve the front-panel-enabled output when control moves
+to the serial port; subsequent current Sets leave all digital control bits
+clear. The command queries the supply afterward and reports an error if HV
+has switched off. Zach authorized this guarded transfer on 2026-10-27 after
+a live 100 mA Set was observed to drop HV during the local-to-remote transfer.
+The built-in ALD/CVD pre-start applies the
 Advanced Controls current default (200 mA initially) before the beam strike.
 The dedicated `POST /api/hv/{id}/current` route accepts `milliamps`; the
 Keithley `/api/supply/{id}/current` route accepts amperes and refuses Glassman.
@@ -325,6 +331,12 @@ cleanup finishes. Its restricted startup commands, in order:
 5. the plasma relay to beam-on, followed immediately by the startup
    stage-current stability gate.
 
+Arming the stage bias writes its requested magnitude even when that magnitude
+is **0 V**, before the support-supply output is enabled. This clears a stale
+voltage program from an earlier run; zero is an actual command, not a reason
+to skip programming the supply. The physical polarity is still confirmed
+separately before starting.
+
 The initial-plasma block is saved with the plan and is not part of the Cartesian
 sweep. It gives the operator one known-accessible Ar, stage-bias, grid-bias,
 collimating-current and steering-current condition for ignition and startup
@@ -332,6 +344,11 @@ settling. No qualified sweep samples are collected there. After establishment,
 the controller changes to sweep point 1 and applies the ordinary selected
 between-condition settling behavior to that transition. Legacy plans populate
 the block from their former first sweep point, preserving their prior startup.
+The live estimated time remaining extrapolates the average duration of
+completed sweep conditions, starting after this one-time setup and initial
+settle. Total elapsed time still starts when the HCPES session starts. The
+Diagnostics **Currently commanded** list outlines the parameter most recently
+written so the operator can see the current loop position.
 
 Startup and every successful plasma re-establishment use the stricter
 **establishment profile**: a spike-resistant DMM6500 stage-current trend over a

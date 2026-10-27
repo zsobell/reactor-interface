@@ -73,6 +73,7 @@ port. Do not copy `instrument.return_to_local` here.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 from ..config import PowerSupplyCfg
@@ -184,6 +185,16 @@ class Keithley2260B(Device):
         self.voltage_setpoint: float | None = None
         self.current_setpoint: float | None = None
         self._lock = asyncio.Lock()
+        # Cancellation releases an asyncio lock while asyncio.to_thread keeps
+        # running. Guard the actual worker calls too, so shutdown cannot close
+        # a Windows COM handle while a cancelled poll is still reading it.
+        self._serial_lock = threading.Lock()
+
+    async def _serial_call(self, fn, *args):
+        def run():
+            with self._serial_lock:
+                return fn(*args)
+        return await asyncio.to_thread(run)
 
     def mode_label(self) -> str | None:
         """"CV" / "CC" / None - derived from measurement vs setpoint.
@@ -230,11 +241,11 @@ class Keithley2260B(Device):
     async def connect(self) -> None:
         async with self._lock:
             try:
-                await asyncio.to_thread(self._open)
+                await self._serial_call(self._open)
             except Exception:
                 # A failed IDN/read after Serial() succeeds otherwise leaves a
                 # live Windows COM handle behind on every reconnect attempt.
-                await asyncio.to_thread(self._close)
+                await self._serial_call(self._close)
                 self.connected = False
                 raise
         self.connected = True
@@ -295,7 +306,7 @@ class Keithley2260B(Device):
         remote/local handoff to do: see the module docstring.
         """
         async with self._lock:
-            await asyncio.to_thread(self._close)
+            await self._serial_call(self._close)
         self.connected = False
 
     def _close(self) -> None:
@@ -338,7 +349,7 @@ class Keithley2260B(Device):
 
     async def _talk(self, fn, *args):
         async with self._lock:
-            return await asyncio.to_thread(fn, *args)
+            return await self._serial_call(fn, *args)
 
     # -- data --------------------------------------------------------------- #
 

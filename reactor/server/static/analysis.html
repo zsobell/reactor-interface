@@ -46,7 +46,7 @@
 
 <header>
   <h1 style="font-size:15px">Reactor Analysis</h1>
-  <span class="badge">read-only</span>
+  <span class="badge">analysis</span>
   <a href="/" class="badge" style="text-decoration:none">&larr; control interface</a>
   <nav class="analysis-tabs" aria-label="Analysis workspace">
     <button class="analysis-tab active" data-analysis-tab="run">Run data</button>
@@ -83,6 +83,8 @@
         <select id="srcSel"><option value="">— scanning data folder —</option></select>
         <button id="loadBtn">Load</button>
         <button id="rescanBtn" title="Rescan the data folder">↻</button>
+        <button id="renameBtn" type="button" title="Rename selected run">Rename</button>
+        <button id="deleteBtn" type="button" title="Delete selected run data" aria-label="Delete selected run data">🗑</button>
         <span style="color:var(--dim)">or</span>
         <div id="drop" class="dropzone">drop a CSV here, or click to browse</div>
         <input type="file" id="fileInput" accept=".csv,text/csv" class="hidden">
@@ -96,6 +98,9 @@
         Your plot layout is remembered and re-applied by column name, so
         loading a newer file repopulates the same grid. The newest merged file
         opens automatically, including when you return to this tab after a run.
+        The trash button previews and deletes the selected CSV with files from
+        the same run stamp after confirmation. Rename changes the displayed name
+        of a new run across its files.
       </div>
     </div>
   </section>
@@ -189,13 +194,17 @@
         <select id="hcpesSourceSel"><option value="">— scanning HCPES bundles —</option></select>
         <button id="hcpesLoad" class="primary">Load</button>
         <button id="hcpesRescan" title="Rescan the data folder">↻</button>
+        <button id="hcpesRenameSource" type="button" title="Rename selected HCPES run">Rename</button>
+        <button id="hcpesDeleteSource" type="button" title="Delete selected HCPES run" aria-label="Delete selected HCPES run">🗑</button>
       </div>
       <div id="hcpesCompatibility" class="hcpes-analysis-alert hidden"></div>
       <div id="hcpesSummary" class="hcpes-analysis-summary"></div>
       <div class="hint">
         Session bundles may be complete, aborted, or partial. A linked polarity campaign
         is drawn as one signed negative-to-positive sweep; both zero-bias points remain
-        visible, and every hover identifies its source session and point.
+        visible, and every hover identifies its source session and point. The trash
+        button deletes a selected unlinked session bundle after confirmation.
+        Rename changes the display name without changing recorded data.
       </div>
     </div>
   </section>
@@ -203,10 +212,17 @@
   <section class="card">
     <h2>Characterization view
       <span class="grow"></span>
+      <button id="hcpesSaveView" class="mini">Save view</button>
       <button id="hcpesCopy" class="mini">Copy visible data</button>
       <button id="hcpesPng" class="mini">PNG</button>
     </h2>
     <div class="body">
+      <div class="row hcpes-saved-row">
+        <label>Saved plots <select id="hcpesSavedViews"><option value="">— choose a saved plot —</option></select></label>
+        <button id="hcpesOpenView">Open</button>
+        <button id="hcpesDeleteView" title="Remove selected saved plot">Delete</button>
+        <span id="hcpesViewWarning" class="hcpes-view-warning hidden"></span>
+      </div>
       <div class="hcpes-analysis-controls">
         <label>View
           <select id="hcpesView">
@@ -224,8 +240,8 @@
       <div id="hcpesFilters" class="hcpes-analysis-filters"></div>
       <div class="hcpes-analysis-canvasbox">
         <canvas id="hcpesCanvas"></canvas>
-        <div id="hcpesHover" class="hcpes-hover hidden"></div>
       </div>
+      <div id="hcpesHover" class="hcpes-hover" aria-live="polite">Hover over a plotted point or heat-map cell to inspect its data.</div>
       <div id="hcpesLegend" class="hcpes-analysis-legend"></div>
       <div class="hint">
         Lines and heat-map values use qualified samples only. Red rings mark points that

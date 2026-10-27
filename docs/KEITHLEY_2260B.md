@@ -284,6 +284,14 @@ hardware — all four of these are rejected with `-113 "Undefined header"`:
 So there is nothing to hand back, and `disconnect()` just closes the port. Do
 not copy `instrument.return_to_local` into this driver.
 
+The driver serializes the underlying Windows COM operations with a thread
+lock as well as its asynchronous command lock. Cancelling a poll can release
+the asynchronous lock while its worker thread is still reading; the thread
+lock makes disconnect wait for that read before closing the handle. This
+addresses the recurring `disconnect collimating` restart error without
+changing the commanded output. Fake-device tests cover the cancellation race;
+the real restart receipt still needs to be checked on each deployment.
+
 `disconnect()` also does **not** switch the output off. That belongs to run
 teardown, not to losing a serial handle: restarting the server must not drop the
 collimating coil out from under a running plasma.

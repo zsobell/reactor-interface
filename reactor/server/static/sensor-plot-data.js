@@ -1,4 +1,19 @@
 /** Reduce a time series for canvas drawing while retaining each bucket's peaks. */
+export function sensorTimeRange({mode, windowSeconds, start, end, earliest, now}){
+  if(mode === "manual") return [start ?? earliest ?? now-windowSeconds, end ?? now];
+  return [now-windowSeconds, now];
+}
+
+export function navigateSensorRange([from,to], key){
+  const span=to-from;
+  if(!(span > 0)) return null;
+  if(key === "ArrowLeft") return [from-span*0.2,to-span*0.2];
+  if(key === "ArrowRight") return [from+span*0.2,to+span*0.2];
+  if(key === "ArrowUp") return [to-Math.max(1,span*0.8),to];
+  if(key === "ArrowDown") return [to-span*1.25,to];
+  return null;
+}
+
 export function reduceSensorPoints(points, from, to, buckets=700){
   const visible = points.filter(([t]) => Number.isFinite(t) && t >= from && t <= to);
   if(visible.length <= buckets * 2) return visible;

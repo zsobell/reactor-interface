@@ -27,7 +27,7 @@ flowchart TD
     Analysis[Analysis page] --> DataRoutes[Data routes]
     Analysis --> HCPESRoutes[HCPES analysis routes]
     DataRoutes -->|worker thread| Files
-    HCPESRoutes -->|read-only| Files
+    HCPESRoutes -->|load or confirmed session delete| Files
 ```
 
 - `dependencies.py` supplies device factories and per-instance `StatePaths`.
@@ -75,6 +75,14 @@ flowchart TD
 - `telemetry.py` builds independent snapshots and manages bounded subscriber
   queues. A later reading cannot mutate an already published frame. Each slow
   viewer retains at most four frames; older frames are dropped.
+- `sensor_archive.py` saves one low-resolution pressure/temperature snapshot
+  every five seconds in `data/sensor_history.sqlite3` through the recording
+  worker. Manual Hardware popup ranges query that archive without a time-based
+  deletion and combine it with recent in-memory samples at the range boundary.
+  Archive queries reduce long ranges into bounded time buckets, retaining
+  endpoints, extrema and gaps. The Run charts keep their separate one-hour
+  memory buffer. If archive initialization fails, live monitoring continues
+  and the error is reported.
 - Live recording callers use explicit lifecycle/sample/capture methods and
   read metadata from RecordingService snapshots. Generic dispatch remains a
   compatibility seam for isolated tests.
@@ -146,8 +154,17 @@ Generic analysis file reads, merging and saving run in a worker, separate from t
 recording executor. This removes synchronous analysis work from the control
 event loop, but it is not a hard real-time guarantee: CPU work still shares the
 Python process, and small settings writes remain synchronous. HCPES analysis is
-read-only and parses bounded session/campaign files in FastAPI's synchronous
-endpoint worker pool. Per-run event and
+bounded and parses session/campaign files in FastAPI's synchronous endpoint
+worker pool. Confirmed deletion removes only a selected, unlinked HCPES
+session bundle. Run-data deletion matches one exact run stamp and previews its
+files before confirmation. New recipe runs carry an analysis identity file so
+the selector shows run name and date, adds 02 for a same-day repeat, and can
+rename the displayed run without moving raw files. HCPES source renaming edits
+display metadata in its manifest or campaign document; HCPES session deletion
+rejects linked campaigns and active acquisitions. Named HCPES plot layouts
+are saved in `config/hcpes_analysis_plots.json`, with a browser copy for
+immediate restoration. The selected view is reconciled against each new
+source's available axes, metrics and filters. Per-run event and
 error files use the recording worker; recording-error events are not submitted
 back to that failing writer. Hard physical deadlines require measured end-to-end timing and
 suitable hardware, such as supported hardware-clocked DAQ output or a PLC;

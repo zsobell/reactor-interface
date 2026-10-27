@@ -28,9 +28,10 @@ the hardware (not by trusting the old VI, which is full of dead code):
   setpoint all over Modbus; HTTP only for full scale and identity
 - **Film Sense FS-1 in-situ ellipsometer**, read-only over its live TCP stream
 - **XP Glassman FL1.5F1.0 high-voltage plasma supply** (1500 V / 1.0 A) on USB,
-  monitor-only apart from a commanded **HV off** during requested run,
-  pre-start and HCPES cleanup — its voltage, current and arc count are logged;
-  it is set by hand
+  with voltage, current and arc count logged. The operator enables HV at its
+  front panel; while HV is on, the interface can command a guarded current
+  limit with an 800 V voltage limit. Requested run, pre-start and HCPES cleanup
+  commands **HV off**.
 - **4 Keithley 2260B DC supplies** — stage bias, steering coils, grid bias,
   collimating coils. Logged, and their outputs switched on at pre-start
 - **Pneumatic valves** across two control boxes, incl. precursor manifolds, a
@@ -119,6 +120,11 @@ Three tabs:
   pressure gauges, other inputs, instruments, Keithley power-supply voltage/current
   controls and output toggles, and the Glassman monitor (HV off at run end), the **ellipsometer** readout (stream
   state, points banked this acquisition, live fit), and primary-sensor detail.
+  Click a temperature or pressure value for a live popup plot. The 5/15/60-minute
+  presets and a manually entered time range are separate modes; a start time
+  without an end follows live data. Drag to zoom or hover and use arrow keys to
+  pan/zoom. A five-second sensor scrollback is saved in
+  `data/sensor_history.sqlite3` and remains available across server restarts.
 - **Diagnostics** — a valve-identification sweep tool, data logging, a
   visual **HCPES characterization** grid builder/live monitor, connections
   table (every device, the FS-1 included), and the event log. A
@@ -135,11 +141,26 @@ use mA/mA/min; steering and collimating supply settings remain in A. The
 run-sequence view plots each result in the order conditions completed and shows
 the complete commanded condition on hover, making it useful for spotting
 long-term drift rather than interpreting it as a one-parameter response curve.
-The run-data tab provides
+HCPES heat-map and point hover details appear below the plot so they cannot
+cover cells or be clipped at the plot edge. The current plot selection follows
+you between sources; **Save view** stores named plot/filter layouts on the
+server and in the browser. If a saved axis, metric or filter value is absent
+from a newly loaded source, the page chooses an available value and identifies
+what could not be restored. The run-data tab provides
 property-vs-cycle plots over the run CSVs and the ellipsometry-merged file,
 and a drop box for **Auger (AES) spectra**, each of which gets its own
 autoscaled plot alongside them.
-It reads finished files and can touch no hardware, which is why it is its own
+The run selector shows the run's name and local date for new recipe runs, with
+`02`, `03`, and so on for repeated names on one date. **Rename** changes that
+display name across the run, by-cycle and merged selections; the recorded
+files keep their paths. Older recipe runs without identity metadata remain
+loadable but cannot be renamed. The trash button previews the exact-stamp
+run files it will remove and asks for confirmation. The HCPES source selector
+shows plan or renamed source name plus date, provides its own Rename button,
+and permits confirmed deletion of an unlinked session bundle. Campaigns and
+their linked sessions cannot be deleted there; active runs and captures block
+deletion. These actions remove recorded data, so inspect the preview first.
+Its file operations cannot touch hardware, which is why it is its own
 page rather than a fourth tab: it can be left open beside a running experiment.
 Details in [docs/RUN_PROGRAM.md](docs/RUN_PROGRAM.md).
 
@@ -188,7 +209,9 @@ data/Mo-015/
 ```
 
 An unnamed run gets a folder named for its timestamp instead. The parameters
-file is plain text, not JSON, and opens in Notepad.
+file is plain text, not JSON, and opens in Notepad. New recipe runs also write
+`<run-stamp>_analysis.json` in the same folder for the Analysis selector's
+name/date/ordinal; it is included when deleting that run's files.
 
 HCPES characterization writes a separate immutable directory per acquisition:
 open `run_summary.txt` for an immediate overview, `timeline.csv` for a concise
@@ -208,6 +231,11 @@ making startup depend on it.
 After settling, each condition accepts the next user-selected number of fresh
 sample-current readings (default five) at the instrument telemetry rate. It
 adds no separate sample interval or collection-duration target.
+The live **Estimated remaining** value uses completed sweep conditions to
+estimate the time per remaining condition. Its average begins after the
+one-time initial plasma settle; **Elapsed** still includes the entire session.
+In Diagnostics, the most recently commanded HCPES parameter has a green box
+in the **Currently commanded** list.
 The displayed and recorded rate is a spike-resistant trend over a separate
 rolling window (default 5 s for establishment and 3 s after parameter changes).
 It remains “measuring” until enough fresh readings exist. The longer stability
@@ -244,7 +272,9 @@ reactor/
   recording.py                ordered file work on a dedicated recording thread
   hcpes_recording.py          immutable raw/qualified/point/campaign bundles
   datalog.py                  manual/run/by-cycle CSVs and ellipsometer sidecars
+  run_identity.py             display names and date-based run file identities
   run_report.py               pure formatting of readable run parameters
+  sensor_archive.py           durable compact sensor scrollback for Hardware plots
   control/
     clock.py                  injected elapsed and wall-clock sources
     recipe_model.py           recipe schema and pure ALD/CVD builders
@@ -266,14 +296,14 @@ reactor/
     mks_mfc.py                MKS G50 Modbus measurements/setpoints; HTTP metadata/fallback
     instrument.py             VISA/SCPI instruments such as the DMM6500
     mks_937b.py               read-only Auger hot-cathode pressure over RS232
-    glassman_fl.py             Glassman monitoring; application commands HV off only
+    glassman_fl.py             Glassman monitoring, guarded current limit and HV off
     keithley_2260b.py          Keithley monitoring, manual controls and requested run outputs
     ellipsometer.py            read-only FS-1 TCP stream and decoder
   analysis/ellipsometer_merge.py  pure refit/sidecar clock mapping and merge
   server/
     app.py                    HTTP control, lifecycle, authentication and pages
     data.py                   analysis/file routes, with worker-based file operations
-    hcpes_analysis.py         read-only HCPES bundle validation and analysis routes
+    hcpes_analysis.py         HCPES bundle validation, analysis and display metadata routes
     sensor_plot.py            read-only pressure/temperature history projection
     static/index.html         control page markup
     static/control.css        control-page styles
@@ -288,17 +318,18 @@ reactor/
     static/analysis.css       analysis-page styles
     static/analysis.js        finished-run and Auger analysis
     static/analysis-plot.js   reusable run/Auger plot rendering and interaction
+    static/hcpes-analysis.js  HCPES slices, heat maps, trends and raw inspector
     static/sensor-plot.html   one-sensor popup from Hardware values
     static/sensor-plot.js     live popup plot, axes and hover readout
     static/sensor-plot-data.js  bounded canvas point reduction
     static/sensor-plot.css    popup layout
-    static/hcpes-analysis.js  HCPES slices, heat maps, trends and raw inspector
   testing/virtual_reactor.py   fake hardware, real application/controllers, temporary files
   testing/validate.py          focused/full Windows Python and Node validation
   testing/timing_prototype.py  isolated event-driven ALD exposure experiment
 tools/
   discover_hardware.py         read-only hardware enumeration and identification
   probe_glassman.py            read-only HV supply port/baud/address probe
+  bridge_sensor_archive.py     read-only bridge until the updated server restarts
   watch_channels.py           input observation for channel identification
   pulse_line.py               one-line actuation tool, with confirmation
 tests/                        python -m tests.run_all
@@ -313,7 +344,7 @@ data. Run files are drained on completion and shutdown.
 
 ---
 
-## Current state (2026-09-20)
+## Current state (2026-10-27)
 
 **Working and verified against real hardware:** all inputs (pressure, 3
 Baratrons, stage/bubbler/bakeout TCs + 2 more TCs, DMM current), all 3 MFCs (read +
@@ -341,9 +372,11 @@ profiles, aperture replacement history, and every valve/MFC/gauge display name.
 
 **Known open items** (`bd ready` is authoritative): physical qualification of
 the HCPES characterization/recovery/cleanup sequence and the aperture-runtime
-observation logic remains separate from the passing fake-device suite. Remote
-*setpoint* control of the Glassman is deliberately not built; only HV-off is
-wired (see docs/CONTROL_MODEL.md). The NI 9265 current-output module's purpose
+observation logic remains separate from the passing fake-device suite. The
+Glassman accepts guarded current-limit commands with an 800 V limit while HV
+is already on. Its local-to-remote handoff was checked on hardware at 100 mA;
+current regulation under a plasma load still needs qualification
+(see [docs/GLASSMAN_FL.md](docs/GLASSMAN_FL.md)). The NI 9265 current-output module's purpose
 is still unknown and deferred (`reactor-5u2`, low priority).
 
 Full history of what's shipped and what's still open lives in the **bd**

@@ -6,7 +6,9 @@ connected by USB to the rear-panel J3 socket.
 WHAT THIS DRIVER DOES TO THE SUPPLY
 ===================================
 It reads, turns HV off during cleanup, and sets current limit only after a
-fresh query proves front-panel HV is already on. It never turns HV on remotely.
+fresh query proves front-panel HV is already on. The first current Set from
+local mode asserts remote HV On to preserve that enabled output as control
+transfers to the serial port; it cannot enable HV from an off state.
 
 `connect()` sends `V` (software-version request) and `read()` sends `Q`
 (request monitors). Both are read commands: the FL manual is explicit that a
@@ -23,15 +25,15 @@ pre-start abort - nowhere else, and never on `disconnect()`.
 
 The other protocol commands (`set_levels`, `set_hv`, `reset`) remain inaccessible
 from the supervisor, API and UI. Current control uses a dedicated guarded
-method and cannot assert the HV On bit.
+method and asserts HV On only for an already-on local-to-remote transfer.
 
 Two consequences of that, both deliberate:
 
 * `disconnect()` does NOT send HV OFF. A driver for this supply written
   elsewhere in the group does exactly that, after an incident where their
   application exited leaving HV energised. That is the right call *for a
-  program that turns HV on*. This one never does, so an HV-OFF on shutdown
-  would be an unrequested automatic action that could switch off a supply Zach
+  program that turns HV on*. An HV-OFF on idle shutdown would be an unrequested
+  automatic action that could switch off a supply Zach
   had set by hand at the front panel - stopping the server would silently kill
   his plasma. Closing the port is all that happens here.
 * Remote Set commands use an 800 V limit, including cleanup. No arbitrary
@@ -507,14 +509,23 @@ class GlassmanFL(Device):
             self.last_reply = reply
             if not reply.hv_on:
                 raise RuntimeError("Glassman HV must be on at the front panel before setting current")
-            body = self._set_body(PLASMA_VOLTAGE_LIMIT_V, current)
+            # The first Set transfers HV enable from the front panel to serial
+            # control. Preserve an already-on output across that transfer;
+            # later remote Set commands need no digital control assertion.
+            body = self._set_body(PLASMA_VOLTAGE_LIMIT_V, current,
+                                  hv_on=True if not reply.remote else None)
             raw = await asyncio.to_thread(self._exchange, body)
             if raw[0:1] == b"E":
                 parse_query_response(raw)
             if raw != b"A\r":
                 raise GlassmanProtocolError(f"expected 'A' acknowledge, got {raw!r}")
             self.current_setpoint = current
-            reply.remote = True
+            # An acknowledge confirms the Set packet was accepted, not that
+            # the output stayed enabled. Read the status after the transfer.
+            self.last_reply = parse_query_response(
+                await asyncio.to_thread(self._exchange, b"Q"))
+            if not self.last_reply.hv_on:
+                raise RuntimeError("Glassman HV switched off during current command")
 
     async def set_hv(self, on: bool, voltage: float, current: float) -> None:
         """Assert HV On or HV Off alongside the setpoints. NOT CALLED."""

@@ -153,9 +153,111 @@ export function rawCurrent(row){
 const hasDom = typeof document !== "undefined";
 const $ = id => hasDom ? document.getElementById(id) : null;
 let SOURCE = null;
+let SOURCES = [];
 let FILTERS = {};
 let RAW = null;
 let hitItems = [];
+const PLOTS_KEY = "reactorAnalysis.hcpesPlots.v1";
+const ACTIVE_KEY = "reactorAnalysis.hcpesActivePlot.v1";
+let SAVED_PLOTS = [];
+
+export function reconcilePlot(plot, source){
+  const axes = axisKeys(source), metrics = metricKeys(source);
+  const view = ["line", "heat", "trend"].includes(plot?.view) ? plot.view : "heat";
+  const xKeys = view === "trend"
+    ? ["acquisition_order", "ended_elapsed_s", "started_elapsed_s"] : axes;
+  const unavailable = [];
+  if(plot?.x && !xKeys.includes(plot.x)) unavailable.push(label(plot.x));
+  if(plot?.metric && !metrics.includes(plot.metric)) unavailable.push(label(plot.metric));
+  if(view === "heat" && plot?.heatY && !axes.includes(plot.heatY)) unavailable.push(label(plot.heatY));
+  const filters = {};
+  for(const [key,value] of Object.entries(plot?.filters || {})){
+    if(value === "") continue;
+    if(!axes.includes(key) || !(source.points || []).some(point => String(point[key]) === String(value))){
+      unavailable.push(`${label(key)}=${value}`);
+      continue;
+    }
+    filters[key] = String(value);
+  }
+  return {
+    view,
+    x: xKeys.includes(plot?.x) ? plot.x : (view === "trend" ? "acquisition_order" : axes[0] || ""),
+    heatY: axes.includes(plot?.heatY) ? plot.heatY : axes.find(key => key !== (plot?.x || axes[0])) || axes[0] || "",
+    metric: metrics.includes(plot?.metric) ? plot.metric : metrics.includes("stage_current_mean_a") ? "stage_current_mean_a" : metrics[0] || "",
+    filters, unavailable,
+  };
+}
+
+function currentPlot(){
+  return {view:$("hcpesView").value,x:$("hcpesX").value,
+    heatY:$("hcpesHeatY").value,metric:$("hcpesMetric").value,filters:{...FILTERS}};
+}
+
+function rememberActive(){
+  try{localStorage.setItem(ACTIVE_KEY, JSON.stringify(currentPlot()));}catch(_){}
+}
+
+function rememberedActive(){
+  try{return JSON.parse(localStorage.getItem(ACTIVE_KEY) || "null");}catch(_){return null;}
+}
+
+function applyPlot(plot){
+  const selected = reconcilePlot(plot, SOURCE);
+  $("hcpesView").value = selected.view;
+  updateViewControls();
+  $("hcpesX").value = selected.x;
+  $("hcpesHeatY").value = selected.heatY;
+  $("hcpesMetric").value = selected.metric;
+  FILTERS = selected.filters;
+  for(const select of $("hcpesFilters").querySelectorAll("select"))
+    select.value = FILTERS[select.dataset.filter] || "";
+  const warning = $("hcpesViewWarning");
+  warning.textContent = selected.unavailable.length
+    ? `Unavailable in this source: ${selected.unavailable.join(", ")}` : "";
+  warning.classList.toggle("hidden", !selected.unavailable.length);
+  draw();
+  rememberActive();
+}
+
+function markPlotChanged(){
+  $("hcpesSavedViews").value = "";
+  $("hcpesViewWarning").classList.add("hidden");
+  rememberActive();
+}
+
+function renderSavedPlots(){
+  const select = $("hcpesSavedViews"), previous = select.value;
+  select.innerHTML = `<option value="">— choose a saved plot —</option>` + SAVED_PLOTS.map((plot,index) =>
+    `<option value="${index}">${esc(plot.name)}</option>`).join("");
+  if(previous !== "" && +previous < SAVED_PLOTS.length) select.value = previous;
+}
+
+async function loadSavedPlots(){
+  try{
+    const cached = JSON.parse(localStorage.getItem(PLOTS_KEY) || "null");
+    if(Array.isArray(cached?.plots)) SAVED_PLOTS = cached.plots;
+  }catch(_){}
+  renderSavedPlots();
+  try{
+    const response = await fetch("/api/hcpes/analysis/plots");
+    if(!response.ok) return;
+    const data = await response.json();
+    if(Array.isArray(data.plots)){
+      SAVED_PLOTS = data.plots;
+      localStorage.setItem(PLOTS_KEY, JSON.stringify(data));
+      renderSavedPlots();
+    }
+  }catch(_){}
+}
+
+async function persistSavedPlots(){
+  const body = JSON.stringify({plots:SAVED_PLOTS});
+  try{localStorage.setItem(PLOTS_KEY, body);}catch(_){}
+  const response = await fetch("/api/hcpes/analysis/plots", {
+    method:"POST",headers:{"Content-Type":"application/json"},body,
+  });
+  if(!response.ok) throw new Error(`Could not save plots on server (${response.status})`);
+}
 
 function fmt(value, digits=5){
   if(value === null || value === undefined || value === "") return "—";
@@ -210,14 +312,73 @@ async function rescan(){
     const response = await fetch("/api/hcpes/analysis/sources");
     if(!response.ok) throw new Error(`scan failed (${response.status})`);
     const data = await response.json();
+    SOURCES = data.sources;
     const previous = $("hcpesSourceSel").value;
     $("hcpesSourceSel").innerHTML = data.sources.length
-      ? data.sources.map(source => `<option value="${esc(source.name)}">${esc(source.title)} — ${source.kind}, ${source.status}, ${source.points} points</option>`).join("")
+      ? data.sources.map(source => `<option value="${esc(source.name)}">${esc(source.display_name || source.title)} — ${source.kind}, ${source.status}, ${source.points} points</option>`).join("")
       : `<option value="">— no HCPES bundles in ${esc(data.dir)} —</option>`;
     if(previous && [...$("hcpesSourceSel").options].some(option => option.value === previous))
       $("hcpesSourceSel").value = previous;
+    updateDeleteSource();
   }catch(error){
+    SOURCES = [];
     $("hcpesSourceSel").innerHTML = `<option value="">— HCPES data unavailable —</option>`;
+    updateDeleteSource();
+  }
+}
+
+function updateDeleteSource(){
+  const entry = SOURCES.find(source => source.name === $("hcpesSourceSel").value);
+  $("hcpesRenameSource").disabled = !entry;
+  const button = $("hcpesDeleteSource");
+  button.disabled = !entry || entry.kind !== "session";
+  button.title = entry?.kind === "campaign"
+    ? "Linked campaigns cannot be deleted here" : "Delete selected HCPES run";
+}
+
+async function renameSource(){
+  const entry = SOURCES.find(source => source.name === $("hcpesSourceSel").value);
+  if(!entry) return;
+  const newName = prompt("New HCPES run name:", entry.title)?.trim();
+  if(!newName || newName === entry.title) return;
+  try{
+    const response = await fetch("/api/hcpes/analysis/rename", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:entry.name,new_name:newName})});
+    if(!response.ok) throw new Error((await response.json()).detail || `rename failed (${response.status})`);
+    const renamed = await response.json();
+    if(SOURCE?.name === entry.name) SOURCE.title = renamed.title;
+    await rescan();
+    toast(`Renamed HCPES run to ${renamed.display_name}`, true);
+  }catch(error){ toast(error.message || String(error)); }
+}
+
+async function deleteSource(){
+  const entry = SOURCES.find(source => source.name === $("hcpesSourceSel").value);
+  if(!entry || entry.kind !== "session") return;
+  if(!confirm(`Permanently delete HCPES run “${entry.title}” (${entry.status}, ${entry.points} points) and all its recorded data?`)) return;
+  const button = $("hcpesDeleteSource");
+  button.disabled = true;
+  try{
+    const response = await fetch(`/api/hcpes/analysis/source?name=${encodeURIComponent(entry.name)}`,
+      {method:"DELETE"});
+    if(!response.ok) throw new Error((await response.json()).detail || `delete failed (${response.status})`);
+    if(SOURCE?.name === entry.name){
+      SOURCE = null; FILTERS = {}; RAW = null; hitItems = [];
+      $("hcpesSourceInfo").textContent = "no characterization loaded";
+      $("hcpesSummary").innerHTML = "";
+      $("hcpesCompatibility").textContent = "";
+      $("hcpesCompatibility").classList.add("hidden");
+      $("hcpesFilters").innerHTML = "";
+      $("hcpesRawSession").innerHTML = "";
+      $("hcpesRawPoint").innerHTML = "";
+      hideHover(); clearRaw(); draw();
+    }
+    await rescan();
+    toast(`Deleted ${entry.title}`, true);
+  }catch(error){
+    toast(error.message || String(error));
+    updateDeleteSource();
   }
 }
 
@@ -227,15 +388,16 @@ async function loadSource(){
   try{
     const response = await fetch(`/api/hcpes/analysis/source?name=${encodeURIComponent(name)}`);
     if(!response.ok) throw new Error((await response.json()).detail || `load failed (${response.status})`);
+    const previous = SOURCE ? currentPlot() : null;
     SOURCE = await response.json();
     FILTERS = {};
     RAW = null;
-    configureSource();
+    configureSource(previous);
     toast(`Loaded ${SOURCE.title}`, true);
   }catch(error){ toast(error.message || String(error)); }
 }
 
-function configureSource(){
+function configureSource(previous=null){
   const points = SOURCE.points || [];
   const rejected = points.filter(row => ["partial", "inaccessible"].includes(row.accessibility)).length;
   const unsettled = points.filter(row => row.settled === false).length;
@@ -261,8 +423,8 @@ function configureSource(){
     metrics.includes("stage_current_mean_a") ? "stage_current_mean_a" : metrics[0]);
   renderFilters();
   configureRawSelectors();
-  updateViewControls();
-  draw();
+  applyPlot(previous || rememberedActive() || {view:axes.length > 1 ? "heat" : "line",x:"signed_stage_bias_v",
+    heatY:axes.find(key => key !== "signed_stage_bias_v"),metric:"stage_current_mean_a",filters:{}});
   clearRaw();
 }
 
@@ -277,6 +439,7 @@ function renderFilters(){
   $("hcpesFilters").querySelectorAll("select").forEach(select => {
     select.addEventListener("change", () => {
       FILTERS[select.dataset.filter] = select.value;
+      markPlotChanged();
       draw();
     });
   });
@@ -505,11 +668,10 @@ function showHover(event){
     `Observed drift: ${fmt(displayValue("observed_drift_a_per_min",point.observed_drift_a_per_min),6)} mA/min`,
     ...(hit.points?.length > 1 ? [`Heat-map cell averages ${hit.points.length} matching conditions; filter other axes to inspect one.`] : []),
   ].join("\n");
-  const hover=$("hcpesHover");hover.textContent=text;hover.classList.remove("hidden");
-  hover.style.left=Math.max(4,Math.min(x+12,rect.width-440))+"px";hover.style.top=Math.max(4,y-20)+"px";
+  $("hcpesHover").textContent=text;
 }
 
-function hideHover(){ $("hcpesHover")?.classList.add("hidden"); }
+function hideHover(){ $("hcpesHover").textContent="Hover over a plotted point or heat-map cell to inspect its data."; }
 
 async function loadRaw(){
   if(!SOURCE) return;
@@ -559,8 +721,42 @@ function wire(){
   document.querySelectorAll(".analysis-tab").forEach(button=>
     button.addEventListener("click",()=>activateTab(button.dataset.analysisTab)));
   $("hcpesRescan").onclick=rescan;$("hcpesLoad").onclick=loadSource;
-  $("hcpesView").onchange=()=>{updateViewControls();draw();};
-  for(const id of ["hcpesX","hcpesHeatY","hcpesMetric"]) $(id).onchange=draw;
+  $("hcpesSourceSel").onchange=updateDeleteSource;
+  $("hcpesRenameSource").onclick=renameSource;
+  $("hcpesDeleteSource").onclick=deleteSource;
+  updateDeleteSource();
+  $("hcpesSaveView").onclick=async()=>{
+    if(!SOURCE){toast("Load an HCPES source first.");return;}
+    const proposed = `${label($("hcpesMetric").value)} · ${$("hcpesView").selectedOptions[0]?.textContent || "plot"}`;
+    const name = prompt("Name this plot:", proposed)?.trim();
+    if(!name) return;
+    if(name.length > 100){toast("Plot name must be 100 characters or fewer.");return;}
+    const index = SAVED_PLOTS.findIndex(plot => plot.name === name);
+    const saved = {name,...currentPlot()};
+    if(index >= 0) SAVED_PLOTS[index] = saved; else SAVED_PLOTS.push(saved);
+    renderSavedPlots();
+    $("hcpesSavedViews").value = String(index >= 0 ? index : SAVED_PLOTS.length-1);
+    try{await persistSavedPlots();toast(`Saved “${name}”`,true);}
+    catch(error){toast(error.message || String(error));}
+  };
+  $("hcpesOpenView").onclick=()=>{
+    const plot = SAVED_PLOTS[+$("hcpesSavedViews").value];
+    if(!SOURCE){toast("Load an HCPES source first.");return;}
+    if(!plot){toast("Choose a saved plot.");return;}
+    applyPlot(plot);
+  };
+  $("hcpesDeleteView").onclick=async()=>{
+    const index = +$("hcpesSavedViews").value;
+    if($("hcpesSavedViews").value === "" || !SAVED_PLOTS[index]) return;
+    if(!confirm(`Delete saved plot “${SAVED_PLOTS[index].name}”?`)) return;
+    SAVED_PLOTS.splice(index,1);renderSavedPlots();
+    $("hcpesSavedViews").value = "";
+    try{await persistSavedPlots();toast("Saved plot deleted",true);}
+    catch(error){toast(error.message || String(error));}
+  };
+  $("hcpesView").onchange=()=>{updateViewControls();markPlotChanged();draw();};
+  for(const id of ["hcpesX","hcpesHeatY","hcpesMetric"])
+    $(id).onchange=()=>{markPlotChanged();draw();};
   $("hcpesCanvas").addEventListener("mousemove",showHover);
   $("hcpesCanvas").addEventListener("mouseleave",hideHover);
   $("hcpesRawSession").onchange=configureRawPoints;$("hcpesRawLoad").onclick=loadRaw;
@@ -568,13 +764,16 @@ function wire(){
   $("hcpesPng").onclick=()=>{
     $("hcpesCanvas").toBlob(blob=>{
       if(!blob)return;const a=document.createElement("a");a.href=URL.createObjectURL(blob);
-      a.download=`${(SOURCE?.title||"hcpes").replace(/[^\w.-]+/g,"_")}.png`;a.click();
+      const plot = SAVED_PLOTS[+$("hcpesSavedViews").value];
+      const name = `${SOURCE?.title||"hcpes"}_${plot && $("hcpesSavedViews").value !== "" ? plot.name : label($("hcpesMetric").value)}`;
+      a.download=`${name.replace(/[^\w.-]+/g,"_")}.png`;a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),3000);
     });
   };
   let timer=null;window.addEventListener("resize",()=>{clearTimeout(timer);timer=setTimeout(()=>{draw();if(RAW)renderRaw();},80);});
   let saved="run";try{saved=localStorage.getItem("reactorAnalysis.activeTab")||"run";}catch(_){}
   activateTab(saved === "hcpes" ? "hcpes" : "run");
+  loadSavedPlots();
   rescan();
 }
 

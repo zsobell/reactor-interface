@@ -14,7 +14,7 @@ Two halves:
    the snapshot and land in the per-run CSV under stable column names.
 
 Nothing here can talk to the real supply. Current-limit writes use a fake
-serial exchange and assert the fixed 800 V program and no HV-on bit.
+serial exchange and assert the fixed 800 V program and guarded HV-on transfer.
 
 Run directly: python -m tests.test_glassman_fl
 """
@@ -213,26 +213,45 @@ async def main() -> int:
 
     c.section("5a. current-only command requires fresh HV-on proof")
     sent = []
-    reply = raw
+    local_body = b"000000008200"
+    remote_body = b"00000000A200"
+    off_body = b"000000002200"
+    local_on = b"R" + local_body + checksum(local_body) + b"\r"
+    remote_on = b"R" + remote_body + checksum(remote_body) + b"\r"
+    remote_off = b"R" + off_body + checksum(off_body) + b"\r"
+    replies = [raw]
     def exchange(body):
         sent.append(body)
-        return reply if body == b"Q" else b"A\r"
+        return replies.pop(0) if body == b"Q" else b"A\r"
     dev._exchange = exchange
     dev.connected = True
     c.check("off unit rejects a current command without a Set frame",
             await _raises_async(lambda: dev.set_current(200.0), RuntimeError)
             and sent == [b"Q"], repr(sent))
     sent.clear()
-    reply = hot
+    replies[:] = [local_on, remote_on]
     await dev.set_current(200.0)
     expected_v = f"{units_to_counts(PLASMA_VOLTAGE_LIMIT_V, 1500.0):03X}".encode()
-    c.check("current command writes 800 V and 200 mA with no HV-on bit",
+    c.check("first current command preserves HV across local-to-remote transfer",
             sent[0] == b"Q" and sent[1][1:4] == expected_v
             and sent[1][4:7] == f"{units_to_counts(200.0, 1000.0):03X}".encode()
-            and sent[1][13:14] == b"0", repr(sent))
+            and sent[1][13:14] == b"2" and sent[2] == b"Q"
+            and dev.last_reply.remote and dev.last_reply.hv_on, repr(sent))
+    sent.clear()
+    replies[:] = [remote_on, remote_on]
+    await dev.set_current(150.0)
+    c.check("later remote current command leaves HV control unchanged",
+            sent == [b"Q", dev._set_body(PLASMA_VOLTAGE_LIMIT_V, 150.0), b"Q"]
+            and dev.current_setpoint == 150.0, repr(sent))
+    sent.clear()
+    replies[:] = [remote_on, remote_off]
+    c.check("command reports HV loss despite Set acknowledge",
+            await _raises_async(lambda: dev.set_current(200.0), RuntimeError)
+            and dev.last_reply.remote and not dev.last_reply.hv_on,
+            repr(sent))
     c.check("out-of-range current rejected before any I/O",
             await _raises_async(lambda: dev.set_current(1001.0), ValueError)
-            and len(sent) == 2)
+            and len(sent) == 3)
     sent.clear()
     await dev.hv_off()
     c.check("HV off retains 800 V and last commanded current",

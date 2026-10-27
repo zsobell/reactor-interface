@@ -1,5 +1,6 @@
 """A failed Keithley handshake releases the COM handle before retry."""
 import asyncio
+import threading
 from unittest.mock import patch
 
 from reactor.config import PowerSupplyCfg
@@ -67,6 +68,39 @@ async def main():
         await device.disconnect()
         c.check("disconnect never sends an output command",
                 ports[1].closed and all(not p.last_command.startswith(":OUTP") for p in ports))
+
+        # Supervisor cancels its polling task before disconnecting supplies.
+        # Cancelling to_thread does not stop its worker: the serial read can
+        # still be using the COM handle after the coroutine drops its lock.
+        race = Keithley2260B(cfg)
+        race_port = Port("COM12")
+        race._ser = race_port
+        race.connected = True
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_reply(_terminator):
+            entered.set()
+            release.wait(2)
+            return b"0;0;0;0;0;0\n"
+
+        race_port.read_until = slow_reply
+        poll = asyncio.create_task(race.read())
+        c.check("fake poll entered serial read",
+                await asyncio.to_thread(entered.wait, 1))
+        poll.cancel()
+        try:
+            await poll
+        except asyncio.CancelledError:
+            pass
+        closing = asyncio.create_task(race.disconnect())
+        await asyncio.sleep(0.05)
+        c.check("disconnect waits for cancelled worker's serial read",
+                not race_port.closed and not closing.done())
+        release.set()
+        await asyncio.wait_for(closing, 1)
+        c.check("disconnect closes port after read finishes",
+                race_port.closed and not race.connected)
     return c.summary()
 
 

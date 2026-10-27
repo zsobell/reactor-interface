@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import yaml
 
 from reactor.control.hcpes_model import (
@@ -192,6 +193,80 @@ async def main() -> int:
         c.check("mismatched sources are not silently presented as compatible",
                 status == 200 and data["compatible"] is False
                 and data["compatibility_issues"])
+
+        c.section("rename HCPES sources without changing recorded identity")
+        async def rename(name, title):
+            return await request(app, "/api/hcpes/analysis/rename", method="POST",
+                                 body=json.dumps({"name": name, "new_name": title}).encode(),
+                                 headers=[(b"content-type", b"application/json")])
+
+        status, renamed = await rename(positive_dir.name, "Bias sweep")
+        c.check("session rename appears in source selector",
+                status == 200 and renamed["title"] == "Bias sweep"
+                and renamed["display_name"] == "Bias sweep · 2023-11-14",
+                str((status, renamed)))
+        status, second = await rename(negative_dir.name, "Bias sweep")
+        status, sources = await request(app, "/api/hcpes/analysis/sources")
+        same_day = [row["display_name"] for row in sources["sources"]
+                    if row["title"] == "Bias sweep"]
+        c.check("same-day duplicate names get a readable ordinal",
+                status == 200 and sorted(same_day) ==
+                ["Bias sweep · 2023-11-14", "Bias sweep · 2023-11-14 · 02"])
+        status, loaded = await request(app,
+            f"/api/hcpes/analysis/source?name={positive_dir.name}")
+        c.check("rename preserves session ID and points",
+                status == 200 and loaded["title"] == "Bias sweep"
+                and loaded["session"]["id"] == "analysis-positive"
+                and len(loaded["points"]) == 2)
+        status, renamed_campaign = await rename(campaign_name, "Combined sweep")
+        c.check("campaign display name can be renamed",
+                status == 200 and renamed_campaign["title"] == "Combined sweep")
+        status, _ = await rename(partial_name, "  ")
+        c.check("blank names are refused", status == 422)
+        status, _ = await rename("../outside", "Outside")
+        c.check("rename path escape is refused", status == 404)
+        def active_session_guard(_name):
+            raise HTTPException(409, "active session")
+
+        guarded_app = FastAPI()
+        guarded_app.include_router(create_hcpes_analysis_router(
+            files, before_rename=active_session_guard))
+        status, _ = await request(
+            guarded_app, "/api/hcpes/analysis/rename", method="POST",
+            body=json.dumps({"name": partial_name, "new_name": "Not yet"}).encode(),
+            headers=[(b"content-type", b"application/json")])
+        c.check("active-session guard blocks rename", status == 409)
+
+        c.section("delete one selected run bundle")
+        protected = {positive_dir.name}
+
+        def before_delete(name):
+            if name in protected:
+                raise HTTPException(409, "run belongs to a linked campaign")
+
+        deletion_app = FastAPI()
+        deletion_app.include_router(create_hcpes_analysis_router(
+            files, before_delete=before_delete))
+        status, _ = await request(deletion_app,
+            f"/api/hcpes/analysis/source?name={positive_dir.name}", method="DELETE")
+        c.check("linked run is protected", status == 409 and positive_dir.exists())
+        status, _ = await request(deletion_app,
+            f"/api/hcpes/analysis/source?name={campaign_name}", method="DELETE")
+        c.check("campaign bundle is not deleted as a run",
+                status == 404 and campaign_paths.directory.exists())
+        status, _ = await request(deletion_app,
+            "/api/hcpes/analysis/source?name=../outside", method="DELETE")
+        c.check("delete path escape is refused", status == 404)
+        status, data = await request(deletion_app,
+            f"/api/hcpes/analysis/source?name={partial_name}", method="DELETE")
+        c.check("selected partial run data is removed without touching others",
+                status == 200 and data["deleted"] == partial_name
+                and not partial_dir.exists() and positive_dir.exists()
+                and negative_dir.exists())
+        status, data = await request(deletion_app, "/api/hcpes/analysis/sources")
+        c.check("deleted run disappears from analysis selector",
+                status == 200 and partial_name not in {
+                    row["name"] for row in data["sources"]})
     return c.summary()
 
 

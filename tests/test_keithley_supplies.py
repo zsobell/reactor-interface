@@ -115,7 +115,7 @@ async def main() -> int:
             c.check(f"{k} output ON", vr.supplies[k].output_on is True)
         bias = vr.supplies["stage_bias"]
         c.check("stage bias output OFF at 0 V", bias.output_on is False)
-        c.check("stage bias voltage never set", bias.voltage_calls == [],
+        c.check("stage bias programmed to 0 V", bias.voltage_calls == [0.0],
                 str(bias.voltage_calls))
 
         await vr.sup.abort_prestart()

@@ -45,6 +45,7 @@ class HcpesController:
         self.stop_event = asyncio.Event()
         self._start_lock = asyncio.Lock()
         self._started_elapsed = 0.0
+        self._sweep_started_elapsed: float | None = None
         self._last_current_seq = 0
         self._live_drift_samples: deque[tuple[float, float]] = deque()
         self._applied_setpoints: dict[str, float] = {}
@@ -78,6 +79,7 @@ class HcpesController:
             self.resolved = resolved
             self.stop_event.clear()
             self._started_elapsed = self.clock.elapsed()
+            self._sweep_started_elapsed = None
             self._last_current_seq = int(
                 self.host.snapshot_seq.get(AMMETER_KEY, 0) or 0)
             self.state = {
@@ -108,6 +110,7 @@ class HcpesController:
                 "setpoints": {},
                 "applied_setpoints": {},
                 "changed_target": None,
+                "last_changed_target": None,
                 "requested_value": None,
                 "settle_remaining_s": None,
                 "recovery_remaining_s": None,
@@ -171,6 +174,7 @@ class HcpesController:
         try:
             previous = await self._restricted_prestart()
             await self._settle_initial_plasma()
+            self._sweep_started_elapsed = self.clock.elapsed()
             for point in resolved.iter_points():
                 if self.stop_event.is_set():
                     outcome = "aborted"
@@ -263,7 +267,8 @@ class HcpesController:
             self._applied_setpoints[axis.target] = value
             self.state.update(
                 applied_setpoints=dict(self._applied_setpoints),
-                changed_target=axis.target, requested_value=value)
+                changed_target=axis.target, requested_value=value,
+                last_changed_target=axis.target)
         self._raise_if_stopped()
         self.state["phase"] = "HCPES pre-start: enabling support supplies"
         for supply_id in HCPES_SUPPLIES:
@@ -339,7 +344,9 @@ class HcpesController:
                 requested_value=value, settle_remaining_s=None)
             await self._set_target(axis.target, value)
             self._applied_setpoints[axis.target] = value
-            self.state["applied_setpoints"] = dict(self._applied_setpoints)
+            self.state.update(
+                applied_setpoints=dict(self._applied_setpoints),
+                last_changed_target=axis.target)
             self._reset_live_drift()
             parameter_profile = self.resolved.plan.settings.parameter_change
             self.state.update(
@@ -732,10 +739,18 @@ class HcpesController:
             rejected += 1
         else:
             collected += 1
+        self._update_progress(completed, collected, rejected)
+
+    def _update_progress(self, completed: int, collected: int,
+                         rejected: int) -> None:
+        """Extrapolate only sweep time; startup and initial settling occur once."""
         total = self.resolved.point_count
         elapsed = max(0.0, self.clock.elapsed() - self._started_elapsed)
+        sweep_start = self._sweep_started_elapsed
+        sweep_elapsed = (max(0.0, self.clock.elapsed() - sweep_start)
+                         if sweep_start is not None else 0.0)
         fraction = completed / total if total else 1.0
-        remaining = (elapsed * (1.0 - fraction) / fraction) if fraction > 0 else None
+        remaining = (sweep_elapsed * (1.0 - fraction) / fraction) if fraction > 0 else None
         self.state.update(
             points_completed=completed, points_collected=collected,
             points_rejected=rejected, progress_fraction=fraction,

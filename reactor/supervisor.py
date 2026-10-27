@@ -34,6 +34,7 @@ from . import datalog, instances
 from .datalog import DataLogger
 from .recording import RecordingService
 from .telemetry import Telemetry
+from .sensor_archive import SensorArchive
 from .devices.base import Device, Reading
 from .devices.ellipsometer import EllipsometerClient, EllipsometerPoint
 from .devices.glassman_fl import GlassmanFL
@@ -46,6 +47,9 @@ from .devices.nidaq import AiSpec, DaqPlan, DoSpec, NiDaqBackend
 log = logging.getLogger("reactor.supervisor")
 
 HISTORY_SAMPLES = 18000       # at 5 Hz that is one hour of trend
+SENSOR_HISTORY_SECONDS = 24 * 3600
+SENSOR_HISTORY_INTERVAL = 5.0
+SENSOR_HISTORY_SAMPLES = int(SENSOR_HISTORY_SECONDS / SENSOR_HISTORY_INTERVAL) + 1
 RECONNECT_EVERY_S = 5.0       # retry a dropped instrument this often
 
 #: Operator-edited display names (rename a valve/MFC/gauge when swapping
@@ -129,6 +133,8 @@ class Supervisor:
         self._aperture_error_reported = ""
         self.recipes = RecipeRunner(self, clock=self.clock)
         self.logger = DataLogger(cfg)
+        self.sensor_archive = SensorArchive(self.logger.dir / "sensor_history.sqlite3")
+        self._sensor_archive_ready = False
         self.recording = RecordingService(
             self.logger, lambda message: self._event("error", message, record=False),
             on_capture=lambda name: self._event("ellipsometer", f"acquisition start -> {name}"))
@@ -142,6 +148,9 @@ class Supervisor:
         self._refresh_aperture_lifetime_sample()
         self.readings: dict[str, Reading] = {}
         self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY_SAMPLES)
+        # Compact read-only scrollback for Hardware sensor popups. The full
+        # telemetry rows above stay capped at one hour for the Run charts.
+        self.sensor_history: deque[dict[str, Any]] = deque(maxlen=SENSOR_HISTORY_SAMPLES)
         #: A long scrollback, because 250 was nowhere near enough: one run emits
         #: roughly ten events a cycle, so a 150-cycle run pushed the whole
         #: pre-start out of the buffer before anyone could read it. This is only
@@ -341,6 +350,11 @@ class Supervisor:
         readable interface showing what is wrong, not a crash.
         """
         cfg = self.cfg
+        try:
+            await self.recording.run(self.sensor_archive.initialize)
+            self._sensor_archive_ready = True
+        except Exception as exc:
+            self._event("error", f"sensor archive unavailable: {type(exc).__name__}: {exc}")
         self._plan = self._build_plan()
 
         self.daq = self.devices.daq()
@@ -924,6 +938,21 @@ class Supervisor:
         # tiles must show the last known reading, not blink out between polls.
         # Only the file gets the blanks.
         self.history.append(sample)
+        if (not self.sensor_history or
+                sample["t"] - self.sensor_history[-1]["t"] >= SENSOR_HISTORY_INTERVAL):
+            sensor_columns = (
+                "pressure", "stage_temp",
+                *(f"gauge_{g.id}" for g in cfg.gauges),
+                *(f"aux_{a.id}" for a in cfg.aux_inputs
+                  if a.kind == "thermocouple"),
+                *(f"inst_{i.id}" for i in cfg.instruments
+                  if i.enabled and i.driver == "mks_937b"),
+            )
+            sensor_row = {"t": sample["t"],
+                          **{col: sample.get(col) for col in sensor_columns}}
+            self.sensor_history.append(sensor_row)
+            if self._sensor_archive_ready:
+                self.recording.submit_sensor_sample(self.sensor_archive, sensor_row)
         if self.recipes.busy:
             self.recording.submit_run_sample(sample, prog, blank=stale)
         await self._publish()
@@ -1586,8 +1615,9 @@ class Supervisor:
         dev.polarity = -1 if polarity < 0 else 1
         await dev.set_output(False)
         magnitude = abs(float(volts))
-        if magnitude > 0:
-            await dev.set_voltage(magnitude)
+        # Zero is a program too. The output may still hold a voltage from a
+        # prior run or manual setting, and HCPES enables it after this arm.
+        await dev.set_voltage(magnitude)
         sign = "-" if dev.polarity < 0 else "+"
         tail = f" ({reason})" if reason else ""
         self._event("recipe", f"{supply_id}: sample bias armed at "
