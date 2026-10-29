@@ -47,27 +47,32 @@ identify the owner; public Supervisor commands remain the hardware boundary.
 | Pre-start recipes, persistence, APIs and execution | [prestart_model.py](../reactor/control/prestart_model.py), [prestart_store.py](../reactor/control/prestart_store.py), [prestart.py](../reactor/control/prestart.py), [app.py](../reactor/server/app.py), [supervisor.py](../reactor/supervisor.py) | `test_prestart`, `test_prestart_recipe_api`, `test_prestart_recipes`, `test_prestart_sequence`, `test_keithley_supplies`, `test_hv_and_prestart_abort` |
 | HCPES characterization plans, execution, ETA, recording and analysis | [hcpes_model.py](../reactor/control/hcpes_model.py), [hcpes_store.py](../reactor/control/hcpes_store.py), [hcpes.py](../reactor/control/hcpes.py), [hcpes_recording.py](../reactor/hcpes_recording.py), [hcpes_analysis.py](../reactor/server/hcpes_analysis.py) | `test_hcpes_model`, `test_hcpes_controller`, `test_hcpes_recording`, `test_hcpes_api`, `test_hcpes_analysis`, `test_analysis_layout_api` plus `tests/js/hcpes-editor.mjs` and `tests/js/hcpes-analysis.mjs` |
 | HCPES aperture lifetime and maintenance history | [aperture_lifetime.py](../reactor/aperture_lifetime.py), [supervisor.py](../reactor/supervisor.py), [aperture-card.js](../reactor/server/static/aperture-card.js) | `test_aperture_lifetime`, `test_aperture_integration`, `test_aperture_api`, plus `tests/js/aperture-card.mjs` |
-| Fill regulation and MFC interlocks | [fill.py](../reactor/control/fill.py), [supervisor.py](../reactor/supervisor.py) | `test_fill_controller`, `test_mfc_interlock`, `test_prestart`, `test_ee_ald_recipe` |
+| Fill regulation and MFC flow warnings/interlocks | [fill.py](../reactor/control/fill.py), [supervisor.py](../reactor/supervisor.py) | `test_fill_controller`, `test_mfc_flow_flags`, `test_mfc_interlock`, `test_prestart`, `test_ee_ald_recipe` |
 | Valve identification sweep | [sweep.py](../reactor/control/sweep.py), [supervisor.py](../reactor/supervisor.py) | `test_sweep_controller` |
 | Recording, run display identity and file formats | [recording.py](../reactor/recording.py), [datalog.py](../reactor/datalog.py), [run_identity.py](../reactor/run_identity.py) | `test_recording_api`, `test_recording_worker`, `test_recording_errors`, `test_run_export`, `test_file_naming`, `test_data_routes`, `test_sample_freshness` |
+| Saved setup loading | [run_setup.py](../reactor/run_setup.py), [run_setups.py](../reactor/server/run_setups.py), [run_setup_routes.py](../reactor/server/run_setup_routes.py) | `test_run_setup`, `test_run_setups`, `test_run_setup_routes`, `test_file_naming`, `tests/js/run-setup.mjs` |
 | Telemetry and data routes | [telemetry.py](../reactor/telemetry.py), [data.py](../reactor/server/data.py) | `test_telemetry`, `test_data_routes`, `test_ellipsometer_merge` |
 | Hardware sensor popup and durable compact history | [sensor_archive.py](../reactor/sensor_archive.py), [sensor_plot.py](../reactor/server/sensor_plot.py), [sensor-plot.js](../reactor/server/static/sensor-plot.js), [sensor-plot-data.js](../reactor/server/static/sensor-plot-data.js) | `test_sensor_plot`, `test_static_assets`, `tests/js/sensor-plot.mjs`, `tests/js/control-bootstrap.mjs` |
 | Frontend modules | [control.js](../reactor/server/static/control.js), [live-charts.js](../reactor/server/static/live-charts.js), [aperture-card.js](../reactor/server/static/aperture-card.js), [hcpes-editor.js](../reactor/server/static/hcpes-editor.js), [analysis.js](../reactor/server/static/analysis.js), [analysis-plot.js](../reactor/server/static/analysis-plot.js), [hcpes-analysis.js](../reactor/server/static/hcpes-analysis.js) | `test_static_assets` plus Node commands below |
 | Documentation and entry guidance | [AGENTS.md](../AGENTS.md), [test guide](../tests/README.md) | `test_docs` |
 
 ```sh
-python -m reactor.testing.validate full --require-node
 python -m compileall -q reactor tests
 git diff --check
 ```
 
-Use `python -m reactor.testing.validate control` (or `recording`, `api`,
-`frontend`) for a focused group. Without `--require-node`, missing Node is
-reported as skipped. CI requires Node and runs on Windows.
+For a localized change, run the directly affected test modules and nearby
+integration tests. Do not run the full repository suite by default; it is large
+and is appropriate for broad changes, release validation, or a required CI gate.
+For example, a restart shutdown change uses `test_server_shutdown`,
+`test_keithley_reconnect`, and `test_telemetry`. Use
+`python -m reactor.testing.validate control` (or `recording`, `api`,
+`frontend`) when the change spans a whole group. Without `--require-node`,
+missing Node is reported as skipped. CI requires Node and runs on Windows.
 
 Run the affected baseline before editing, add regression coverage for the
-behavior at stake, run focused checks after each step, and run the complete
-applicable checks before handoff. Prefer observed test conditions over guessed
+behavior at stake, and run targeted checks after each step and before handoff.
+Prefer observed test conditions over guessed
 sleep durations. Retain real asynchronous integration tests alongside any
 simulated-clock tests. A passing test with fake devices proves software
 sequencing, not valve response, physical timing or browser appearance.

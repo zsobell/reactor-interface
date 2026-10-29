@@ -161,6 +161,7 @@ class Telemetry:
             # enormous margin (it is the same cap as the event tail for one
             # reason only - one frame cannot outrun either).
             "errors": _tail(self.sup.errors, 200),
+            "error_log_cleared_at": self.sup.error_log_cleared_at,
         })
 
     def trend(self, limit: int = 1800) -> list[dict[str, Any]]:

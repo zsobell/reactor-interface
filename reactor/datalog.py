@@ -29,6 +29,7 @@ from typing import Any
 from .config import ReactorConfig
 from .run_report import format_run_params
 from .run_identity import META_SUFFIX, next_number
+from .run_setup import SETUP_SUFFIX, make_snapshot, write_snapshot
 
 #: column value that means "seconds since logging started"
 ELAPSED_KEY = "_elapsed"
@@ -150,6 +151,7 @@ class DataLogger:
         # None means "no run in progress", and files fall back to data/.
         self.run_dir: Path | None = None
         self.run_stem: str = ""
+        self._run_prestart_recipe: dict | None = None
 
     def report_error(self, channel: str, exc: Exception) -> None:
         """Latch failures: a later successful row cannot repair missing data."""
@@ -294,13 +296,16 @@ class DataLogger:
 
     @record_errors("parameters")
     def write_run_params(self, params: dict, recipe,
-                         changes: list[dict] | None = None) -> Path:
+                         changes: list[dict] | None = None,
+                         gas_identities: dict[str, str] | None = None,
+                         prestart_recipe: dict | None = None) -> Path:
         """Write a one-time readable report of a UI-built run's settings at
         start: flow rates, phase timings, cycle count, gas schedule, every step.
         Covers both EE-ALD and EE-CVD.
 
-        Plain text, not JSON, and named exactly like the run's other files -
-        `<run>_<stamp>_run_params.txt`, in the run's own folder. It previously
+        The human-readable report is plain text, and a separate versioned JSON
+        setup beside it lets a future run reuse the editable values. The report
+        is named `<run>_<stamp>_run_params.txt` in the run's own folder. It previously
         wrote JSON under a stem of its own (`..._ald_run_params.json`) with a
         timestamp taken at the moment it ran, so it could land a second off the
         rest of the set and sorted apart from it.
@@ -323,6 +328,11 @@ class DataLogger:
             format_run_params(params, recipe, self.run_name, changes=changes,
                               gas_names=self._gas_names),
             encoding="utf-8-sig")
+        if prestart_recipe is not None:
+            self._run_prestart_recipe = prestart_recipe
+        write_snapshot(target_dir / f"{stem}{SETUP_SUFFIX}", make_snapshot(
+            params, recipe.mode, gas_identities or {},
+            prestart_recipe=self._run_prestart_recipe))
         return path
 
     def set_run_name(self, run_name: str) -> str:
@@ -447,7 +457,8 @@ class DataLogger:
         self.run_dir = self._run_folder(stamp)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         suffixes = ("_run.csv", "_bycycle.csv", "_events.log", "_errors.log")
-        all_companions = (*suffixes, "_run_params.txt", "_ellipsometer.csv", META_SUFFIX)
+        all_companions = (*suffixes, "_run_params.txt", SETUP_SUFFIX,
+                          "_ellipsometer.csv", META_SUFFIX)
         while True:
             stem = self._collision_stem(self.run_dir, base_stem, all_companions)
             try:
@@ -456,6 +467,7 @@ class DataLogger:
             except FileExistsError:
                 continue
         self.run_stem = stem
+        self._run_prestart_recipe = None
         self._run_fh, self._bycycle_fh, self._events_fh, self._errors_fh = handles
         self.run_path, self.bycycle_path, self.events_path, self.errors_path = paths
         run_date = datetime.fromtimestamp(started_at).date().isoformat()

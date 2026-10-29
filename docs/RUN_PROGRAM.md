@@ -60,6 +60,23 @@ The **run name** is separate and already server-owned (`config/last_run.json`),
 so the suggested next name follows real runs rather than whichever browser you
 happen to be sitting at.
 
+### Reuse settings from a recorded run
+
+New EE-ALD and EE-CVD runs save a versioned `_run_setup.json` beside their
+readable `_run_params.txt` report. The Run tab's **Load from previous run**
+control lists only runs with that setup file. Older text-only datasets are not
+imported. The setup records the mode, editable run values and the gas selection
+reported by each connected MFC when the settings were recorded. A disconnected
+MFC has an unknown gas identity rather than an assumed one.
+
+Selecting a run previews the changed values. Gas selections that differ or
+cannot be verified are shown before applying; a channel whose saved setup
+requests flow requires explicit acknowledgement. Applying copies values into
+the next-run form, keeps the suggested new run name, and never starts a run,
+pre-start or hardware command. The control is unavailable while a run or
+pre-start owns the reactor. A saved custom pre-start recipe is identified in
+the preview but is not silently substituted for the currently selected recipe.
+
 ## Sample bias
 
 **Sample bias (V)** sits in the main parameter grid for both modes, where *Min
@@ -500,7 +517,7 @@ second start (409) and the UI disables it.
 |---|---|---|---|
 | Cycles | `cycles` | 100 | |
 | Dose pressure (Torr) | `dose_pressure_torr` | 0.020 | full-volume setpoint (ai1 Baratron) |
-| Dose time (s) | `dose_s` | 0.05 | valve open time for each pulse |
+| Dose time (s) | `dose_s` | 0.05 | valve open time for each pulse; 0 skips the dose without commanding the dose valve |
 | Pulses per cycle | `dose_pulses` | 1 | **Advanced Controls**; repeat before Pump A |
 | Wait between pulses (s) | `dose_pulse_gap_s` | 0 | **Advanced Controls**; valve stays closed |
 | Pump A after dose (s) | `pump_a_s` | 10 | EE-ALD: monotonic elapsed time. EE-CVD: lit-time gated |
@@ -806,6 +823,11 @@ sidecar of `(fs_time -> reactor_clock)` pairs. Afterwards you refit the run in
 the FS-1 software, download that file, drop it in here with this run's sidecar
 and run export, and get back one plot-ready CSV, keyed by fractional cycle
 number with reignite-paused samples dropped.
+
+The Run tab also shows the latest fresh broadcast thickness and a rough growth
+per cycle over the last 10 minutes. It averages observations within each cycle
+before fitting a line, clears on a new run or unit change, and hides the guide
+when the stream is stale. This live guide does not replace the later FS-1 refit.
 
 The output is a **union of instants, not a resampling**: every reactor sample
 keeps its own row (ellipsometry columns blank) and every FS-1 measurement gets

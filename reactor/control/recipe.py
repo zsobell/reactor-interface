@@ -644,6 +644,8 @@ class RecipeRunner:
         if step.op == "dose":
             if not step.valve or step.seconds is None:
                 raise ValueError("dose needs 'valve' and 'seconds'")
+            if step.seconds == 0:
+                return
             # A dose is a pulse: open, hold, close. The close in `finally` is part
             # of the operation, so an aborted dose still ends with its own valve
             # returned to where it started.

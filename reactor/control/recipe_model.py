@@ -89,6 +89,8 @@ class Step(BaseModel):
 
     def duration_s(self) -> float:
         if self.op == "dose":
+            if self.seconds == 0:
+                return 0.0
             return ((self.seconds or 0.0) * self.dose_pulses
                     + self.dose_pulse_gap_s * (self.dose_pulses - 1))
         return self.seconds or 0.0

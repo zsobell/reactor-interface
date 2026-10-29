@@ -150,11 +150,14 @@ class RecordingService:
         return await self.run(self.logger.start_run_export, recipe_name, started_at)
 
     async def write_run_parameters(
-        self, params: dict[str, Any], recipe: Recipe, changes=None
+        self, params: dict[str, Any], recipe: Recipe, changes=None,
+        gas_identities=None, prestart_recipe=None
     ) -> Path:
-        return await asyncio.shield(self.queue_run_parameters(params, recipe, changes))
+        return await asyncio.shield(self.queue_run_parameters(
+            params, recipe, changes, gas_identities, prestart_recipe))
 
-    def queue_run_parameters(self, params: dict[str, Any], recipe: Recipe, changes=None):
+    def queue_run_parameters(self, params: dict[str, Any], recipe: Recipe, changes=None,
+                             gas_identities=None, prestart_recipe=None):
         """Accept a copied report before releasing control ownership.
 
         The caller may await its completion outside the edit lock. The ordered
@@ -162,7 +165,8 @@ class RecordingService:
         disconnects or run cleanup begins while disk I/O is pending.
         """
         future = self._schedule(self.logger.write_run_params,
-                                copy.deepcopy((params, recipe, changes)), {})
+                                copy.deepcopy((params, recipe, changes,
+                                               gas_identities, prestart_recipe)), {})
         wrapped = asyncio.wrap_future(future)
         wrapped.add_done_callback(lambda f: None if f.cancelled() else f.exception())
         return wrapped

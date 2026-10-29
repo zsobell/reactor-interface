@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sys
 
 sys.path.insert(0, ".")
@@ -173,6 +174,12 @@ async def main() -> int:
                     "mfc2_gas_flow_sccm" in text and "0.6" in text and "8" in text)
             c.check("and it still reports the run it ended up being",
                     "PARAMETERS SET IN THE UI" in text)
+            saved = list(sup.logger.dir.glob("*/*_run_setup.json"))
+            setup = json.loads(saved[0].read_text(encoding="utf-8")) if saved else {}
+            c.check("loadable setup tracks the final mid-run settings",
+                    setup.get("params", {}).get("cycles") == 2
+                    and setup["params"]["mfc2_gas_flow_sccm"] == 8.0,
+                    str(saved))
         finally:
             with contextlib.suppress(Exception):
                 await sup.recipes.abort()

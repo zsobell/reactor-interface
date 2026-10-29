@@ -1,10 +1,12 @@
 import {createLiveCharts} from "./live-charts.js";
 import {createControlTransport, SHUTDOWN_HINT} from "./control-transport.js";
 import {createRunForms} from "./control-run-forms.js";
+import {createRunSetupLoader} from "./control-run-setup.js";
 import {createDevicePanels} from "./control-device-panels.js";
 import {createPrestartEditor} from "./prestart-editor.js";
 import {createHcpesEditor} from "./hcpes-editor.js";
 import {createApertureCard} from "./aperture-card.js";
+import {createRunGrowth} from "./run-growth.js";
 "use strict";
 
 /* ---------------------------------------------------------------------------
@@ -16,6 +18,7 @@ import {createApertureCard} from "./aperture-card.js";
 const $ = id => document.getElementById(id);
 let CFG = {};
 const trend = [];
+const updateRunGrowth = createRunGrowth();
 
 const num = (v,d=3) =>
   (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d);
@@ -429,12 +432,16 @@ function valveId(s){
 
 function recipe(s){
   const r = s.recipe;
+  const growth = updateRunGrowth(s);
+  $("rThickness").textContent = growth.thickness;
+  $("rGrowth").textContent = growth.growth;
   const running = ["running","paused","aborting"].includes(r.state);
   const editable = ["running","paused"].includes(r.state);
   runForms.setRunActive(editable, r.started_at, r.params_revision);
   cls($("liveEditBadge"), "hidden", !editable);
   cls($("liveEditPanel"), "hidden", !editable);
   const pre = s.prestart || {};
+  runSetupLoader.setBusy(running || !!pre.cleanup_available || !!s.hcpes?.running);
   prestartEditor.updateStatus(pre);
   // Pre-start and a run both drive the plasma-ground relay, so only one of them
   // can be armed at a time (the server refuses the overlap with a 409 too).
@@ -806,10 +813,22 @@ const LOG_CAP = 200000;          // matches the server's own buffer
 function makeLog(){ return {rows: [], seen: new Set()}; }
 const EVENT_LOG = makeLog();
 const ERROR_LOG = makeLog();
+let errorLogClearedAt = 0;
+
+function clearErrorLogThrough(cutoff){
+  const time = Number(cutoff);
+  if(!Number.isFinite(time) || time <= errorLogClearedAt) return;
+  errorLogClearedAt = time;
+  ERROR_LOG.rows = ERROR_LOG.rows.filter(e => e.t > time);
+  ERROR_LOG.seen = new Set(ERROR_LOG.rows.map(e => `${e.t}|${e.message}`));
+  renderLog($("errors"), ERROR_LOG.rows);
+  updateErrCount();
+}
 
 function pushLog(log, list){
   let added = 0;
   for(const e of list || []){
+    if(log === ERROR_LOG && e.t <= errorLogClearedAt) continue;
     const key = `${e.t}|${e.message}`;
     if(log.seen.has(key)) continue;
     log.seen.add(key);
@@ -835,7 +854,9 @@ async function seedEvents(){
     try{
       const r = await fetch(url);
       if(!r.ok) continue;
-      pushLog(log, (await r.json())[key] || []);
+      const body = await r.json();
+      if(log === ERROR_LOG) clearErrorLogThrough(body.cleared_at);
+      pushLog(log, body[key] || []);
     }catch(_){ /* the live tail alone still works */ }
   }
   renderLog($("events"), EVENT_LOG.rows);
@@ -845,13 +866,14 @@ async function seedEvents(){
 
 function updateErrCount(){
   const n = ERROR_LOG.rows.length;
-  $("errCount").textContent = n ? `${n} logged this session` : "";
+  $("errCount").textContent = n ? `${n} logged` : "";
   if(!n) setHtml($("errors"),
     `<div class="quiet">Nothing yet. Errors and flags land here as they
      happen, and in the run's own <code>_errors.log</code>.</div>`);
 }
 
 function events(s){
+  clearErrorLogThrough(s.error_log_cleared_at);
   // Only re-render when something actually arrived - this runs at 5 Hz and the
   // log can be two hundred thousand rows.
   if(pushLog(EVENT_LOG, s.events)) renderLog($("events"), EVENT_LOG.rows);
@@ -878,6 +900,7 @@ const devicePanels = createDevicePanels({$, document, cssEscape:value => CSS.esc
   confirmImpl:(...args) => confirm(...args), promptImpl:(...args) => prompt(...args)});
 const runForms = createRunForms({$, document, storage:localStorage, fetchImpl:fetch,
   cls, smoothing, drawChart});
+const runSetupLoader = createRunSetupLoader({$, fetchImpl:fetch, runForms});
 function prestartBaseValues(){
   const P = key => parseFloat($("p_" + key).value);
   const run = runForms.runParams();
@@ -959,6 +982,15 @@ document.addEventListener("keydown", ev => {
 });
 
 // ---------------------------------------------------------------- actions
+$("clearErrorsBtn").onclick = async () => {
+  const button = $("clearErrorsBtn");
+  button.disabled = true;
+  try{
+    const result = await post("/api/errors/clear");
+    clearErrorLogThrough(result.cleared_at);
+  }catch(_){}
+  finally{ button.disabled = false; }
+};
 // Valve identification. STOP is the safety-critical control - keep it trivial.
 // Two STOP controls, same action: the fixed top bar and the one in the card.
 $("sweepStop").onclick = () => post("/api/valve_id/stop");
@@ -1163,6 +1195,7 @@ let bootstrapComplete = false;
   runForms.mount();
   await runForms.loadParams();
   if(pageDisposed) return;
+  runSetupLoader.mount();
   await prestartEditor.mount();
   if(pageDisposed) return;
   await hcpesEditor.mount();

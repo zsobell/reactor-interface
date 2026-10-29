@@ -24,8 +24,8 @@ reactor's (parked on a send queue, never reading, never closing) and a client
 that never goes away. Against the old config it hangs forever; the assertion is
 that the app's shutdown still runs, promptly.
 
-No hardware and no Supervisor here - the bug is in how the process is served
-and stopped, not in what it was serving.
+The socket test also serves an unstarted Supervisor with a temporary state
+directory. It never connects to hardware.
 
 Run directly: python -m tests.test_server_shutdown
 """
@@ -37,10 +37,12 @@ import asyncio
 import builtins
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 import tempfile
 
@@ -355,6 +357,71 @@ async def isolated_checks() -> int:
         c.check("the process was not ended before answering", asked["n"] == 0)
         await asyncio.sleep(0.4)
         c.check("...and is requested just after", asked["n"] == 1, str(asked["n"]))
+
+    c.section("5a. a live viewer closes before the server's drain")
+    with tempfile.TemporaryDirectory(prefix="restart_websocket_") as state_dir:
+        drain_errors = []
+        class DrainCapture(logging.Handler):
+            def emit(self, record):
+                if "timeout graceful shutdown exceeded" in record.getMessage():
+                    drain_errors.append(record.getMessage())
+
+        drain_capture = DrainCapture()
+        uvicorn_log = logging.getLogger("uvicorn.error")
+        uvicorn_log.addHandler(drain_capture)
+        supervisor = Supervisor(
+            load_config(), paths=StatePaths.in_directory(Path(state_dir)))
+        app = app_mod.create_app(supervisor=supervisor)
+        server = uvicorn.Server(uvicorn.Config(
+            app, host="127.0.0.1", port=0, log_level="warning",
+            lifespan="off", timeout_graceful_shutdown=1))
+        app.state.request_shutdown = lambda: setattr(server, "should_exit", True)
+        serving = asyncio.create_task(server.serve())
+        try:
+            for _ in range(100):
+                if server.started:
+                    break
+                await asyncio.sleep(0.02)
+            c.check("closeable test server started", server.started)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            sockets = [await websockets.connect(f"ws://127.0.0.1:{port}/ws")
+                       for _ in range(3)]
+            try:
+                for live_socket in sockets:
+                    await live_socket.recv()  # initial state frame
+                await sockets[0].close()
+                await asyncio.sleep(0.05)
+                c.check("closed viewer unsubscribes without another telemetry frame",
+                        len(supervisor.telemetry.subscribers) == 2)
+
+                def request_stop():
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/server/shutdown",
+                        data=b"{}", method="POST")
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        return response.status, json.load(response)
+
+                status, receipt = await asyncio.to_thread(request_stop)
+                c.check("shutdown receipt remains available with a live viewer",
+                        status == 200 and receipt["ok"])
+                await asyncio.wait_for(asyncio.gather(
+                    *(sock.wait_closed() for sock in sockets[1:])), 2)
+                c.check("Uvicorn closes live viewers for service restart",
+                        all(sock.close_code == 1012 for sock in sockets[1:]),
+                        str([sock.close_code for sock in sockets[1:]]))
+            finally:
+                for live_socket in sockets:
+                    with contextlib.suppress(Exception):
+                        await live_socket.close()
+            await asyncio.wait_for(serving, 2)
+            c.check("server exits without a WebSocket drain timeout", True)
+        finally:
+            server.should_exit = True
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(serving, 2)
+            uvicorn_log.removeHandler(drain_capture)
+        c.check("live viewers cause no Uvicorn cancellation error",
+                not drain_errors, str(drain_errors))
 
     c.section("6. restart launches a handoff before the same shutdown sequence")
     with tempfile.TemporaryDirectory(prefix="restart_state_") as state_dir:

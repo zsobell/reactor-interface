@@ -73,11 +73,14 @@ port. Do not copy `instrument.return_to_local` here.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 
 from ..config import PowerSupplyCfg
 from .base import Device, Reading
+
+log = logging.getLogger(__name__)
 
 #: One round-trip for everything the UI and the log need: measured V and I, the
 #: output state, the questionable-status register, both setpoints, and the
@@ -305,9 +308,20 @@ class Keithley2260B(Device):
         collimating coil out from under a running plasma. And there is no
         remote/local handoff to do: see the module docstring.
         """
-        async with self._lock:
-            await self._serial_call(self._close)
-        self.connected = False
+        try:
+            async with self._lock:
+                log.info("%s: serial close queued", self.id)
+                await self._serial_call(self._close_checked)
+        finally:
+            self.connected = False
+
+    def _close_checked(self) -> None:
+        """Report a failed close instead of claiming this port was released."""
+        if self._ser is not None:
+            log.info("%s: serial close entered on %s", self.id, self.port)
+            self._ser.close()
+            self._ser = None
+            log.info("%s: serial close complete", self.id)
 
     def _close(self) -> None:
         if self._ser is not None:

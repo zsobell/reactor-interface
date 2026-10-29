@@ -66,6 +66,11 @@ async def main() -> int:
             body.get("cycle_s") == build_cvd_recipe(P).cycle_seconds())
     c.check("total_s == cycles x cycle_s",
             body.get("total_s") == want_cycle * P["cycles"], str(body.get("total_s")))
+    st, body = await asgi_call(app, "POST", "/api/run/estimate",
+                                    dict(P, mode="cvd", dose_s=0,
+                                         dose_pulses=3, dose_pulse_gap_s=2))
+    c.check("zero dose excludes pulse gaps from EE-CVD cycle estimate",
+            st == 200 and body.get("cycle_s") == P["pump_a_s"], f"{st} {body}")
 
     c.section("3. teardown is excluded, exactly as the countdown excludes it")
     # ar_close_delay_s is a teardown wait. If it leaked into the estimate, the

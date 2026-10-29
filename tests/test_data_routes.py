@@ -65,6 +65,8 @@ async def main():
         for path in (run, cycle, events, other):
             path.write_text("test", encoding="utf-8")
         identity = folder / "Test_260101_120000_analysis.json"
+        setup = folder / "Test_260101_120000_run_setup.json"
+        setup.write_text("{}", encoding="utf-8")
         identity.write_text(json.dumps({"schema_version": 1, "name": "Test",
             "date": "2026-01-01", "number": 1}), encoding="utf-8")
         (folder / "Test_260101_130000_analysis.json").write_text(json.dumps({
@@ -90,6 +92,7 @@ async def main():
                     "Test/Test_260101_120000_bycycle.csv",
                     "Test/Test_260101_120000_events.log",
                     "Test/Test_260101_120000_analysis.json",
+                    "Test/Test_260101_120000_run_setup.json",
                 })
         status, _ = await request(app,
             "/api/data/file?name=../outside.csv", method="DELETE")
@@ -98,6 +101,13 @@ async def main():
         hcpes.mkdir()
         hcpes_csv = hcpes / "points.csv"
         hcpes_csv.write_text("point_index\n", encoding="utf-8")
+        status, data = await request(app, "/api/data/files")
+        c.check("run selector excludes HCPES session CSVs",
+                status == 200 and all(not row["name"].startswith("HCPES-")
+                                      for row in data["files"]))
+        status, _ = await request(app,
+            "/api/data/file?name=HCPES-test/points.csv")
+        c.check("run file endpoint cannot load HCPES session CSVs", status == 404)
         status, _ = await request(app,
             "/api/data/file?name=HCPES-test/points.csv", method="DELETE")
         c.check("run-data delete cannot erase HCPES files",
@@ -120,9 +130,9 @@ async def main():
         status, data = await request(app,
             f"/api/data/file?name={selected}", method="DELETE")
         c.check("only the chosen run stem is deleted",
-                status == 200 and len(data["deleted"]) == 4
+                status == 200 and len(data["deleted"]) == 5
                 and not run.exists() and not cycle.exists() and not events.exists()
-                and not identity.exists()
+                and not identity.exists() and not setup.exists()
                 and other.exists() and side.exists())
 
         entered, release = threading.Event(), threading.Event()

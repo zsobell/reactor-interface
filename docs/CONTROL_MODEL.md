@@ -487,6 +487,9 @@ setpoint doesn't match the measured flow value during a run."*
 to every MFC and to any supply whose output is on. Up to four live conditions
 show as chips in the top right of the header, and each clears itself the moment
 its condition does.
+An MFC flow mismatch also creates one `flag` entry in the Diagnostics Error Log
+when it begins. A recovery event goes to the Event Log when it clears; repeated
+polls do not duplicate the flag.
 
 **A supply in CC mode is exempt** (2026-09-09). A current-limited supply sits
 below its voltage setpoint by definition — that is what constant current *is* —
@@ -498,7 +501,8 @@ actually been reached, so an unloaded or settling output is not judged either.
 **These warn and nothing else.** No setpoint is refused, clamped or altered by
 any of it; a flagged value is still written to the hardware exactly as typed.
 There is a `SETPOINT_SETTLE_S` grace after each commanded change so a device on
-its way to a new value is not called a mismatch - a display debounce, nothing
+its way to a new value is not called a mismatch. The grace is 2 seconds (reduced
+from 5 seconds on 2026-10-29) - a display debounce, nothing
 about the control path depends on it. A commanded **zero** is not monitored:
 there is no relative baseline, and a gas that is off is not a fault.
 

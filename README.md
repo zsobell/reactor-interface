@@ -273,6 +273,7 @@ reactor/
   hcpes_recording.py          immutable raw/qualified/point/campaign bundles
   datalog.py                  manual/run/by-cycle CSVs and ellipsometer sidecars
   run_identity.py             display names and date-based run file identities
+  run_setup.py                versioned, loadable settings captured with new runs
   run_report.py               pure formatting of readable run parameters
   sensor_archive.py           durable compact sensor scrollback for Hardware plots
   control/
@@ -303,6 +304,8 @@ reactor/
   server/
     app.py                    HTTP control, lifecycle, authentication and pages
     data.py                   analysis/file routes, with worker-based file operations
+    run_setups.py             discover and read saved run settings
+    run_setup_routes.py       review settings and check gas identity before reuse
     hcpes_analysis.py         HCPES bundle validation, analysis and display metadata routes
     sensor_plot.py            read-only pressure/temperature history projection
     static/index.html         control page markup

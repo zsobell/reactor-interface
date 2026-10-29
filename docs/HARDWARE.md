@@ -352,6 +352,31 @@ descriptor, so the driver resolves the port from it and refuses any unit whose
 Firmware is not uniform: the stage bias runs `01.84.20190904`, the other three
 `01.72.20150702`.
 
+#### Known restart serial errors (accepted, unresolved)
+
+**Status, 2026-10-28: suspected Windows USB serial/driver behavior; cause not
+proven. Software remedies attempted; errors remain visible.** On several UI
+restarts, collimating (COM12) entered pyserial's `Serial.close()` but did not
+return within the 3-second device shutdown deadline. The old process then hit
+its hard exit deadline. In the replacement process, stage bias (COM9) sometimes
+spent about 30 seconds configuring the port before Windows returned error 31
+("A device attached to the system is not functioning"); it reconnected later.
+One observed COM9 close completed normally before its next startup failed, so
+an unclosed COM9 handle does not explain every failure. The four supplies are
+USB ports on the same hub path (`1-1.1` through `1-1.4`). This points toward
+the Windows USB serial path, but does not isolate the hub, driver, cable, or
+individual supply.
+
+The restart sequence, serial worker locking, shutdown timing, and pyserial
+close/error reporting were investigated and adjusted. An explicit read
+cancellation was tried and removed when logs showed COM12 was already inside
+`Serial.close()`; pyserial handles cancellation in its own close path. The MFC
+shutdown adjustment eliminated a separate late-reply warning in the observed
+restarts but did not fix these serial errors. No retry delay or error suppression
+was added. See Beads issue `reactor-dhp` for the investigation history. Treat a
+COM12 close timeout or COM9 Windows error 31 as a real failure even if the next
+connection succeeds; inspect the USB path and device behavior if revisiting it.
+
 As found 2026-08-21, all outputs off, with Zach's working setpoints dialled in
 — 20 V/0.5 A, 30.07 V/3.7 A, 100 V/0.2 A, 150 V/2.5 A. This program logs their
 voltage and current. Normal ALD/CVD pre-start switches the three support outputs

@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import csv
 import io
+import json
 import re
 import sys
 import time
@@ -286,10 +287,16 @@ async def main() -> int:
         c.check("nothing the run wrote was left loose in data/",
                 not any(p.is_file() and p.name.startswith("Mo-042")
                         for p in data_dir.iterdir()))
-        c.check("only the analysis identity is JSON",
-                len([n for n in names if n.endswith(".json")]) == 1
-                and any(n.endswith(META_SUFFIX) for n in names),
+        c.check("analysis identity and loadable setup are JSON",
+                len([n for n in names if n.endswith(".json")]) == 2
+                and any(n.endswith(META_SUFFIX) for n in names)
+                and any(n.endswith("_run_setup.json") for n in names),
                 ", ".join(names))
+        setup_path = next(folder / n for n in names if n.endswith("_run_setup.json"))
+        setup = json.loads(setup_path.read_text(encoding="utf-8"))
+        c.check("recorded setup keeps mode and settings",
+                setup["mode"] == "ald" and setup["params"]["cycles"] == 1
+                and setup["params"]["dose_s"] == 0.05)
         c.check("the parameters file is a .txt",
                 any(n.endswith("_run_params.txt") for n in names))
         c.check("every filename starts with the run name",

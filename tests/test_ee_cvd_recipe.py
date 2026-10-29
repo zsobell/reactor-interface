@@ -101,6 +101,16 @@ async def main() -> int:
                 vr.mfcs["mfc1"].commanded_sccm == 0.0 and vr.mfcs["mfc2"].commanded_sccm == 0.0)
         c.check("fill valve closed at run end", vr.sup.valve_state["rpm_top"] is False)
 
+        c.section("zero dose never commands the precursor valve")
+        writes_before = len(vr.daq.do_writes)
+        await run_cvd(vr, dict(P, cycles=2, dose_s=0, dose_pulses=3,
+                               dose_pulse_gap_s=0.01, pump_a_s=0.05,
+                               ar_close_delay_s=0))
+        precursor_writes = [w for w in vr.daq.do_writes[writes_before:]
+                            if w[1] == "prec1"]
+        c.check("zero-dose EE-CVD run has no precursor DAQ writes",
+                precursor_writes == [], str(precursor_writes))
+
         c.section("3. plasma drops out mid-run: reignites, beam still ends grounded")
         events_before = len(vr.sup.events)
         writes_before = len(vr.daq.do_writes)

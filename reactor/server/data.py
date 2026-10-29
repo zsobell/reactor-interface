@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 
 from ..analysis import ellipsometer_merge as ell
 from ..run_identity import META_SUFFIX, display_name, next_number, read_identity
+from ..run_setup import SETUP_SUFFIX
 
 def merged_name(reactor_run: str, sidecar: str, filename: str) -> str:
     """Name the merged file after the RUN, not after the dropped refit file.
@@ -57,6 +58,17 @@ class DataFiles:
             raise HTTPException(404, f"no such file in data dir: {name}")
         return p
 
+    def in_run_data_dir(self, name: str) -> Path:
+        """Resolve a run file without exposing HCPES bundles to run analysis."""
+        path = self.in_data_dir(name)
+        if self.is_hcpes_path(path):
+            raise HTTPException(404, "not a run data file")
+        return path
+
+    def is_hcpes_path(self, path: Path) -> bool:
+        return any(part.startswith("HCPES-") for part in
+                   path.relative_to(self.directory).parts)
+
     def entries(self, pattern: str) -> list[dict[str, Any]]:
         """Matching files in the data dir AND its per-run subfolders, newest
         first.
@@ -74,6 +86,8 @@ class DataFiles:
         out: list[dict[str, Any]] = []
         if d.exists():
             for p in d.rglob(pattern):
+                if self.is_hcpes_path(p):
+                    continue
                 with contextlib.suppress(OSError):
                     st = p.stat()
                     identity = self.identity_for(p)
@@ -134,7 +148,7 @@ class DataFiles:
         suffixes = (
             "_reactor_synced.csv", "_bycycle.csv", "_run.csv",
             "_events.log", "_errors.log", "_run_params.txt",
-            "_ellipsometer.csv", META_SUFFIX,
+            "_ellipsometer.csv", META_SUFFIX, SETUP_SUFFIX,
         )
         suffix = next((end for end in suffixes if selected.name.endswith(end)), None)
         if suffix is None:
@@ -259,7 +273,7 @@ def create_data_router(
 
     @router.get("/api/data/file")
     def get_file(name: str):
-        return FileResponse(files.in_data_dir(name), media_type="text/csv")
+        return FileResponse(files.in_run_data_dir(name), media_type="text/csv")
 
     @router.get("/api/data/delete-preview")
     def delete_preview(name: str):

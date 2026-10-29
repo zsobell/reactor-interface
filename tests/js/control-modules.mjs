@@ -161,11 +161,31 @@ function fakeElement(value = '') {
   assert.equal(modeAld.hidden, true); assert.equal(modeCvd.hidden, false);
   elements.get('p_dose_pulses').value = '3';
   elements.get('p_dose_pulse_gap_s').value = '0.4';
+  elements.get('p_dose_s').value = '0';
+  elements.get('p_pump_a_s').value = '10';
+  elements.get('p_mfc1_gas_enable').checked = true;
+  elements.get('p_mfc1_gas_pct').value = '100';
+  forms.updateGasSchedHint();
+  assert.match(elements.get('gasSchedHint').textContent, /off cycle\+10\.00s/,
+    'zero dose omits pulse gaps from the gas timing hint');
+  elements.get('p_dose_s').value = '0.25';
+  elements.get('p_mfc1_gas_enable').checked = false;
   forms.saveParams(); await pendingSave();
   assert.equal(posts[0][0], '/api/run_params');
   assert.equal(posts[0][1].cycles, '12', 'saved payload contains the effective parameter values');
   assert.equal(posts[0][1].dose_pulses, '3', 'pulse count is saved with run parameters');
   assert.equal(posts[0][1].dose_pulse_gap_s, '0.4', 'pulse gap is saved with run parameters');
+  elements.get('p_run_name').value = 'Next run';
+  await forms.applyLoadedSetup({cycles:22, min_current_a:0.0006,
+    tolerance_frac:0.15, mfc1_gas_enable:true,
+    mfc1_gas_order:'first', mfc1_gas_pct:75, mfc1_gas_flow_sccm:3.5}, 'ald');
+  assert.equal(elements.get('modeSel').value, 'ald', 'saved mode is selected');
+  assert.equal(elements.get('p_cycles').value, 22, 'saved cycles populate the form');
+  assert.equal(elements.get('p_min_current_ua').value, 600, 'current returns to form units');
+  assert.equal(elements.get('p_tolerance_pct').value, 15, 'tolerance returns to form units');
+  assert.equal(elements.get('p_mfc1_gas_enable').checked, true, 'MFC enable populates');
+  assert.equal(elements.get('p_run_name').value, 'Next run', 'next run name stays intact');
+  assert.equal(posts.at(-1)[1].mode, 'ald', 'loaded values save to the server immediately');
   forms.dispose();
   assert.equal(elements.get('aldParams').events.input.size, 0, 'dispose removes parameter handlers');
 }

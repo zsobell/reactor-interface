@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .data import DataFiles, create_data_router, merged_name
+from .run_setup_routes import create_run_setup_router
 from .hcpes_analysis import HcpesAnalysisFiles, create_hcpes_analysis_router
 from .sensor_plot import compact_sensor_history, sensor_plot_specs
 from .. import __version__, instances
@@ -192,6 +193,7 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
 
     app.include_router(create_data_router(
         DataFiles(sup.logger.dir), before_delete=before_run_data_delete))
+    app.include_router(create_run_setup_router(sup, sup.logger.dir))
     def before_hcpes_delete(name: str) -> None:
         campaign_task = sup._hcpes_campaign_task
         if (sup.hcpes_running or sup.recording.status()["hcpes"].get("active")
@@ -318,7 +320,13 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
         the browser keeps the two panels separately seeded and tailed, and
         because a run writes the same split to disk (`*_errors.log`).
         """
-        return {"errors": list(sup.errors)[-limit:]}
+        return {"errors": list(sup.errors)[-limit:],
+                "cleared_at": sup.error_log_cleared_at}
+
+    @app.post("/api/errors/clear")
+    async def clear_errors() -> dict[str, Any]:
+        """Clear the shared Error Log without changing the event/run archives."""
+        return {"ok": True, "cleared_at": sup.clear_errors()}
 
     @app.get("/api/trend")
     async def get_trend(limit: int = 1800) -> dict[str, Any]:
@@ -376,15 +384,36 @@ def create_app(cfg: ReactorConfig | None = None, *, paths: StatePaths | None = N
     async def ws(sock: WebSocket) -> None:
         await sock.accept()
         q = sup.subscribe()
+        async def wait_for_disconnect() -> None:
+            while True:
+                message = await sock.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+
+        disconnected = asyncio.create_task(wait_for_disconnect())
+        next_frame = None
         try:
             await sock.send_json(sup.state())
             while True:
-                await sock.send_json(await q.get())
+                next_frame = asyncio.create_task(q.get())
+                done, _ = await asyncio.wait(
+                    {next_frame, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+                if disconnected in done:
+                    next_frame.cancel()
+                    await asyncio.gather(next_frame, return_exceptions=True)
+                    break
+                frame = next_frame.result()
+                await sock.send_json(frame)
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception:
             pass
         finally:
+            if next_frame is not None:
+                next_frame.cancel()
+                await asyncio.gather(next_frame, return_exceptions=True)
+            disconnected.cancel()
+            await asyncio.gather(disconnected, return_exceptions=True)
             sup.unsubscribe(q)
 
     # -- valves ---------------------------------------------------------- #

@@ -19,9 +19,11 @@ authoritative description of requested reactor behavior.
 - Begin with `bd prime` and `bd ready`; inspect `bd show <id>` and claim with
   `bd update <id> --claim` before editing. Create focused issues for new work.
   Close completed issues immediately and record durable context with `bd remember`.
-- Add and run meaningful tests for each change. Establish a baseline, verify each
-  implementation step, and run the full applicable checks before handoff. Tests
-  use fake devices and temporary files; software tests do not validate hardware.
+- Add and run meaningful tests for each change. Establish a baseline and verify
+  each implementation step with targeted checks. For localized changes, run the
+  affected tests and nearby integration tests before handoff; reserve the full
+  repository suite for broad changes or required release/CI gates. Tests use
+  fake devices and temporary files; software tests do not validate hardware.
 - Delegate bounded independent issues when authorized. Give agents distinct file
   ownership, review their changes and rerun integration checks before acceptance.
 - Use non-interactive file operations (`cp -f`, `mv -f`, `rm -f`; recursive forms

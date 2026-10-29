@@ -14,6 +14,7 @@ from typing import Protocol
 from .recipe import Recipe, RecipeRunner
 from .clock import Clock
 from ..recording import RecordingService
+from ..run_setup import mfc_gas_identities
 
 
 class RunPhase(str, Enum):
@@ -121,7 +122,10 @@ class RunCoordinator:
             path = await self.recording.start_run_export(recipe.name, started_at)
             self.host.report_event('recipe', f'run data recording to {path.name}')
             if params is not None:
-                await self.recording.write_run_parameters(params, recipe)
+                prestart_snapshot = getattr(self.host, "prestart_setup_snapshot", lambda: None)()
+                await self.recording.write_run_parameters(
+                    params, recipe, gas_identities=mfc_gas_identities(getattr(self.host, "mfcs", {})),
+                    prestart_recipe=prestart_snapshot)
         except Exception as exc:
             self.host.report_event('error', f'could not prepare run recording: {exc}')
         if self._cancelled or not self.host.server_running:
@@ -266,7 +270,9 @@ class RunCoordinator:
                         f"{ch['old']} -> {ch['new']} "
                         f"(cycle {ch['cycle']}, {ch['elapsed_s']:.0f}s in)")
         try:
-            report = self.recording.queue_run_parameters(self.params, recipe_now, self.changes)
+            report = self.recording.queue_run_parameters(
+                self.params, recipe_now, self.changes,
+                gas_identities=mfc_gas_identities(getattr(self.host, "mfcs", {})))
         except Exception as exc:
             self.host.report_event("error", f"could not update run parameters file: {exc}")
             report = None

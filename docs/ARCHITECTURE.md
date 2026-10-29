@@ -103,7 +103,9 @@ flowchart TD
   monotonic clock and atomically owns replacement history. It performs no
   hardware reads or writes.
 - `server/data.py` owns file discovery, containment checks, merge orchestration
-  and analysis HTTP routes. It receives a directory, never a Supervisor.
+  and run-analysis HTTP routes. Its file selector and direct CSV load exclude
+  HCPES bundle paths; those belong to the HCPES analysis routes. It receives a
+  directory, never a Supervisor.
   `analysis/ellipsometer_merge.py` remains pure text/number processing.
 - `server/hcpes_analysis.py` separately validates and reads HCPES bundles for
   the Analysis page. It has no Supervisor/device dependency and cross-checks

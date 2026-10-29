@@ -101,6 +101,25 @@ async def main():
         await asyncio.wait_for(closing, 1)
         c.check("disconnect closes port after read finishes",
                 race_port.closed and not race.connected)
+
+        class FailingClosePort(Port):
+            def close(self):
+                raise OSError("injected Windows close failure")
+
+        failing = Keithley2260B(cfg)
+        failing_port = FailingClosePort("COM12")
+        failing._ser = failing_port
+        failing.port = "COM12"
+        failing.connected = True
+        try:
+            await failing.disconnect()
+        except OSError as exc:
+            c.check("disconnect reports a failed COM close", "injected" in str(exc))
+        else:
+            c.check("disconnect reports a failed COM close", False)
+        c.check("failed close does not claim the port was released",
+                failing._ser is failing_port and not failing.connected)
+
     return c.summary()
 
 

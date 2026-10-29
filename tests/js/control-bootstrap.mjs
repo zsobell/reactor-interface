@@ -13,7 +13,8 @@ function element(tag, attrs = '') {
     addEventListener(name, fn) {this.events[name] = fn;},
     removeEventListener(name) {delete this.events[name];},
     querySelectorAll() {return [];}, querySelector() {return null;},
-    appendChild() {}, setAttribute() {}, getBoundingClientRect() {return {left: 0};},
+    appendChild(child) {this.children.push(child);}, replaceChildren(...children) {this.children=children;},
+    setAttribute() {}, getBoundingClientRect() {return {left: 0};},
   };
 }
 for (const match of html.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
@@ -49,6 +50,8 @@ const hcpesPlan = {schema_version:1, id:'current-hcpes-plan', name:'Current HCPE
     reignite_settle_s:1, qualified_samples:5}, axes:[]};
 globalThis.fetch = async url => {
   requested.push(url);
+  if(url === '/api/errors/clear')
+    return {ok:true, json:async () => ({ok:true, cleared_at:1700000050})};
   if(url === '/api/hcpes/capabilities')
     return {ok:true, json:async () => ({schema_version:1, axes:[]})};
   if(url === '/api/hcpes/plans')
@@ -75,6 +78,50 @@ assert.ok(requested.includes('/api/events'), 'event history loaded');
 assert.match(elements.get('events').innerHTML, /seeded startup event/,
   'seeded event history renders before a new telemetry event arrives');
 assert.match(elements.get('smoothHint').textContent, /off/, 'page reads extracted chart settings during bootstrap');
+// A connected socket alone did not catch the telemetry crash: exercise the
+// actual page render path before treating bootstrap as healthy.
+const frame = {
+  site:'Test reactor', t:1700000001, daq:{configured:true, inputs:10},
+  snapshot:{pressure:2e-8, 'pressure.volts':2.5,
+    'stage.temp':23, 'inst.ammeter':1e-6,
+    'gauge.prec1_dose':0.02, 'aux.bubbler':30},
+  readings:{}, stage_temp:{enabled:true,value:23},
+  regulator:{running:false}, gauges:[], aux:[],
+  instruments:[], power_supplies:[], mfcs:[], valves:[],
+  recipe:{state:'idle', cycle:0, cycles_total:0}, prestart:{},
+  logging:{active:false, run_export:{active:false}, ellipsometer:{active:false},
+    hcpes:{active:false}, errors:{}},
+  ellipsometer:null, events:[], errors:[], hcpes:{},
+  aperture_lifetime:{},
+};
+let plotDraws = 0;
+const runCanvas = elements.get('chart');
+runCanvas.clientWidth = 500; runCanvas.clientHeight = 280;
+const drawing = new Proxy({}, {get:(_target, key) => key === 'measureText'
+  ? () => ({width:0}) : () => {}});
+runCanvas.getContext = () => {plotDraws++; return drawing;};
+sockets[0].onmessage({data:JSON.stringify(frame)});
+assert.equal(elements.get('siteName').textContent, 'Test reactor');
+assert.equal(elements.get('pressure').textContent, '2.00e-8',
+  'live telemetry updates the Run readout');
+assert.equal(elements.get('hwPressure').textContent, '2.00e-8',
+  'the same telemetry frame updates Hardware');
+assert.ok(plotDraws > 0, 'the telemetry frame reaches the Run plot drawing path');
+frame.errors = [{t:1700000002, kind:'error', message:'old failure'}];
+sockets[0].onmessage({data:JSON.stringify(frame)});
+assert.match(elements.get('errors').innerHTML, /old failure/);
+await elements.get('clearErrorsBtn').onclick();
+assert.doesNotMatch(elements.get('errors').innerHTML, /old failure/,
+  'clear button empties the displayed error log');
+assert.ok(requested.includes('/api/errors/clear'), 'clear button calls the server');
+sockets[0].onmessage({data:JSON.stringify(frame)});
+assert.doesNotMatch(elements.get('errors').innerHTML, /old failure/,
+  'older telemetry tails cannot restore cleared errors');
+frame.error_log_cleared_at = 1700000050;
+frame.errors = [{t:1700000051, kind:'error', message:'new failure'}];
+sockets[0].onmessage({data:JSON.stringify(frame)});
+assert.match(elements.get('errors').innerHTML, /new failure/,
+  'new errors still appear after clearing');
 const sensor = {dataset:{plotKey:'stage.temp',plotLabel:'Stage temperature'},
   closest(selector){return selector === '[data-pane="hardware"]' ? {} :
     selector === '[data-plot-key]' ? this : null;}};

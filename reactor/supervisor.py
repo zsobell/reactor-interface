@@ -109,7 +109,7 @@ RUN_NAME_PATH = Path(__file__).resolve().parent.parent / "config" / "last_run.js
 #: it. A device on its way to a new value is not a mismatch, and without this
 #: every gas window would flash a warning as the MFC ramped. A DISPLAY debounce
 #: only - nothing about what is commanded, or when, depends on it.
-SETPOINT_SETTLE_S = 5.0
+SETPOINT_SETTLE_S = 2.0
 
 #: Digital-output lines available for valve identification, grouped by module.
 #: Verified present on this hardware. Note a 9375's port0 is INPUT; outputs are
@@ -169,7 +169,12 @@ class Supervisor:
         # parent did and why a failed child may have disappeared.
         lifecycle = instances.read_lifecycle_events(path=self.paths.lifecycle_events)
         self.events.extend(lifecycle)
-        self.errors.extend(e for e in lifecycle if e.get("kind") in self.ERROR_KINDS)
+        self.error_log_cleared_at = max(
+            (e["t"] for e in lifecycle if e.get("kind") == "errors_cleared"),
+            default=0.0)
+        self.errors.extend(e for e in lifecycle
+                           if e.get("kind") in self.ERROR_KINDS
+                           and e["t"] > self.error_log_cleared_at)
 
         self.daq: NiDaqBackend | None = None
         self.mfcs: dict[str, Device] = {}
@@ -219,6 +224,9 @@ class Supervisor:
         #: its way to a new value is not flagged for being on the way. Display
         #: debounce only; nothing about the hardware depends on it.
         self._setpoint_changed: dict[str, float] = {}
+        # MFC excursions already appear in live telemetry. Track transitions so
+        # each one also leaves a single flag in the Diagnostics Error Log.
+        self._mfc_flow_flagged: set[str] = set()
 
         self._plan = DaqPlan()
         self._loop_task: asyncio.Task | None = None
@@ -531,9 +539,14 @@ class Supervisor:
             if task is None:
                 continue
             log.info("shutdown: stopping %s", name)
-            task.cancel()
+            # _running is already false. Let an in-flight Modbus read finish:
+            # cancelling its response future can make pymodbus treat the reply
+            # as unsolicited. A genuinely stuck read still hits this deadline.
+            if name != "MFC loop":
+                task.cancel()
             _done, pending = await asyncio.wait({task}, timeout=3.0)
             if pending:
+                task.cancel()
                 log.warning("shutdown: %s did not stop in 3s - leaving it "
                             "(its thread will die with the process)", name)
                 self._stop_steps.append({
@@ -869,6 +882,26 @@ class Supervisor:
             # than from any config.
             names = self.gas_names()
             self.recording.set_gas_names(names)
+            self._report_mfc_flow_flags()
+
+    def _report_mfc_flow_flags(self) -> None:
+        """Record MFC mismatch transitions without repeating them each poll."""
+        active = {flag["id"]: flag for flag in self.setpoint_flags()
+                  if flag["kind"] == "mfc"}
+        for mid, flag in active.items():
+            if mid not in self._mfc_flow_flagged:
+                self._event("flag", f"{flag['label']} flow {flag['measured']:.3g} sccm "
+                            f"is {flag['off_frac'] * 100:.0f}% off setpoint "
+                            f"{flag['commanded']:.3g} sccm")
+        for mid in self._mfc_flow_flagged - active.keys():
+            # A failed read is not evidence that flow recovered. Keep the
+            # excursion open until a valid reading or a zero target arrives.
+            target = getattr(self.mfcs[mid], "commanded_sccm", None)
+            if target and self.snapshot.get(f"mfc.{mid}.flow") is None:
+                active[mid] = None
+                continue
+            self._event("mfc", f"{self.gas_label(mid)} flow mismatch cleared")
+        self._mfc_flow_flagged = set(active)
 
     async def _current_cycle(self) -> None:
         cfg = self.cfg
@@ -1346,6 +1379,14 @@ class Supervisor:
     @property
     def prestart(self) -> dict:
         return self._prestart.state
+
+    def prestart_setup_snapshot(self) -> dict | None:
+        """Identify the primed recipe captured before a built run takes ownership."""
+        session = self._prestart.session
+        if not self.prestart.get("primed") or session is None:
+            return None
+        return {"id": session.recipe_id, "name": session.name,
+                "revision": session.revision, "parameters": dict(session.parameters)}
 
     async def start_prestart(self, params: dict) -> None:
         params = dict(params or {})
@@ -1833,6 +1874,17 @@ class Supervisor:
     #: Event kinds that belong in the error log as well as the event log.
     #: One list, defined next to the writer that also uses it.
     ERROR_KINDS = datalog.ERROR_KINDS
+
+    def clear_errors(self) -> float:
+        """Clear the operator error view and mark the boundary across restarts.
+
+        Historical events and per-run error files remain available for review.
+        """
+        entry = self.report_lifecycle_event(
+            "errors_cleared", "operator cleared the Error Log")
+        self.error_log_cleared_at = entry["t"]
+        self.errors.clear()
+        return self.error_log_cleared_at
 
     def _event(self, kind: str, message: str, *, record=True,
                timestamp: float | None = None) -> None:

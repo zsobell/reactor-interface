@@ -165,7 +165,11 @@ Supervisor integration with fake devices and isolated file/number processing.
 | `test_prestart_recipe_api.py` | Recipe CRUD/select/preview APIs, revision conflicts, restart persistence, corrupt-schema refusal and atomic/concurrent writes without hardware construction |
 | `test_prestart_sequence.py` | Capability-driven custom execution, immutable launch/cleanup snapshots, alternate targets, partial-failure cleanup, abort idempotence and stale-review refusal before commands |
 | `test_run_export.py` | The automatic per-run files: run CSV opens on start and closes on completion/abort, back-to-back runs don't collide, EE-ALD/EE-CVD rows retain aperture lifetime seconds, and the run-parameters report has a correct gas-schedule summary in both modes |
+| `test_run_setup.py` | Versioned setup snapshots retain editable settings and detect gas identity differences |
+| `test_run_setups.py` | New run setup discovery, file containment and invalid saved data |
+| `test_run_setup_routes.py` | Review and apply checks require gas acknowledgement and reject stale or active-run requests |
 | `test_mfc_interlock.py` | The Ar MFC isolation interlock — the one check no earlier ad hoc harness could exercise, because it lives in `Supervisor` itself, which every earlier fake replaced wholesale |
+| `test_mfc_flow_flags.py` | Two-second MFC settling grace, one Error Log flag per flow excursion, and recovery without repeated events |
 | `test_cycle_numbering.py` | Fractional cycle numbers: the clock freezing on a reignite/pause, monotonicity across a cycle boundary, the by-cycle export dropping frozen samples, and `recipe_step` naming a freeze itself (`reignite` vs `pause`) rather than a separate 0/1 column |
 | `test_ellipsometer_decode.py` | The FS-1 wire format: record decoding against real captured bytes, resync past garbage, field-name-keyed parsing |
 | `test_ellipsometer_merge.py` | The post-run join: dyn-file parsing (both shapes, minutes vs seconds), the time-map fit, the combined by-cycle merge and its warnings |
@@ -189,7 +193,7 @@ Supervisor integration with fake devices and isolated file/number processing.
 | `test_live_params.py` | Changing run parameters mid-run (2026-09-01): a gas flow reaching the MFC immediately rather than at the next window, cycle length and the countdown re-derived, the fill regulator retuned rather than restarted, a lowered cycle count finishing the cycle in progress and stopping, every edit landing in the parameters report's CHANGES section - plus setpoint-vs-measurement warnings appearing, clearing themselves, and never refusing a value |
 | `test_run_estimate.py` | `/api/run/estimate` — the run length shown on an idle Run tab (2026-08-28): that it is the *same* builder's `cycle_seconds` the countdown will start from rather than a second copy of the arithmetic, that EE-CVD comes out shorter, that teardown stays out of it, and that a half-typed gas schedule answers "no number" instead of a 500. Raw ASGI, no lifespan |
 | `test_hv_and_prestart_abort.py` | The two actuation changes of 2026-08-21: HV commanded off however a run ends, without disturbing the front-panel levels; and `abort_prestart` undoing a pre-start (Ar, fill, relay de-energised, HV off) both after the plasma has struck and mid-strike |
-| `test_file_naming.py` | One run = one folder, one stem, no .json: the run name reaching every file, an ellipsometer sidecar whose acquisition opened before Start run being adopted (renamed AND moved into the run folder, mid-capture, without losing a point), unnamed runs falling back to a timestamp folder, the merged file named after the run rather than the dropped refit, and the merged CSV having no doubled line terminators (the "every other row blank in Excel" bug) |
+| `test_file_naming.py` | One run = one folder and stem, including its readable report and loadable JSON setup; the run name reaches every file, an ellipsometer sidecar opened before Start run is adopted without losing a point, and the merged CSV has no doubled line terminators |
 
 Three real bugs have been found and fixed via this suite. On 2026-08-06:
 `RecipeRunner._apply_cvd_gas` not being called at a cycle boundary (a gas
@@ -231,6 +235,7 @@ test no longer requires a pre-existing repository `data/` directory.
 | `test_hcpes_api.py` | Server-owned plans are revisioned and previewed without hardware; only a saved reviewed revision launches; completed opposite-polarity runs automatically derive a signed linked campaign |
 | `test_hcpes_analysis.py` | Read-only analysis discovers completed/partial sessions and linked campaigns, types point telemetry with provenance, preserves signed zero ordering, reconstructs condition-completion order, exposes filtered raw intervals, and flags incompatible sources |
 | `test_data_routes.py` | HTTP file listing, containment and merging retain their contracts; analysis work does not block concurrent requests |
+| `test_error_log_clear.py` | Clearing the shared Error Log removes old entries across browsers and restarts while retaining event history and showing new errors |
 | `test_telemetry.py` | Frames are stable snapshots; slow clients receive only the newest four frames |
 | `test_static_assets.py` | Served HTML, CSS, page modules and transitive module imports are reachable without a build |
 
@@ -246,7 +251,8 @@ format tests may call its synchronous methods directly when no worker is active.
 
 `node tests/js/control-bootstrap.mjs` also loads the real control page's ES
 modules against its actual HTML element IDs, checks server-setting/history
-bootstrap and chart integration, and verifies the HTTPS WebSocket URL.
+bootstrap and chart integration, verifies the HTTPS WebSocket URL, and delivers
+a telemetry frame to check Run readouts, Hardware pressure, and plot drawing.
 
 `node tests/js/aperture-card.mjs` checks lifetime/history formatting, cancel and
 confirmed replacement behavior, unavailable/active guards and teardown.

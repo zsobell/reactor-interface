@@ -142,6 +142,55 @@ async def main() -> int:
         c.check("every teardown step announced itself", len(named) >= 6,
                 f"{len(named)} steps: {named[:3]}")
 
+    c.section("6. shutdown lets an in-flight MFC read finish")
+    async with VirtualReactor(background_tasks=True) as vr:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = False
+        mfc = vr.mfcs["ar"]
+        original_read = mfc.read
+
+        async def delayed_read():
+            nonlocal cancelled
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            return await original_read()
+
+        mfc.read = delayed_read
+        await asyncio.wait_for(entered.wait(), 1)
+        stopping = asyncio.create_task(vr.sup.stop())
+        await asyncio.sleep(0.05)
+        c.check("MFC read is still running before its reply",
+                not stopping.done() and not cancelled)
+        release.set()
+        receipt = await asyncio.wait_for(stopping, 2)
+        c.check("MFC read completed without cancellation",
+                not cancelled and receipt["ok"], str(receipt["failed"]))
+
+    c.section("7. a stuck MFC read still respects the shutdown deadline")
+    async with VirtualReactor(background_tasks=True) as vr:
+        entered = asyncio.Event()
+        never = asyncio.Event()
+
+        async def stuck_read():
+            entered.set()
+            await never.wait()
+            return []
+
+        vr.mfcs["ar"].read = stuck_read
+        await asyncio.wait_for(entered.wait(), 1)
+        t0 = time.monotonic()
+        receipt = await asyncio.wait_for(vr.sup.stop(), 5)
+        c.check("stuck MFC read is named as a shutdown failure",
+                any(step["what"] == "stop MFC loop" for step in receipt["failed"]),
+                str(receipt["failed"]))
+        c.check("stuck MFC read does not park shutdown",
+                time.monotonic() - t0 < 4)
+
     return c.summary()
 
 

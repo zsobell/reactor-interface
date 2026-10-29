@@ -132,6 +132,9 @@ async def main() -> int:
             root, campaign,
             {"analysis-positive": positive_dir, "analysis-negative": negative_dir},
             1_700_000_200)
+        ordinary_run = root / "Mo-001" / "Mo-001_260101_120000_run.csv"
+        ordinary_run.parent.mkdir()
+        ordinary_run.write_text("time_s,pressure\n0,1\n", encoding="utf-8")
 
         files = HcpesAnalysisFiles(root)
         app = FastAPI()
@@ -143,6 +146,8 @@ async def main() -> int:
                 status == 200 and len(data["sources"]) == 4
                 and any(row["status"] == "aborted" for row in data["sources"])
                 and any(row["kind"] == "campaign" for row in data["sources"]))
+        c.check("HCPES selector excludes ordinary run CSVs",
+                all(row["name"] != "Mo-001" for row in data["sources"]))
         partial_name = partial_dir.relative_to(root).as_posix()
         status, data = await request(
             app, f"/api/hcpes/analysis/source?name={partial_name}")

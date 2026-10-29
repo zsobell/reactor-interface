@@ -40,6 +40,18 @@ async def main():
                 waits == [(0.01, True), (0.02, False), (0.01, True),
                           (0.02, False), (0.01, True)], str(waits))
         c.check("dose exits closed before pump A", host.writes[-1][1] is False)
+        zero = builder({"dose_s": 0, "dose_pulses": 3,
+                        "dose_pulse_gap_s": 0.02, "pump_a_s": 0.02}).steps[0]
+        c.check("zero-time dose has no pulse or gap duration", zero.duration_s() == 0)
+        host = Host()
+        runner = RecipeRunner(host)
+        waits = []
+        async def observe_zero_sleep(seconds, **_kwargs):
+            waits.append(seconds)
+        runner._sleep = observe_zero_sleep
+        await runner._exec(zero)
+        c.check("zero-time dose sends no valve commands", host.writes == [], str(host.writes))
+        c.check("zero-time dose skips pulse gaps", waits == [], str(waits))
         try:
             builder({"dose_pulses": 0})
         except ValueError:

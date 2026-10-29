@@ -1,4 +1,5 @@
 /** Run-parameter form state, persistence, mode selection and derived hints. */
+import {formValuesFromRun} from './control-run-setup-values.js';
 const PARAM_KEYS = ["cycles","dose_pressure_torr","dose_s","dose_pulses","dose_pulse_gap_s","pump_a_s","beam_s",
   "pump_b_s","min_current_ua","sample_bias_v","sample_bias_polarity",
   "plasma_current_ma","grid_voltage_v","steering_current_a","collimating_current_a",
@@ -16,6 +17,7 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
                                 clearTimeoutImpl=clearTimeout,
                                 onLiveEditStatus=null}) {
   let saveTimer = null;
+  let saveRequest = null;
   let suggestedRunName = "";
   let mounted = false;
   const listeners = [];
@@ -68,6 +70,7 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
       const r = await fetchImpl("/api/run_params");
       if(r.ok){
         const p = (await r.json()).params || {};
+        if(p.mode === 'ald' || p.mode === 'cvd') $("modeSel").value = p.mode;
         for(const k of PARAM_KEYS) if(p[k]!=null) paramSet(k, p[k]);
         // Mirror the server's copy locally so the next load starts from it.
         if(Object.keys(p).length) storage.setItem("aldParams", JSON.stringify(p));
@@ -90,6 +93,7 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
   }
   function saveParams(event){
     const p={}; for(const k of PARAM_KEYS) p[k]=paramGet(k);
+    p.mode = runMode();
     storage.setItem("aldParams", JSON.stringify(p));
     const key = fieldKey(event && event.target);
     if(key) markLiveDirty(key);
@@ -99,11 +103,14 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
        over. */
     clearTimeoutImpl(saveTimer);
     saveTimer = setTimeoutImpl(() => {
-      fetchImpl("/api/run_params", {
+      saveTimer = null;
+      const request = fetchImpl("/api/run_params", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(p)
       }).catch(() => {});
+      saveRequest = request;
+      request.finally(() => {if(saveRequest === request) saveRequest = null;});
     }, 800);
   }
   async function refreshRunName(force){
@@ -142,7 +149,8 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     // recipe.py respectively.
     const cvd = runMode() === "cvd";
     const pulses = Math.max(1, parseInt($("p_dose_pulses").value, 10) || 1);
-    const doseSpan = pulses * (parseFloat($("p_dose_s").value) || 0)
+    const doseTime = parseFloat($("p_dose_s").value) || 0;
+    const doseSpan = doseTime === 0 ? 0 : pulses * doseTime
       + (pulses - 1) * (parseFloat($("p_dose_pulse_gap_s").value) || 0);
     const span = cvd
       ? doseSpan + (parseFloat($("p_pump_a_s").value) || 0)
@@ -233,6 +241,9 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
       tolerance_frac: (P("tolerance_pct")||20)/100,
       reignite_pulse_s: P("reignite_pulse_s"), reignite_settle_s: P("reignite_settle_s"),
       ar_close_delay_s: P("ar_close_delay_s"),
+      pre_ar_sccm: P("pre_ar_sccm"),
+      pre_valve_delay_s: P("pre_valve_delay_s"),
+      pre_hold_s: P("pre_hold_s"),
       run_name: ($("p_run_name").value || "").trim(),
     };
     if(!cvd){ params.beam_s = P("beam_s"); params.pump_b_s = P("pump_b_s"); }
@@ -449,6 +460,32 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     else if(revision != null && revision > runRevision && !liveInFlight)
       refreshActiveSnapshot(false);
   }
+  async function applyLoadedSetup(params, mode){
+    if(RUN_ACTIVE) throw new Error('Wait until the current run finishes.');
+    if(mode !== 'ald' && mode !== 'cvd') throw new Error('Saved run mode is invalid.');
+    if(saveTimer !== null) clearTimeoutImpl(saveTimer);
+    saveTimer = null;
+    if(saveRequest !== null) await saveRequest;
+    const values = formValuesFromRun(params);
+    const saved = {mode};
+    for(const key of PARAM_KEYS)
+      saved[key] = values[key] !== undefined ? values[key] : paramGet(key);
+    const response = await fetchImpl('/api/run_params', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(saved),
+    });
+    if(!response.ok){
+      let detail = response.statusText || `Save failed (${response.status})`;
+      try{ detail = (await response.json()).detail || detail; }catch(_){}
+      throw new Error(detail);
+    }
+    if(RUN_ACTIVE) throw new Error('A run started while loading settings. Refresh the page before editing.');
+    for(const key of PARAM_KEYS) if(values[key] !== undefined) paramSet(key, values[key]);
+    $("modeSel").value = mode;
+    applyMode();
+    storage.setItem('aldParams', JSON.stringify(saved));
+    updateReigniteHint(); updateGasSchedHint(); updateSmoothHint(); refreshEstimate();
+  }
   function updateGasNames(mfcs){
     const labels = Object.fromEntries(mfcs.map(m => [m.id, m.label || m.id]));
     const names = Object.fromEntries(mfcs.map(m => [m.id, m.gas_name || ""]));
@@ -468,7 +505,7 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     listen($("gasSchedSection"), "change", event => {saveParams(event); updateGasSchedHint();});
     listen($("advSection"), "input", event => {saveParams(event); updateReigniteHint(); refreshEstimate();});
     listen($("preSection"), "input", saveParams);
-    listen($("modeSel"), "change", applyMode);
+    listen($("modeSel"), "change", event => {applyMode(); saveParams(event);});
     listen($("p_smooth_on"), "click", event => event.stopPropagation());
     listen($("smoothSection"), "input", () => {
       saveParams(); updateSmoothHint(); drawChart();
@@ -489,7 +526,7 @@ export function createRunForms({$, document, storage, fetchImpl, cls, smoothing,
     runGeneration++;
     mounted = false;
   }
-  return {applyMode, dispose, loadParams, mount, refreshRunName, runMode,
+  return {applyLoadedSetup, applyMode, dispose, loadParams, mount, refreshRunName, runMode,
           gasScheduleError, setRunActive, updateGasNames, updateEta,
           refreshActiveSnapshot, runParams, saveParams, updateGasSchedHint};
 }
