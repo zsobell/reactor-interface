@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 from reactor.config import load_config
+from reactor.control.clock import Clock
 from reactor.dependencies import StatePaths
 from reactor.server.app import create_app
 from reactor.supervisor import Supervisor
@@ -43,6 +44,21 @@ async def main():
                 replacement.error_log_cleared_at == cleared["cleared_at"]
                 and [e["message"] for e in replacement.errors]
                 == ["new lifecycle failure"])
+        await replacement.recording.close()
+    with tempfile.TemporaryDirectory(prefix="error_log_tied_clock_") as directory:
+        paths = StatePaths.in_directory(Path(directory))
+        clock = Clock(wall=lambda: 1_700_000_000.0)
+        sup = Supervisor(load_config(), paths=paths, clock=clock)
+        sup.report_lifecycle_event("error", "before clear", record=False)
+        first_clear = sup.clear_errors()
+        sup.report_lifecycle_event("error", "between clears", record=False)
+        second_clear = sup.clear_errors()
+        sup.report_lifecycle_event("error", "after clears", record=False)
+        await sup.recording.close()
+        replacement = Supervisor(load_config(), paths=paths, clock=clock)
+        c.check("same-tick events retain clear order across restart",
+                second_clear > first_clear
+                and [e["message"] for e in replacement.errors] == ["after clears"])
         await replacement.recording.close()
     return c.summary()
 

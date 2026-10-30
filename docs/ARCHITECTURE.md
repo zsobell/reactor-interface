@@ -117,8 +117,11 @@ flowchart TD
   parent PID using the Win32 process query in `instances.py`. Only then does the
   app run the same bounded teardown and process exit. A compact lifecycle JSONL
   journal is imported into the replacement's ordinary Event Log/Error Log, so
-  the handoff remains visible after the parent disappears. The browser recognizes
-  the replacement by a fresh per-process identity before reloading the same tab.
+  the handoff remains visible after the parent disappears. Lifecycle timestamps
+  advance strictly even when Windows reports the same wall-clock tick, so a
+  newly logged error stays newer than a Clear errors marker after restart. The
+  browser recognizes the replacement by a fresh per-process identity before
+  reloading the same tab.
 
 ## Polling and experiment timing
 

@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 from collections import deque
 from itertools import islice
 from pathlib import Path
@@ -168,6 +169,7 @@ class Supervisor:
         # the replacement's ordinary Event Log and Error Log explain what the
         # parent did and why a failed child may have disappeared.
         lifecycle = instances.read_lifecycle_events(path=self.paths.lifecycle_events)
+        self._last_lifecycle_event_at = max((e["t"] for e in lifecycle), default=0.0)
         self.events.extend(lifecycle)
         self.error_log_cleared_at = max(
             (e["t"] for e in lifecycle if e.get("kind") == "errors_cleared"),
@@ -1865,9 +1867,13 @@ class Supervisor:
     def report_lifecycle_event(self, kind: str, message: str, *,
                                record: bool = True) -> dict[str, Any]:
         """Publish and persist a server lifecycle event across restarts."""
+        timestamp = self.clock.wall()
+        if timestamp <= self._last_lifecycle_event_at:
+            timestamp = math.nextafter(self._last_lifecycle_event_at, math.inf)
         entry = instances.append_lifecycle_event(
             kind, message, path=self.paths.lifecycle_events,
-            timestamp=self.clock.wall())
+            timestamp=timestamp)
+        self._last_lifecycle_event_at = entry["t"]
         self._event(kind, message, timestamp=entry["t"], record=record)
         return entry
 
