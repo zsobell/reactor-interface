@@ -13,6 +13,7 @@ from typing import Any
 
 from .clock import Clock
 from .prestart_model import (
+    CURRENT_RECIPE_ID,
     ResolvedPrestart,
     ResolvedStep,
     target_device_id,
@@ -22,6 +23,10 @@ from .prestart_store import PrestartRecipeStore
 
 
 Handler = Callable[[ResolvedStep], Awaitable[None]]
+
+
+class PrestartStepDeferred(Exception):
+    """A step will be retried when the required hardware state is observed."""
 
 
 class PrestartController:
@@ -45,6 +50,7 @@ class PrestartController:
         self.session: ResolvedPrestart | None = None
         self._grounded_plasma_switches: set[str] = set()
         self._receipts: list[dict[str, Any]] = []
+        self._deferred_hv_current: dict[str, ResolvedStep] = {}
         self._handlers: dict[str, Handler] = {
             "delay.wait": self._delay,
             "valve.open": self._valve_open,
@@ -91,6 +97,7 @@ class PrestartController:
         self.session = None
         self._grounded_plasma_switches.clear()
         self._receipts = []
+        self._deferred_hv_current.clear()
         self.state = {
             "state": "running", "running": True, "done": False, "primed": False,
             "cleanup_available": False,
@@ -135,6 +142,7 @@ class PrestartController:
                            session: ResolvedPrestart | None) -> None:
         """Execute cleanup once for the captured session generation."""
         await self.stop()
+        self._deferred_hv_current.clear()
         self.state.update(state="aborting", running=False, primed=False,
                           cleanup_available=True,
                           phase="running abort sequence")
@@ -205,6 +213,8 @@ class PrestartController:
                 self.state.update(state="stopped", done=False, primed=False,
                                   phase="stopped")
                 return
+            if self._deferred_hv_current:
+                raise RuntimeError("HV current limit was not applied before pre-start completed")
             self.state.update(state="primed", done=True, primed=True,
                               phase="done - recipe primed")
             self.sup.report_event("recipe", f"pre-start complete: {session.name}")
@@ -259,6 +269,15 @@ class PrestartController:
                 else:
                     await handler(step)
                 self._receipt(step, "ok", cleanup=cleanup)
+            except PrestartStepDeferred as exc:
+                if cleanup:
+                    error = f"{step.summary}: {exc}"
+                    errors.append(error)
+                    self.sup.report_event("error", f"pre-start cleanup step failed: {error}")
+                    self._receipt(step, "error", error=error, cleanup=True)
+                else:
+                    self.sup.report_event("flag", f"pre-start step deferred: {step.summary}: {exc}")
+                    self._receipt(step, "deferred", error=str(exc))
             except Exception as exc:
                 error = f"{step.summary}: {type(exc).__name__}: {exc}"
                 self.sup.report_event("error", f"pre-start step failed: {error}")
@@ -318,7 +337,43 @@ class PrestartController:
         await self.sup.set_supply_voltage(target_device_id(step.target), step.args["volts"])
 
     async def _supply_current(self, step: ResolvedStep) -> None:
-        await self.sup.set_supply_current(target_device_id(step.target), step.args["amps"])
+        supply_id = target_device_id(step.target)
+        try:
+            await self.sup.set_supply_current(supply_id, step.args["amps"])
+        except RuntimeError as exc:
+            supply = self.sup.supplies.get(supply_id)
+            if (self.session is not None
+                    and self.session.recipe_id == CURRENT_RECIPE_ID
+                    and step.on_error == "continue" and not self.stop_event.is_set()
+                    and getattr(getattr(supply, "cfg", None), "driver", None) == "glassman_fl"
+                    and "Glassman HV must be on at the front panel" in str(exc)
+                    and supply.status().get("hv_on") is False):
+                self._deferred_hv_current[supply_id] = step
+                raise PrestartStepDeferred("waiting for front-panel HV on") from exc
+            raise
+
+    async def _apply_deferred_hv_current(self) -> None:
+        for supply_id, step in list(self._deferred_hv_current.items()):
+            if self.stop_event.is_set():
+                return
+            supply = self.sup.supplies[supply_id]
+            if supply.status().get("hv_on") is not True:
+                continue
+            try:
+                # Supervisor and the Glassman driver query fresh status before
+                # writing; a stale telemetry observation cannot enable HV.
+                await self.sup.set_supply_current(supply_id, step.args["amps"])
+            except RuntimeError as exc:
+                if ("Glassman HV must be on at the front panel" in str(exc)
+                        and supply.status().get("hv_on") is False):
+                    continue
+                raise
+            self._deferred_hv_current.pop(supply_id, None)
+            for receipt in reversed(self._receipts):
+                if receipt["step_id"] == step.id and receipt["section"] == "start":
+                    receipt.update(status="ok", error="")
+                    self.state["receipts"] = list(self._receipts)
+                    break
 
     async def _arm_bias(self, step: ResolvedStep) -> None:
         await self.sup.arm_sample_bias(
@@ -356,9 +411,11 @@ class PrestartController:
                 t0 = self.clock.elapsed()
                 if await self._nap(0.2):
                     return
+                await self._apply_deferred_hv_current()
                 dt = self.clock.elapsed() - t0
                 current = self.sup.snapshot.get(ammeter)
-                lit = isinstance(current, (int, float)) and abs(current) >= minimum
+                lit = (not self._deferred_hv_current
+                       and isinstance(current, (int, float)) and abs(current) >= minimum)
                 self.state.update(current=(float(current)
                                            if isinstance(current, (int, float)) else None),
                                   lit=lit)

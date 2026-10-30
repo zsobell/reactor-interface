@@ -435,9 +435,8 @@ class DataLogger:
 
     @record_errors("run")
     def start_run_export(self, recipe_name: str, started_at: float) -> Path:
-        """Open a per-run CSV, named on the run's own start time so it lines up
-        with what the browser would otherwise have downloaded (and survives a
-        closed browser, which the client-side download does not).
+        """Open a per-run CSV, named on the run's own start time and saved
+        independently of the browser session.
 
         Independent of the operator-toggled logger above and of
         write_run_params' one-time settings report - this is the actual

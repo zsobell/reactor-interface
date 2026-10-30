@@ -235,8 +235,14 @@ to the serial port; subsequent current Sets leave all digital control bits
 clear. The command queries the supply afterward and reports an error if HV
 has switched off. Zach authorized this guarded transfer on 2026-10-27 after
 a live 100 mA Set was observed to drop HV during the local-to-remote transfer.
-The built-in ALD/CVD pre-start applies the
-Advanced Controls current default (200 mA initially) before the beam strike.
+The built-in ALD/CVD pre-start applies the Advanced Controls current default
+(200 mA initially) before the beam strike when HV is already on. If HV is off,
+that current-limit step is deferred; pre-start continues into its strike loop
+while the operator turns HV on at the front panel. Once fresh Glassman status
+confirms HV on, pre-start applies the configured current limit through the
+guarded current command before the plasma hold can complete. It applies the
+deferred command once; abort cancels it. A live header warning shows HV off
+during pre-start and clears when fresh status reports HV on.
 The dedicated `POST /api/hv/{id}/current` route accepts `milliamps`; the
 Keithley `/api/supply/{id}/current` route accepts amperes and refuses Glassman.
 The Glassman CC/CV state uses the same card indicator as the Keithleys, from

@@ -64,6 +64,12 @@ git diff --check
 For a localized change, run the directly affected test modules and nearby
 integration tests. Do not run the full repository suite by default; it is large
 and is appropriate for broad changes, release validation, or a required CI gate.
+In Codex's native Windows restricted sandbox, Python's `tempfile` creates
+mode-0700 directories that the sandbox process cannot reopen. Run Python test
+modules that use `TemporaryDirectory` or `mkdtemp` with escalated command
+permissions from the first invocation; changing `TEMP` to a workspace path does
+not fix the directory ACL. This applies to `VirtualReactor` tests and validation
+groups that include these tests as well.
 For example, a restart shutdown change uses `test_server_shutdown`,
 `test_keithley_reconnect`, and `test_telemetry`. Use
 `python -m reactor.testing.validate control` (or `recording`, `api`,

@@ -367,7 +367,7 @@ def current_prestart_recipe(cfg: ReactorConfig) -> PrestartRecipe:
             steps.append(PrestartStep(
                 id=f"default-{ps.id}", target=f"supply:{ps.id}", action=action,
                 args={field_name: ref(param)},
-                on_error="stop" if ps.driver == "glassman_fl" else "continue"))
+                on_error="continue"))
         if not ps.prestart_output:
             continue
         if ps.sample_bias:

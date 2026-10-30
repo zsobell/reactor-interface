@@ -187,11 +187,9 @@ Everything is editable **in the interface** — no YAML/code editing for normal 
   (dashed grey = scheduled, solid red = reignite). Drag to zoom, arrow keys
   to pan/zoom while hovering, hover for a value readout, "Follow live" to
   re-attach.
-- When a run ends, a **CSV auto-downloads** (elapsed time zeroed to Start, stage
-  temp, sample current, precursor dosing, precursor pressure, chamber pressure).
-  The server independently writes its own, richer copy the moment any run
-  starts and closes it however the run ends — so a closed browser no longer
-  loses the trace.
+- The server automatically saves a named **run CSV** in that run's data folder,
+  starting with the first sample and closing the file however the run ends.
+  The trace is retained even if the browser closes.
 
 `_run.csv` is the **raw** trace (every tick, reignites and pauses included, each
 named in `recipe_step`); `_bycycle.csv` is the same minus anything frozen, keyed

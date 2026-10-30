@@ -605,13 +605,7 @@ Follow-live button, hover crosshair with a readout box, and drag-to-zoom
 (box-select a time range; arrow keys pan/zoom while hovering that chart). No
 wheel-zoom — it would hijack page scroll.
 
-**Two independent copies of every run's trace, both automatic:**
-- **Client-side auto-download**: `recordRun()` accumulates a per-run buffer
-  from the moment Start is pressed (keyed on `recipe.started_at`); on
-  completion `downloadRun()` writes a CSV — columns `elapsed_s,
-  aperture_lifetime_s, stage_temp_c, sample_current_a, precursor_dosing,
-  precursor_pressure_torr, chamber_pressure_torr`, time zeroed to the Start
-  press. Requires the browser to stay open through the run.
+**Automatic run trace:**
 - **Server-side run export** (`DataLogger.start_run_export` /
   `write_run_sample` / `stop_run_export`, in `reactor/datalog.py`): opens
   `data/<run>/<stem>_run.csv` the instant *any* recipe
@@ -619,8 +613,7 @@ wheel-zoom — it would hijack page scroll.
   just EE-ALD/EE-CVD), and appends one row per telemetry tick (5 Hz
   default) straight from the same sample dict the trend buffer uses — no
   extra device I/O. Columns are the same sample dict, dynamically
-  discovered, plus `recipe_cycle`/`cycle_number`/`recipe_step`, so it's a
-  *richer* trace than the client's fixed columns. Every EE-ALD and EE-CVD
+  discovered, plus `recipe_cycle`/`cycle_number`/`recipe_step`. Every EE-ALD and EE-CVD
   row also carries `aperture_lifetime_s`, the projected cumulative runtime of
   the installed HCPES aperture at that sample; the by-cycle export retains it.
 

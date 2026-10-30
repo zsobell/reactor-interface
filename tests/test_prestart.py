@@ -68,6 +68,61 @@ async def main() -> int:
                 str(vr.sup.prestart.get("phase")))
         await vr.sup.abort_prestart()
 
+        c.section("HV off defers current setting until manual turn-on")
+        vr.supplies["hv"].hv_on = False
+        vr.instruments["ammeter"].value = 0.0
+        current_calls_before = len(vr.supplies["hv"].current_calls)
+        tick_task = await autotick(vr, period=0.05)
+        try:
+            await vr.sup.start_prestart(dict(PARAMS, plasma_current_ma=135.0))
+            reached_strike = await wait_for(
+                lambda: vr.sup.prestart.get("strikes", 0) > 0, 3.0)
+            c.check("HV off does not stop the sequence", reached_strike
+                    and vr.sup.prestart.get("running") is True)
+            c.check("current command is deferred with a receipt",
+                    any(r["step_id"] == "default-hv" and r["status"] == "deferred"
+                        for r in vr.sup.prestart.get("receipts", [])))
+            vr.supplies["hv"].hv_on = True  # operator action during pre-start
+            c.check("front-panel HV on triggers the configured 135 mA command",
+                    await wait_for(lambda: len(vr.supplies["hv"].current_calls)
+                                   == current_calls_before + 1, 3.0)
+                    and vr.supplies["hv"].current_calls[-1] == 135.0)
+            c.check("deferred receipt resolves after current is set",
+                    any(r["step_id"] == "default-hv" and r["status"] == "ok"
+                        for r in vr.sup.prestart.get("receipts", [])))
+            vr.instruments["ammeter"].value = 1.0e-3
+            c.check("pre-start completes after operator turns HV on",
+                    await wait_for(lambda: vr.sup.prestart.get("done"), 3.0)
+                    and vr.sup.prestart.get("primed") is True)
+            c.check("HV current was commanded exactly once",
+                    len(vr.supplies["hv"].current_calls) == current_calls_before + 1)
+        finally:
+            tick_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tick_task
+            await vr.sup.abort_prestart()
+
+        c.section("abort before front-panel HV on cancels deferred command")
+        vr.supplies["hv"].hv_on = False
+        vr.instruments["ammeter"].value = 0.0
+        current_calls_before = len(vr.supplies["hv"].current_calls)
+        tick_task = await autotick(vr, period=0.05)
+        try:
+            await vr.sup.start_prestart(PARAMS)
+            c.check("pre-start reaches strike while HV is off",
+                    await wait_for(lambda: vr.sup.prestart.get("strikes", 0) > 0, 3.0))
+            await vr.sup.abort_prestart()
+            vr.supplies["hv"].hv_on = True
+            await asyncio.sleep(0.3)
+            c.check("abort prevents a later current command",
+                    len(vr.supplies["hv"].current_calls) == current_calls_before
+                    and vr.sup.prestart.get("cleanup_available") is False
+                    and vr.sup.prestart.get("state") == "aborted")
+        finally:
+            tick_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tick_task
+
         c.section("2. plasma never lights: retries until stopped, no timeout")
         vr.instruments["ammeter"].value = 0.0
         tick_task = await autotick(vr, period=0.05)

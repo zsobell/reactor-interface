@@ -3,6 +3,7 @@ import {readFile} from 'node:fs/promises';
 
 const html = await readFile(new URL('../../reactor/server/static/index.html', import.meta.url), 'utf8');
 const elements = new Map();
+let downloadClicks = 0;
 function element(tag, attrs = '') {
   return {
     tagName: tag.toUpperCase(), value: /\bvalue="([^"]*)"/.exec(attrs)?.[1] || '',
@@ -14,6 +15,7 @@ function element(tag, attrs = '') {
     removeEventListener(name) {delete this.events[name];},
     querySelectorAll() {return [];}, querySelector() {return null;},
     appendChild(child) {this.children.push(child);}, replaceChildren(...children) {this.children=children;},
+    click() {if (tag === 'a' && this.download) downloadClicks++;}, remove() {},
     setAttribute() {}, getBoundingClientRect() {return {left: 0};},
   };
 }
@@ -35,12 +37,23 @@ globalThis.window = {
   open(url,name){opened.push({url,name});return {focus(){}};},
 };
 globalThis.location = {protocol: 'https:', host: 'reactor.test'};
+let lifecycleConfirm = '';
+globalThis.confirm = message => {
+  if (message.startsWith('Restart the reactor server?')) {
+    lifecycleConfirm = message;
+    return false;
+  }
+  return true;
+};
 const stored = new Map();
 globalThis.localStorage = {getItem: k => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v)};
 const restartStored = new Map([['reactor.restart.success', '2.0.2']]);
 globalThis.sessionStorage = {getItem: k => restartStored.get(k) ?? null,
   setItem: (k, v) => restartStored.set(k, v), removeItem: k => restartStored.delete(k)};
 const requested = [];
+const prestartRecipe = {schema_version:1, id:'current-prestart',
+  name:'Current pre-start', description:'', revision:1, builtin:true,
+  parameters:[], start_steps:[], abort_steps:[]};
 const hcpesPlan = {schema_version:1, id:'current-hcpes-plan', name:'Current HCPES template',
   description:'', revision:1, builtin:true, prestart_recipe_id:'current-hcpes-prestart',
   stage_polarity:1, settings:{establishment:{stable_window_s:20,maximum_wait_s:60,max_drift_a_per_min:.0001},
@@ -50,6 +63,11 @@ const hcpesPlan = {schema_version:1, id:'current-hcpes-plan', name:'Current HCPE
     reignite_settle_s:1, qualified_samples:5}, axes:[]};
 globalThis.fetch = async url => {
   requested.push(url);
+  if(url === '/api/prestart/capabilities')
+    return {ok:true, json:async () => ({schema_version:1, targets:[]})};
+  if(url === '/api/prestart/recipes')
+    return {ok:true, json:async () => ({schema_version:1,
+      selected_id:prestartRecipe.id, recipes:[prestartRecipe]})};
   if(url === '/api/errors/clear')
     return {ok:true, json:async () => ({ok:true, cleared_at:1700000050})};
   if(url === '/api/hcpes/capabilities')
@@ -61,6 +79,9 @@ globalThis.fetch = async url => {
     return {ok:true, json:async () => ({plan:hcpesPlan, axes:[], nesting:[],
       estimate:{points:1,parameter_changes:0,qualified_samples:5,
         best_case_s:20,startup_timeout_case_s:60}, cleanup:{}})};
+  if(url === '/api/prestart/preview')
+    return {ok:true, json:async () => ({name:'Current pre-start', revision:1,
+      start_steps:[], abort_steps:[]})};
   return {ok: true, json: async () => ({params: {}, samples: [],
     events: url === '/api/events' ? [{t: 1700000000, kind: 'startup', message: 'seeded startup event'}] : [],
     total_s: 2505})};
@@ -107,6 +128,32 @@ assert.equal(elements.get('pressure').textContent, '2.00e-8',
 assert.equal(elements.get('hwPressure').textContent, '2.00e-8',
   'the same telemetry frame updates Hardware');
 assert.ok(plotDraws > 0, 'the telemetry frame reaches the Run plot drawing path');
+await elements.get('aldStart').onclick();
+frame.recipe = {state:'running', recipe:'EE-ALD', started_at:1700000001,
+  cycle:1, cycles_total:1};
+sockets[0].onmessage({data:JSON.stringify(frame)});
+await elements.get('restartBtn').onclick();
+assert.match(lifecycleConfirm, /A RUN IS ACTIVE AND WILL BE ABORTED/,
+  'server restart warning still recognizes an active run');
+frame.recipe.state = 'done';
+sockets[0].onmessage({data:JSON.stringify(frame)});
+assert.equal(downloadClicks, 0,
+  'finishing a run does not prompt for a duplicate browser CSV');
+frame.recipe = {state:'idle', cycle:0, cycles_total:0};
+frame.prestart = {running:true, state:'running', phase:'striking plasma'};
+frame.power_supplies = [{id:'hv', driver:'glassman_fl', label:'HV supply',
+  hv_on:false, connected:true}];
+assert.match(control.liveAlerts(frame)[0].msg, /HV supply is off/,
+  'HV off during pre-start appears in the header');
+frame.power_supplies[0].hv_on = true;
+assert.equal(control.liveAlerts(frame).length, 0,
+  'turning HV on clears the live warning');
+frame.prestart = {running:false, state:'error', phase:'error: sensitive detail'};
+frame.power_supplies = [];
+sockets[0].onmessage({data:JSON.stringify(frame)});
+assert.equal(elements.get('preStatus').textContent, 'error',
+  'pre-start summary does not show the error detail');
+frame.prestart = {};
 frame.errors = [{t:1700000002, kind:'error', message:'old failure'}];
 sockets[0].onmessage({data:JSON.stringify(frame)});
 assert.match(elements.get('errors').innerHTML, /old failure/);
@@ -147,6 +194,11 @@ assert.match(control.liveAlerts(oldWorkerError)[0].msg,/old session/,
 oldWorkerError.logging.hcpes.active=false;
 assert.equal(control.liveAlerts(oldWorkerError).length,0,
   'HCPES error chip clears as soon as its recording owner closes');
+elements.get('preSection').open = false;
+await elements.get('preStartBtn').onclick();
+assert.ok(requested.includes('/api/prestart/start'), 'pre-start launch is sent');
+assert.equal(elements.get('preSection').open, false,
+  'starting pre-start leaves the recipe section collapsed');
 const formHandler = elements.get('aldParams').events.input;
 windowEvents.pagehide({persisted:true});
 assert.equal(sockets[0].closed, true, 'cached navigation suspends telemetry');

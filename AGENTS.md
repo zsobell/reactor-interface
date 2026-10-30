@@ -24,6 +24,13 @@ authoritative description of requested reactor behavior.
   affected tests and nearby integration tests before handoff; reserve the full
   repository suite for broad changes or required release/CI gates. Tests use
   fake devices and temporary files; software tests do not validate hardware.
+- In Codex on Windows, start Python tests that use `tempfile.TemporaryDirectory`
+  or `tempfile.mkdtemp` with escalated command permissions. The restricted
+  sandbox cannot reopen Python's mode-0700 temporary folders, even when their
+  parent is in the workspace. Request the test-only escalation on the first
+  invocation, including validation groups that contain those tests, rather
+  than waiting for an access-denied failure. Node and other tests that do not
+  create these folders stay at normal permissions.
 - Delegate bounded independent issues when authorized. Give agents distinct file
   ownership, review their changes and rerun integration checks before acceptance.
 - Use non-interactive file operations (`cp -f`, `mv -f`, `rm -f`; recursive forms

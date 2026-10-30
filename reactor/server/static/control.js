@@ -17,6 +17,7 @@ import {createRunGrowth} from "./run-growth.js";
 
 const $ = id => document.getElementById(id);
 let CFG = {};
+let lastRunState = "idle";
 const trend = [];
 const updateRunGrowth = createRunGrowth();
 
@@ -121,6 +122,7 @@ async function seedTrend(){
 
 // ---------------------------------------------------------------- render
 function render(s){
+  lastRunState = s.recipe?.state || "idle";
   $("siteName").textContent = s.site;
   banners(s); pressure(s); stage(s); hero(s); gauges(s); instruments(s); aux(s);
   devicePanels.supplies(s);
@@ -149,7 +151,6 @@ function render(s){
   for(const m of s.mfcs) sample["mfc_"+m.id] = s.snapshot[`mfc.${m.id}.flow`];  // actual flow, not setpoint
   trend.push(sample);
   if(trend.length > 18000) trend.shift();   // ~1 h at the 5 Hz publish rate
-  recordRun(s, sample);
   drawAllCharts();
 }
 
@@ -462,7 +463,7 @@ function recipe(s){
   pEl.textContent = pre.running
     ? (pre.phase || "running") + (pre.strikes ? ` · ${pre.strikes} strikes` : "")
     : (pre.primed ? `primed · ${pre.recipe_name || "recipe complete"}`
-      : (pre.state === "error" ? (pre.phase || "error") : (pre.state || "idle")));
+      : (pre.state || "idle"));
   pEl.style.color = pre.running ? "var(--hot)" : "var(--dim)";
 
   // Standalone fill (pre-run precursor charge): available only when no run is
@@ -547,62 +548,6 @@ function fmtDur(s){
            : `${m}m ${String(sec).padStart(2,"0")}s`;
 }
 
-
-// ------------------------------------------------ run recording + auto-download
-let runData = null;     // {startT, rows:[...]} while a run is active
-let lastRunState = "idle";
-/* Set when THIS browser presses Start (or Start CVD). Only that browser saves
-   the client-side CSV at run end - see recordRun. Remote viewers over Tailscale
-   were all getting a save dialog for runs they had nothing to do with. */
-let iStartedThisRun = false;
-function recordRun(s, sample){
-  const r = s.recipe;
-  const running = ["running","paused","aborting"].includes(r.state);
-  if(running && r.started_at && (!runData || runData.startT !== r.started_at)){
-    runData = {startT: r.started_at, name: r.recipe, rows: []};   // new run began
-  }
-  if(runData && running){
-    runData.rows.push({
-      t: sample.t, stage_temp: sample.stage_temp, current: sample.current,
-      dosing: sample.dosing, prec_pressure: sample.prec_pressure,
-      pressure: sample.pressure,
-      aperture_lifetime_s: sample.aperture_lifetime_s,
-    });
-  }
-  // on transition out of a running state into done/idle/error, export
-  if(runData && !running && ["done","idle","error"].includes(r.state)
-     && lastRunState !== r.state){
-    /* Only the browser that STARTED the run saves a copy.
-       Every connected client used to fire this, so every laptop tailscaled
-       into the server got a save dialog when a run ended - including ones
-       just watching. The server-side export (data/<run>/..._run.csv) is the
-       authoritative copy and is richer than this one anyway; this is a
-       convenience for whoever pressed Start. */
-    if(runData.rows.length && iStartedThisRun) downloadRun(runData);
-    iStartedThisRun = false;
-    runData = null;
-  }
-  lastRunState = r.state;
-}
-function downloadRun(rd){
-  const cols = ["elapsed_s","aperture_lifetime_s","stage_temp_c","sample_current_a","precursor_dosing",
-                "precursor_pressure_torr","chamber_pressure_torr"];
-  const fmt = v => (v==null||Number.isNaN(v)) ? "" : v;
-  const lines = [cols.join(",")];
-  for(const r of rd.rows){
-    lines.push([ (r.t - rd.startT).toFixed(3), fmt(r.aperture_lifetime_s),
-                 fmt(r.stage_temp), fmt(r.current),
-                 fmt(r.dosing), fmt(r.prec_pressure), fmt(r.pressure) ].join(","));
-  }
-  const stamp = new Date(rd.startT*1000).toISOString().slice(0,19).replace(/[:T]/g,"-");
-  const blob = new Blob([lines.join("\n")], {type:"text/csv"});
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `run_${stamp}.csv`;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
-  toast(`Run data downloaded (${rd.rows.length} rows)`, true);
-}
 
 function logging(s){
   const L = s.logging;
@@ -712,6 +657,7 @@ function tr(a,b,c,state,detail){
 export function liveAlerts(s){
   const out = [];                            // {msg, bad} - bad = red, else amber
   const r = s.recipe || {};
+  const pre = s.prestart || {};
   const logging = s.logging || {};
   // DataLogger intentionally latches errors for the Diagnostics history. A
   // latched failure is not necessarily wrong RIGHT NOW, so only promote it to
@@ -731,6 +677,9 @@ export function liveAlerts(s){
       out.push({msg:`Recording failure (${stream}): ${error}`, bad:true});
 
   if(r.state === "error" && r.error) out.push({msg: r.error, bad: true});
+  if(pre.running && (s.power_supplies || []).some(p =>
+      p.driver === "glassman_fl" && p.hv_on === false))
+    out.push({msg: "HV supply is off", bad: true});
 
   // The operator's example: precursor fill pressure off its setpoint. This is
   // the same flag the fill readout shows, read from the same field.
@@ -1038,7 +987,6 @@ $("aldStart").onclick = async () => {
     + `\n\n${what}`)) return;
   try{
     await post(cvd ? "/api/run/cvd" : "/api/run/ald", params);
-    iStartedThisRun = true;       // so only this browser saves the CSV at the end
     await runForms.refreshRunName(true);   // this name is now used; offer the next one
   }catch(_){}
 };
@@ -1060,11 +1008,9 @@ $("preStartBtn").onclick = async () => {
       ...launch.values, recipe_id:launch.recipe_id,
       recipe_revision:launch.recipe_revision,
     });
-    $("preSection").open = true;
   }catch(_){}
 };
 function confirmServerLifecycle(restarting){
-  // lastRunState is maintained by recordRun() on every frame.
   const running = ["running", "paused", "aborting"].includes(lastRunState);
   const lines = [
     restarting ? "Restart the reactor server?" : "Shut down the reactor server?",
